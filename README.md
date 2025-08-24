@@ -1,4 +1,4 @@
-# Misc Utils
+# Misc. Utils
 A collection of miscellaneous scripts for Linux gaming and system tasks. These are low-effort and largely unpolished scripts, but I found them useful, so you might also.
 
 ## Scripts
@@ -9,10 +9,18 @@ A collection of miscellaneous scripts for Linux gaming and system tasks. These a
 | Emulation | [nfs_mount_batocera](nfs_mount_batocera) | Mounts NFS exports locally as a client on Batocera Linux, e.g. for Kodi |
 
 ## Installation
-Clone the whole repo: `git clone https://github.com/cwadge/misc-utils.git`
+Clone the whole repo:
+```bash
+git clone https://github.com/cwadge/misc-utils.git
+```
+
+or download an individual script, e.g.
+```bash
+wget https://raw.githubusercontent.com/cwadge/misc-utils/main/set-rdna-oc-fan.sh
+```
 
 ## Usage
-Navigate to the script's folder and run it with appropriate arguments. See each script's `--help` or folder README for details.
+Navigate to the script's folder and run it with appropriate arguments. See each script's `--help` or inline comments for details.
 
 ## Contributing
 The usual: you're welcome to fork, submit issues, PRs, etc.
