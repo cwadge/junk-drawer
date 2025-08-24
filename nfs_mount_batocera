@@ -1,0 +1,96 @@
+#!/bin/bash
+
+# NFS Mount Service Script for Batocera
+# Place in /userdata/system/services/nfs_mount
+# Make executable: chmod +x /userdata/system/services/nfs_mount
+# Runs automatically at boot (start) and shutdown (stop)
+
+NFS_SERVER="" # Server hostname or IP
+NFS_MOUNTS="" # Mount point(s) for NFS export(s), space separated
+NFS_TARGET="/mnt/nfs" # The directory where we mount each export
+NFS_OPTIONS="vers=4,ro,timeo=10,rsize=1048576,wsize=1048576,async,proto=tcp,intr,noatime,nodev,nosuid"
+LOGFILE="/var/log/nfs_mount.log"
+MAX_ATTEMPTS=120  # ~10 minute with 5s sleep
+
+# Functions
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $@" >> "$LOGFILE"
+}
+
+mount_all() {
+    # Wait for server
+    local attempts=$MAX_ATTEMPTS
+    while ! ping -q -c 1 "$NFS_SERVER" &>/dev/null && [ $attempts -gt 0 ]; do
+        log "Waiting for $NFS_SERVER (attempts left: $attempts)"
+        sleep 5
+        attempts=$((attempts-1))
+    done
+    if [ $attempts -eq 0 ]; then
+        log "Failed to reach $NFS_SERVER after $MAX_ATTEMPTS attempts"
+        return 1
+    fi
+
+    log "Mounting NFS exports"
+    for NFS_MOUNT in ${NFS_MOUNTS}; do
+        local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
+        mkdir -p "$mountpoint" || { log "Failed to create $mountpoint"; continue; }
+        if mount -t nfs4 -o "$NFS_OPTIONS" "${NFS_SERVER}:/${NFS_MOUNT}" "$mountpoint"; then
+            log "Mounted ${NFS_SERVER}:/${NFS_MOUNT} to $mountpoint"
+        else
+            log "Failed to mount ${NFS_SERVER}:/${NFS_MOUNT} to $mountpoint"
+        fi
+    done
+}
+
+unmount_all() {
+    log "Unmounting NFS exports"
+    for NFS_MOUNT in ${NFS_MOUNTS}; do
+        local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
+        if grep -qs "$mountpoint " /proc/mounts; then
+            if umount "$mountpoint"; then
+                log "Unmounted $mountpoint"
+            else
+                log "Failed to unmount $mountpoint, trying lazy unmount"
+                umount -l "$mountpoint" && log "Lazy unmounted $mountpoint"
+            fi
+        fi
+    done
+}
+
+status() {
+    echo "NFS Mount Status:"
+    for NFS_MOUNT in ${NFS_MOUNTS}; do
+        local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
+        if grep -qs "$mountpoint " /proc/mounts; then
+            echo "$mountpoint: Mounted (from ${NFS_SERVER}:/${NFS_MOUNT})"
+        else
+            echo "$mountpoint: Not mounted"
+        fi
+    done
+    echo "Check $LOGFILE for details."
+}
+
+# Main logic
+case "$1" in
+    start)
+        log "Starting NFS mounts"
+        mount_all
+        ;;
+    stop)
+        unmount_all
+        ;;
+    restart|reload)
+        log "Remounting NFS exports"
+        unmount_all
+        mount_all
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0
