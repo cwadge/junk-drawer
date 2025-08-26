@@ -18,15 +18,15 @@ set -euo pipefail
 ## DEFAULT VARIABLES ##
 # These can be overridden by config file or command-line arguments
 FLUIDSYNTH="/usr/bin/fluidsynth"
-SOUNDFONT="/usr/share/sounds/sf2/FatBoy.sf2"
+SOUNDFONT="/usr/share/sounds/sf2/default-GM.sf2"
 PROCNICE="10"
 SAMPLERATE="44100"
 FSGAIN="0.5"
 FSCHORUS="yes"
 FSREVERB="yes"
-THREADMAX=""
-TIMEOUT="30"  # 30-second timeout per file to prevent hung notes; increase for slow hardware or long MIDI files
-OUTPUT_FORMAT="wav"  # Default output format
+THREADMAX="" # Leave blank for auto-detection
+TIMEOUT="30"  # 30-second timeout per file to prevent hung notes; increase for slow hardware or long MIDI
+OUTPUT_FORMAT="wav"  # Default output format is raw WAV straight out of fluidsynth
 CONFIG_FILE="$HOME/.midi2wav.conf"
 
 ## COLOR CODES ##
