@@ -120,10 +120,13 @@ load_config() {
 		info "Loading configuration from $CONFIG_FILE"
 		# Source the config file, ignoring comments and empty lines
 		while IFS='=' read -r key value; do
-			# Skip empty lines and comments
-			[[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+			# Skip empty lines, comments, or lines without an equals sign
+			[[ -z "$key" || "$key" =~ ^[[:space:]]*# || -z "$value" ]] && continue
 			key=$(echo "$key" | tr -d '[:space:]')
-			value=$(echo "$value" | tr -d '[:space:]')
+			# Remove surrounding quotes and leading/trailing whitespace from value
+			value=$(echo "$value" | sed -e 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"\(.*\)"$/\1/;s/^'\''\(.*\)'\''$/\1/' || warn "Failed to parse config value for $key")
+			# Skip if value is empty after processing
+			[[ -z "$value" ]] && { warn "Empty value for $key in config file, skipping"; continue; }
 			case "$key" in
 				FLUIDSYNTH) FLUIDSYNTH="$value" ;;
 				SOUNDFONT) SOUNDFONT="$value" ;;
@@ -135,11 +138,13 @@ load_config() {
 				THREADMAX) THREADMAX="$value" ;;
 				TIMEOUT) TIMEOUT="$value" ;;
 				OUTPUT_FORMAT) OUTPUT_FORMAT="$value" ;;
+				*) warn "Unknown config key: $key, skipping" ;;
 			esac
 		done < "$CONFIG_FILE"
 	else
 		info "No config file found at $CONFIG_FILE; using defaults"
 	fi
+	info "Configuration loaded: FLUIDSYNTH=$FLUIDSYNTH, SOUNDFONT=$SOUNDFONT, OUTPUT_FORMAT=$OUTPUT_FORMAT"
 }
 
 # Detect number of CPU threads
@@ -218,6 +223,9 @@ midi_render() {
 # Trap Ctrl+C (SIGINT) for graceful termination
 trap cleanup SIGINT
 
+# Load configuration file
+load_config
+
 # Parse command-line arguments
 TEMP=$(getopt -o hvc:f:s:r:g:t:n:o: -l help,version,config:,fluidsynth:,soundfont:,sample-rate:,gain:,chorus:,reverb:,threads:,nice:,output-format:,timeout: -n "$0" -- "$@")
 if [[ $? != 0 ]]; then error "Invalid arguments"; fi
@@ -247,9 +255,6 @@ while true; do
 		*) error "Internal error in argument parsing" ;;
 	esac
 done
-
-# Load configuration file
-load_config
 
 # Validate and normalize chorus/reverb settings
 FSCHORUS=$(echo "$FSCHORUS" | tr '[:upper:]' '[:lower:]')
