@@ -7,6 +7,7 @@ A collection of miscellaneous scripts for Linux gaming and system tasks. These a
 | Gaming   | [psp-shrink-ray.sh](psp-shrink-ray.sh) | Compresses PS2/PSP images to CHD format, deleting originals on success |
 | Hardware | [set-rdna-oc-fan.sh](set-rdna-oc-fan.sh) | Creates and applies overclocking / fan profiles for AMD RDNA GPUs |
 | Emulation | [nfs_mount_batocera](nfs_mount_batocera) | Mounts NFS exports locally as a client on Batocera Linux, e.g. for Kodi |
+| Multimedia | [midi2wav.sh](midi2wav.sh) | Convert MIDI file(s) to digital audio like WAV, FLAC, or MP3 |
 
 ## Installation
 Clone the whole repo:
