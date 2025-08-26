@@ -40,42 +40,42 @@ NC='\033[0m' # No Color
 
 # Print error message and exit
 error() {
-    echo -e "${RED}[ERROR] $1${NC}" >&2
-    exit 1
+	echo -e "${RED}[ERROR] $1${NC}" >&2
+	exit 1
 }
 
 # Print warning message
 warn() {
-    echo -e "${YELLOW}[WARNING] $1${NC}" >&2
+	echo -e "${YELLOW}[WARNING] $1${NC}" >&2
 }
 
 # Print success message (green)
 success() {
-    echo -e "${GREEN}[SUCCESS] $1${NC}"
+	echo -e "${GREEN}[SUCCESS] $1${NC}"
 }
 
 # Print info message (cyan)
 info() {
-    echo -e "${CYAN}[INFO] $1${NC}"
+	echo -e "${CYAN}[INFO] $1${NC}"
 }
 
 # Cleanup function for SIGINT (Ctrl+C)
 cleanup() {
-    echo -e "${RED}[INTERRUPTED] Caught Ctrl+C, terminating all rendering processes...${NC}" >&2
-    # Send SIGTERM to all child processes in the process group
-    pkill -P $$ >/dev/null 2>&1
-    # Wait briefly and check for lingering fluidsynth/ffmpeg processes
-    sleep 1
-    if pgrep -u "$USER" -f "(fluidsynth|ffmpeg)" >/dev/null 2>&1; then
-        echo -e "${YELLOW}[WARNING] Some processes still running, sending SIGKILL...${NC}" >&2
-        pkill -9 -u "$USER" -f "(fluidsynth|ffmpeg)" >/dev/null 2>&1
-    fi
-    exit 130  # Standard exit code for SIGINT
+	echo -e "${RED}[INTERRUPTED] Caught Ctrl+C, terminating all rendering processes...${NC}" >&2
+	# Send SIGTERM to all child processes in the process group
+	pkill -P $$ >/dev/null 2>&1
+	# Wait briefly and check for lingering fluidsynth/ffmpeg processes
+	sleep 1
+	if pgrep -u "$USER" -f "(fluidsynth|ffmpeg)" >/dev/null 2>&1; then
+		echo -e "${YELLOW}[WARNING] Some processes still running, sending SIGKILL...${NC}" >&2
+		pkill -9 -u "$USER" -f "(fluidsynth|ffmpeg)" >/dev/null 2>&1
+	fi
+	exit 130  # Standard exit code for SIGINT
 }
 
 # Print help message
 print_help() {
-    cat << EOF
+	cat << EOF
 Usage: $0 [OPTIONS] [FILE|DIRECTORY|PATTERN ...]
 
 Description: A multi-threaded front-end to render MIDI files to WAV or compressed audio formats.
@@ -103,113 +103,113 @@ Dependencies:
   - bash
   - ffmpeg (for mp3/flac output)
 EOF
-    exit 0
+exit 0
 }
 
 # Print version information
 print_version() {
-    echo -e "${CYAN}midi2wav v2.0 - A multi-threaded MIDI to WAV encoder${NC}"
-    echo "By Chris Wadge, 2010-2025"
-    echo "Licensed under the MIT License"
-    exit 0
+	echo -e "${CYAN}midi2wav v2.0 - A multi-threaded MIDI to WAV encoder${NC}"
+	echo "By Chris Wadge, 2010-2025"
+	echo "Licensed under the MIT License"
+	exit 0
 }
 
 # Load configuration from file
 load_config() {
-    if [[ -r "$CONFIG_FILE" ]]; then
-        info "Loading configuration from $CONFIG_FILE"
-        # Source the config file, ignoring comments and empty lines
-        while IFS='=' read -r key value; do
-            # Skip empty lines and comments
-            [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
-            key=$(echo "$key" | tr -d '[:space:]')
-            value=$(echo "$value" | tr -d '[:space:]')
-            case "$key" in
-                FLUIDSYNTH) FLUIDSYNTH="$value" ;;
-                SOUNDFONT) SOUNDFONT="$value" ;;
-                PROCNICE) PROCNICE="$value" ;;
-                SAMPLERATE) SAMPLERATE="$value" ;;
-                FSGAIN) FSGAIN="$value" ;;
-                FSCHORUS) FSCHORUS="$value" ;;
-                FSREVERB) FSREVERB="$value" ;;
-                THREADMAX) THREADMAX="$value" ;;
-                TIMEOUT) TIMEOUT="$value" ;;
-                OUTPUT_FORMAT) OUTPUT_FORMAT="$value" ;;
-            esac
-        done < "$CONFIG_FILE"
-    else
-        info "No config file found at $CONFIG_FILE; using defaults"
-    fi
+	if [[ -r "$CONFIG_FILE" ]]; then
+		info "Loading configuration from $CONFIG_FILE"
+		# Source the config file, ignoring comments and empty lines
+		while IFS='=' read -r key value; do
+			# Skip empty lines and comments
+			[[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+			key=$(echo "$key" | tr -d '[:space:]')
+			value=$(echo "$value" | tr -d '[:space:]')
+			case "$key" in
+				FLUIDSYNTH) FLUIDSYNTH="$value" ;;
+				SOUNDFONT) SOUNDFONT="$value" ;;
+				PROCNICE) PROCNICE="$value" ;;
+				SAMPLERATE) SAMPLERATE="$value" ;;
+				FSGAIN) FSGAIN="$value" ;;
+				FSCHORUS) FSCHORUS="$value" ;;
+				FSREVERB) FSREVERB="$value" ;;
+				THREADMAX) THREADMAX="$value" ;;
+				TIMEOUT) TIMEOUT="$value" ;;
+				OUTPUT_FORMAT) OUTPUT_FORMAT="$value" ;;
+			esac
+		done < "$CONFIG_FILE"
+	else
+		info "No config file found at $CONFIG_FILE; using defaults"
+	fi
 }
 
 # Detect number of CPU threads
 detect_threads() {
-    if [[ -z "$THREADMAX" ]]; then
-        if [[ "$(uname)" == "Linux" ]]; then
-            THREADMAX=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)
-        elif [[ "$(uname)" =~ (BSD|Darwin) ]]; then
-            THREADMAX=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
-        else
-            warn "Unable to detect CPU threads; falling back to 1 thread"
-            THREADMAX=1
-        fi
-    elif ! [[ "$THREADMAX" =~ ^[0-9]+$ ]] || (( THREADMAX < 1 )); then
-        warn "Invalid thread count ($THREADMAX); falling back to 1 thread"
-        THREADMAX=1
-    fi
-    info "Using $THREADMAX rendering threads"
+	if [[ -z "$THREADMAX" ]]; then
+		if [[ "$(uname)" == "Linux" ]]; then
+			THREADMAX=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo)
+		elif [[ "$(uname)" =~ (BSD|Darwin) ]]; then
+			THREADMAX=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
+		else
+			warn "Unable to detect CPU threads; falling back to 1 thread"
+			THREADMAX=1
+		fi
+	elif ! [[ "$THREADMAX" =~ ^[0-9]+$ ]] || (( THREADMAX < 1 )); then
+		warn "Invalid thread count ($THREADMAX); falling back to 1 thread"
+		THREADMAX=1
+	fi
+	info "Using $THREADMAX rendering threads"
 }
 
 # Sanity checks for dependencies
 sanity_check() {
-    if ! command -v bash >/dev/null 2>&1; then
-        error "Bourne Again SHell (bash) not found"
-    fi
-    if [[ ! -x "$FLUIDSYNTH" ]]; then
-        error "FluidSynth not found at $FLUIDSYNTH"
-    fi
-    if [[ ! -r "$SOUNDFONT" ]]; then
-        error "SoundFont not found at $SOUNDFONT"
-    fi
-    if [[ "$OUTPUT_FORMAT" != "wav" ]]; then
-        if ! command -v ffmpeg >/dev/null 2>&1; then
-            error "ffmpeg required for $OUTPUT_FORMAT output format"
-        fi
-    fi
-    info "All dependencies satisfied"
+	if ! command -v bash >/dev/null 2>&1; then
+		error "Bourne Again SHell (bash) not found"
+	fi
+	if [[ ! -x "$FLUIDSYNTH" ]]; then
+		error "FluidSynth not found at $FLUIDSYNTH"
+	fi
+	if [[ ! -r "$SOUNDFONT" ]]; then
+		error "SoundFont not found at $SOUNDFONT"
+	fi
+	if [[ "$OUTPUT_FORMAT" != "wav" ]]; then
+		if ! command -v ffmpeg >/dev/null 2>&1; then
+			error "ffmpeg required for $OUTPUT_FORMAT output format"
+		fi
+	fi
+	info "All dependencies satisfied"
 }
 
 # Render a single MIDI file
 midi_render() {
-    local file="$1"
-    if [[ ! -r "$file" ]]; then
-        warn "Unable to read file: $file"
-        return 1
-    fi
-    local base="${file%.[mM][iI][dD]}"
-    local wavfile="${base}.wav"
-    local outfile="${base}.${OUTPUT_FORMAT}"
+	local file="$1"
+	if [[ ! -r "$file" ]]; then
+		warn "Unable to read file: $file"
+		return 1
+	fi
+	local base="${file%.[mM][iI][dD]}"
+	local wavfile="${base}.wav"
+	local outfile="${base}.${OUTPUT_FORMAT}"
 
     # Render MIDI to WAV with timeout
     info "Rendering $file to $wavfile"
     if ! timeout --foreground "$TIMEOUT" "$FLUIDSYNTH" -F "$wavfile" -r "$SAMPLERATE" -g "$FSGAIN" \
-        -C "$FSCHORUS" -R "$FSREVERB" -n -l -i "$SOUNDFONT" "$file" >/dev/null; then
-        warn "Rendering failed or timed out for $file"
-        rm -f "$wavfile" 2>/dev/null
-        return 1
+	    -C "$FSCHORUS" -R "$FSREVERB" -n -l -i "$SOUNDFONT" "$file" >/dev/null; then
+		warn "Rendering failed or timed out for $file"
+		rm -f "$wavfile" 2>/dev/null
+		return 1
     fi
     success "Successfully rendered $file to $wavfile"
 
     # Convert to compressed format if requested
     if [[ "$OUTPUT_FORMAT" != "wav" ]]; then
-        info "Converting $wavfile to $outfile"
-        if ! ffmpeg -i "$wavfile" -y "$outfile" >/dev/null 2>&1; then
-            warn "Failed to convert $wavfile to $outfile"
-            rm -f "$wavfile" "$outfile" 2>/dev/null
-            return 1
-        fi
-        rm -f "$wavfile"  # Clean up intermediate WAV file
-        success "Successfully converted $wavfile to $outfile"
+	    info "Converting $wavfile to $outfile"
+	    if ! ffmpeg -i "$wavfile" -y "$outfile" >/dev/null 2>&1; then
+		    warn "Failed to convert $wavfile to $outfile"
+		    rm -f "$wavfile" "$outfile" 2>/dev/null
+		    return 1
+	    fi
+	    rm -f "$wavfile"  # Clean up intermediate WAV file
+	    success "Successfully converted $wavfile to $outfile"
     fi
 }
 
@@ -224,28 +224,28 @@ if [[ $? != 0 ]]; then error "Invalid arguments"; fi
 eval set -- "$TEMP"
 
 while true; do
-    case "$1" in
-        -h|--help) print_help ;;
-        -v|--version) print_version ;;
-        -c|--config) CONFIG_FILE="$2"; shift 2 ;;
-        -f|--fluidsynth) FLUIDSYNTH="$2"; shift 2 ;;
-        -s|--soundfont) SOUNDFONT="$2"; shift 2 ;;
-        -r|--sample-rate) SAMPLERATE="$2"; shift 2 ;;
-        -g|--gain) FSGAIN="$2"; shift 2 ;;
-        --chorus) FSCHORUS="$2"; shift 2 ;;
-        --reverb) FSREVERB="$2"; shift 2 ;;
-        -t|--threads) THREADMAX="$2"; shift 2 ;;
-        -n|--nice) PROCNICE="$2"; shift 2 ;;
-        -o|--output-format)
-            OUTPUT_FORMAT="$2"
-            if [[ ! "$OUTPUT_FORMAT" =~ ^(wav|mp3|flac)$ ]]; then
-                error "Unsupported output format: $OUTPUT_FORMAT (use wav, mp3, or flac)"
-            fi
-            shift 2 ;;
-        --timeout) TIMEOUT="$2"; shift 2 ;;
-        --) shift; break ;;
-        *) error "Internal error in argument parsing" ;;
-    esac
+	case "$1" in
+		-h|--help) print_help ;;
+		-v|--version) print_version ;;
+		-c|--config) CONFIG_FILE="$2"; shift 2 ;;
+		-f|--fluidsynth) FLUIDSYNTH="$2"; shift 2 ;;
+		-s|--soundfont) SOUNDFONT="$2"; shift 2 ;;
+		-r|--sample-rate) SAMPLERATE="$2"; shift 2 ;;
+		-g|--gain) FSGAIN="$2"; shift 2 ;;
+		--chorus) FSCHORUS="$2"; shift 2 ;;
+		--reverb) FSREVERB="$2"; shift 2 ;;
+		-t|--threads) THREADMAX="$2"; shift 2 ;;
+		-n|--nice) PROCNICE="$2"; shift 2 ;;
+		-o|--output-format)
+			OUTPUT_FORMAT="$2"
+			if [[ ! "$OUTPUT_FORMAT" =~ ^(wav|mp3|flac)$ ]]; then
+				error "Unsupported output format: $OUTPUT_FORMAT (use wav, mp3, or flac)"
+			fi
+			shift 2 ;;
+		--timeout) TIMEOUT="$2"; shift 2 ;;
+		--) shift; break ;;
+		*) error "Internal error in argument parsing" ;;
+	esac
 done
 
 # Load configuration file
@@ -265,29 +265,29 @@ sanity_check
 
 # Process input files
 if [[ $# -eq 0 ]]; then
-    # No arguments: search current directory
-    shopt -s nullglob
-    files=(*.[mM][iI][dD])
-    if [[ ${#files[@]} -eq 0 ]]; then
-        error "No MIDI files found in current directory"
-    fi
+	# No arguments: search current directory
+	shopt -s nullglob
+	files=(*.[mM][iI][dD])
+	if [[ ${#files[@]} -eq 0 ]]; then
+		error "No MIDI files found in current directory"
+	fi
 else
-    # Process arguments (files, directories, or patterns)
-    files=()
-    for arg in "$@"; do
-        if [[ -d "$arg" ]]; then
-            mapfile -t -O "${#files[@]}" files < <(find "$arg" -maxdepth 1 -type f -iname '*.mid')
-        elif [[ -f "$arg" && "$arg" =~ \.[mM][iI][dD]$ ]]; then
-            files+=("$arg")
-        elif [[ "$arg" =~ \*\.[mM][iI][dD]$ ]]; then
-            mapfile -t -O "${#files[@]}" files < <(find . -maxdepth 1 -type f -iname "$arg")
-        else
-            warn "Skipping invalid input: $arg"
-        fi
-    done
-    if [[ ${#files[@]} -eq 0 ]]; then
-        error "No valid MIDI files specified"
-    fi
+	# Process arguments (files, directories, or patterns)
+	files=()
+	for arg in "$@"; do
+		if [[ -d "$arg" ]]; then
+			mapfile -t -O "${#files[@]}" files < <(find "$arg" -maxdepth 1 -type f -iname '*.mid')
+		elif [[ -f "$arg" && "$arg" =~ \.[mM][iI][dD]$ ]]; then
+			files+=("$arg")
+		elif [[ "$arg" =~ \*\.[mM][iI][dD]$ ]]; then
+			mapfile -t -O "${#files[@]}" files < <(find . -maxdepth 1 -type f -iname "$arg")
+		else
+			warn "Skipping invalid input: $arg"
+		fi
+	done
+	if [[ ${#files[@]} -eq 0 ]]; then
+		error "No valid MIDI files specified"
+	fi
 fi
 
 # Export functions and variables for parallel execution
