@@ -27,6 +27,7 @@ FSREVERB="yes"
 THREADMAX="" # Leave blank for auto-detection
 TIMEOUT="30"  # 30-second timeout per file to prevent hung notes; increase for slow hardware or long MIDI
 OUTPUT_FORMAT="wav"  # Default output format is raw WAV straight out of fluidsynth
+BITRATE=""           # Bitrate in kbps; defaults to 256 for MP3, 192 for OGG/AAC, empty for others
 CONFIG_FILE="$HOME/.midi2wav.conf"
 
 ## COLOR CODES ##
@@ -62,15 +63,13 @@ info() {
 # Cleanup function for SIGINT (Ctrl+C)
 cleanup() {
 	echo -e "${RED}[INTERRUPTED] Caught Ctrl+C, terminating all rendering processes...${NC}" >&2
-	# Send SIGTERM to all child processes in the process group
 	pkill -P $$ >/dev/null 2>&1
-	# Wait briefly and check for lingering fluidsynth/ffmpeg processes
 	sleep 1
 	if pgrep -u "$USER" -f "(fluidsynth|ffmpeg)" >/dev/null 2>&1; then
 		echo -e "${YELLOW}[WARNING] Some processes still running, sending SIGKILL...${NC}" >&2
 		pkill -9 -u "$USER" -f "(fluidsynth|ffmpeg)" >/dev/null 2>&1
 	fi
-	exit 130  # Standard exit code for SIGINT
+	exit 130
 }
 
 # Print help message
@@ -92,7 +91,8 @@ Options:
       --reverb [yes|no]     Enable/disable reverb (default: $FSREVERB)
   -t, --threads NUM         Max number of encoder threads (default: auto-detect)
   -n, --nice LEVEL          Nice priority level (19 to -20, default: $PROCNICE)
-  -o, --output-format FMT   Output format (wav, mp3, flac; default: $OUTPUT_FORMAT)
+  -o, --output-format FMT   Output format (wav, mp3, ogg, aac, flac; default: $OUTPUT_FORMAT)
+  -b, --bitrate KBPS        Bitrate in kbps for MP3 (default: 256), OGG (default: 192), or AAC (default: 192)
       --timeout SECS        Timeout per file in seconds (default: $TIMEOUT)
 
 Without arguments, searches current directory for '*.mid' files.
@@ -101,14 +101,14 @@ Dependencies:
   - FluidSynth
   - A compatible SoundFont
   - bash
-  - ffmpeg (for mp3/flac output)
+  - ffmpeg (for mp3/ogg/aac/flac output)
 EOF
 exit 0
 }
 
 # Print version information
 print_version() {
-	echo -e "${CYAN}midi2wav v2.0 - A multi-threaded MIDI to WAV encoder${NC}"
+	echo -e "${CYAN}midi2wav v2.3 - A multi-threaded MIDI to WAV encoder${NC}"
 	echo "By Chris Wadge, 2010-2025"
 	echo "Licensed under the MIT License"
 	exit 0
@@ -118,14 +118,10 @@ print_version() {
 load_config() {
 	if [[ -r "$CONFIG_FILE" ]]; then
 		info "Loading configuration from $CONFIG_FILE"
-		# Source the config file, ignoring comments and empty lines
 		while IFS='=' read -r key value; do
-			# Skip empty lines, comments, or lines without an equals sign
 			[[ -z "$key" || "$key" =~ ^[[:space:]]*# || -z "$value" ]] && continue
 			key=$(echo "$key" | tr -d '[:space:]')
-			# Remove surrounding quotes and leading/trailing whitespace from value
 			value=$(echo "$value" | sed -e 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"\(.*\)"$/\1/;s/^'\''\(.*\)'\''$/\1/' || warn "Failed to parse config value for $key")
-			# Skip if value is empty after processing
 			[[ -z "$value" ]] && { warn "Empty value for $key in config file, skipping"; continue; }
 			case "$key" in
 				FLUIDSYNTH) FLUIDSYNTH="$value" ;;
@@ -138,13 +134,22 @@ load_config() {
 				THREADMAX) THREADMAX="$value" ;;
 				TIMEOUT) TIMEOUT="$value" ;;
 				OUTPUT_FORMAT) OUTPUT_FORMAT="$value" ;;
+				BITRATE) BITRATE="$value" ;;
 				*) warn "Unknown config key: $key, skipping" ;;
 			esac
 		done < "$CONFIG_FILE"
 	else
 		info "No config file found at $CONFIG_FILE; using defaults"
 	fi
-	info "Configuration loaded: FLUIDSYNTH=$FLUIDSYNTH, SOUNDFONT=$SOUNDFONT, OUTPUT_FORMAT=$OUTPUT_FORMAT"
+	# Set default bitrate based on output format if not specified
+	if [[ -z "$BITRATE" ]]; then
+		case "$OUTPUT_FORMAT" in
+			mp3) BITRATE="256" ;;
+			ogg|aac) BITRATE="192" ;;
+			*) BITRATE="" ;;
+		esac
+	fi
+	info "Configuration loaded: FLUIDSYNTH=$FLUIDSYNTH, SOUNDFONT=$SOUNDFONT, OUTPUT_FORMAT=$OUTPUT_FORMAT, BITRATE=$BITRATE"
 }
 
 # Detect number of CPU threads
@@ -181,6 +186,28 @@ sanity_check() {
 			error "ffmpeg required for $OUTPUT_FORMAT output format"
 		fi
 	fi
+	# Validate bitrate for MP3, OGG, or AAC
+	if [[ -n "$BITRATE" ]]; then
+		if [[ "$OUTPUT_FORMAT" == "mp3" ]]; then
+			if ! [[ "$BITRATE" =~ ^[0-9]+$ ]] || (( BITRATE < 32 || BITRATE > 320 )); then
+				warn "Invalid MP3 bitrate ($BITRATE); falling back to 256 kbps"
+				BITRATE=256
+			fi
+		elif [[ "$OUTPUT_FORMAT" == "ogg" ]]; then
+			if ! [[ "$BITRATE" =~ ^[0-9]+$ ]] || (( BITRATE < 45 || BITRATE > 500 )); then
+				warn "Invalid OGG bitrate ($BITRATE); falling back to 192 kbps"
+				BITRATE=192
+			fi
+		elif [[ "$OUTPUT_FORMAT" == "aac" ]]; then
+			if ! [[ "$BITRATE" =~ ^[0-9]+$ ]] || (( BITRATE < 32 || BITRATE > 320 )); then
+				warn "Invalid AAC bitrate ($BITRATE); falling back to 192 kbps"
+				BITRATE=192
+			fi
+		elif [[ "$OUTPUT_FORMAT" != "wav" && "$OUTPUT_FORMAT" != "flac" ]]; then
+			warn "Bitrate specified but output format ($OUTPUT_FORMAT) does not support bitrate; ignoring"
+			BITRATE=""
+		fi
+	fi
 	info "All dependencies satisfied"
 }
 
@@ -208,10 +235,33 @@ midi_render() {
     # Convert to compressed format if requested
     if [[ "$OUTPUT_FORMAT" != "wav" ]]; then
 	    info "Converting $wavfile to $outfile"
-	    if ! ffmpeg -i "$wavfile" -y "$outfile" >/dev/null 2>&1; then
-		    warn "Failed to convert $wavfile to $outfile"
-		    rm -f "$wavfile" "$outfile" 2>/dev/null
-		    return 1
+	    if [[ "$OUTPUT_FORMAT" == "mp3" ]]; then
+		    local bitrate=${BITRATE:-256}
+		    if ! ffmpeg -i "$wavfile" -y -b:a "${bitrate}k" "$outfile" >/dev/null 2>&1; then
+			    warn "Failed to convert $wavfile to $outfile"
+			    rm -f "$wavfile" "$outfile" 2>/dev/null
+			    return 1
+		    fi
+	    elif [[ "$OUTPUT_FORMAT" == "ogg" ]]; then
+		    local bitrate=${BITRATE:-192}
+		    if ! ffmpeg -i "$wavfile" -y -c:a libvorbis -b:a "${bitrate}k" "$outfile" >/dev/null 2>&1; then
+			    warn "Failed to convert $wavfile to $outfile"
+			    rm -f "$wavfile" "$outfile" 2>/dev/null
+			    return 1
+		    fi
+	    elif [[ "$OUTPUT_FORMAT" == "aac" ]]; then
+		    local bitrate=${BITRATE:-192}
+		    if ! ffmpeg -i "$wavfile" -y -c:a aac -b:a "${bitrate}k" "$outfile" >/dev/null 2>&1; then
+			    warn "Failed to convert $wavfile to $outfile"
+			    rm -f "$wavfile" "$outfile" 2>/dev/null
+			    return 1
+		    fi
+	    else
+		    if ! ffmpeg -i "$wavfile" -y "$outfile" >/dev/null 2>&1; then
+			    warn "Failed to convert $wavfile to $outfile"
+			    rm -f "$wavfile" "$outfile" 2>/dev/null
+			    return 1
+		    fi
 	    fi
 	    rm -f "$wavfile"  # Clean up intermediate WAV file
 	    success "Successfully converted $wavfile to $outfile"
@@ -227,7 +277,7 @@ trap cleanup SIGINT
 load_config
 
 # Parse command-line arguments
-TEMP=$(getopt -o hvc:f:s:r:g:t:n:o: -l help,version,config:,fluidsynth:,soundfont:,sample-rate:,gain:,chorus:,reverb:,threads:,nice:,output-format:,timeout: -n "$0" -- "$@")
+TEMP=$(getopt -o hvc:f:s:r:g:t:n:o:b: -l help,version,config:,fluidsynth:,soundfont:,sample-rate:,gain:,chorus:,reverb:,threads:,nice:,output-format:,bitrate:,timeout: -n "$0" -- "$@")
 if [[ $? != 0 ]]; then error "Invalid arguments"; fi
 eval set -- "$TEMP"
 
@@ -246,10 +296,19 @@ while true; do
 		-n|--nice) PROCNICE="$2"; shift 2 ;;
 		-o|--output-format)
 			OUTPUT_FORMAT="$2"
-			if [[ ! "$OUTPUT_FORMAT" =~ ^(wav|mp3|flac)$ ]]; then
-				error "Unsupported output format: $OUTPUT_FORMAT (use wav, mp3, or flac)"
+			if [[ ! "$OUTPUT_FORMAT" =~ ^(wav|mp3|ogg|aac|flac)$ ]]; then
+				error "Unsupported output format: $OUTPUT_FORMAT (use wav, mp3, ogg, aac, or flac)"
+			fi
+			# Reset BITRATE to apply default for new output format if not overridden
+			if [[ -z "$BITRATE" ]]; then
+				case "$OUTPUT_FORMAT" in
+					mp3) BITRATE="256" ;;
+					ogg|aac) BITRATE="192" ;;
+					*) BITRATE="" ;;
+				esac
 			fi
 			shift 2 ;;
+		-b|--bitrate) BITRATE="$2"; shift 2 ;;
 		--timeout) TIMEOUT="$2"; shift 2 ;;
 		--) shift; break ;;
 		*) error "Internal error in argument parsing" ;;
@@ -270,14 +329,12 @@ sanity_check
 
 # Process input files
 if [[ $# -eq 0 ]]; then
-	# No arguments: search current directory
 	shopt -s nullglob
 	files=(*.[mM][iI][dD])
 	if [[ ${#files[@]} -eq 0 ]]; then
 		error "No MIDI files found in current directory"
 	fi
 else
-	# Process arguments (files, directories, or patterns)
 	files=()
 	for arg in "$@"; do
 		if [[ -d "$arg" ]]; then
@@ -296,7 +353,7 @@ else
 fi
 
 # Export functions and variables for parallel execution
-export FLUIDSYNTH SOUNDFONT SAMPLERATE FSGAIN FSCHORUS FSREVERB OUTPUT_FORMAT TIMEOUT
+export FLUIDSYNTH SOUNDFONT SAMPLERATE FSGAIN FSCHORUS FSREVERB OUTPUT_FORMAT BITRATE TIMEOUT
 export RED YELLOW GREEN CYAN NC
 export -f midi_render error warn success info
 
