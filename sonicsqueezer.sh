@@ -26,7 +26,7 @@
 # SOFTWARE.
 
 PROGRAM_NAME="sonicsqueezer.sh"
-PROGRAM_DATE="09/05/2025"
+PROGRAM_DATE="09/07/2025"
 CONFIG_FILE="$HOME/.config/sonicsqueezer.conf"
 
 # ANSI color codes for output
@@ -88,6 +88,20 @@ success() {
 	[[ "$success_count" -le "$TOTAL_FILES" ]] && echo -e "${CYAN}[INFO] Progress: [$success_count/$TOTAL_FILES] files converted successfully${NC}"
 }
 
+validate_bool() {
+	local value="$1"
+	local option="$2"
+	local lower_value="${value,,}"
+	if [[ "$lower_value" == "true" || "$value" == "1" ]]; then
+		return 0
+	elif [[ "$lower_value" == "false" || "$value" == "0" ]]; then
+		return 1
+	else
+		error "Invalid boolean value '$value' for $option. Must be 'true', 'false', 'TRUE', 'FALSE' (case-insensitive), '1', or '0'."
+		exit 1
+	fi
+}
+
 create_config() {
 	# Ensure ~/.config exists
 	mkdir -p "$HOME/.config" || error "Failed to create directory $HOME/.config"
@@ -116,19 +130,19 @@ create_config() {
 # Quality options for FFmpeg (high-quality VBR for lossy formats; empty for lossless)
 # QUALITY_OPTS="-c:a mp3 -q:a 0"
 
-# Enable/disable volume normalization using FFmpeg loudnorm (true/false)
+# Enable/disable volume normalization using FFmpeg loudnorm (true/false/1/0)
 # NORMALIZE="false"
 
-# Enable/disable metadata copying for FLAC input files (true/false)
+# Enable/disable metadata copying for FLAC input files (true/false/1/0)
 # COPYMETA="true"
 
-# Enable/disable deletion of original files after successful conversion (true/false)
+# Enable/disable deletion of original files after successful conversion (true/false/1/0)
 # DELETE_ORIGINAL="false"
 
 # Output directory (leave empty to use same directory as input files)
 # OUTPUT_DIR=""
 
-# Enable/disable metadata-based renaming (tracknumber-title.extension) (true/false)
+# Enable/disable metadata-based renaming (tracknumber-title.extension) (true/false/1/0)
 # RENAME_METADATA="false"
 
 # Maximum number of threads (leave empty for auto-detection)
@@ -151,22 +165,22 @@ print_help() {
 	echo "  -h, --help                  Show this help message"
 	echo "  -f, --format TYPE           Set output format (mp3, aac, ogg, wma, flac, opus, alac)"
 	echo "  -n, --nice LEVEL            Set process priority (19 to -20, 19 lowest)"
-	echo "  -t, --threads NUM           Set max number of threads"
-	echo "  -N, --normalize BOOL        Enable/disable FFmpeg loudnorm normalization (true/false)"
-	echo "  -m, --copymeta BOOL         Enable/disable metadata copying (true/false)"
-	echo "  -d, --delete-original BOOL  Enable/disable deletion of original files (true/false)"
+	echo "  -t, --threads NUM           Set max number of threads (1 or more)"
+	echo "  -N, --normalize BOOL        Enable/disable FFmpeg loudnorm normalization (true/false/1/0, case-insensitive)"
+	echo "  -m, --copymeta BOOL         Enable/disable metadata copying (true/false/1/0, case-insensitive)"
+	echo "  -d, --delete-original BOOL  Enable/disable deletion of original files (true/false/1/0, case-insensitive)"
 	echo "  -F, --ffmpeg-opts OPTS      Extra options for FFmpeg"
 	echo "  -o, --output-dir DIR        Output directory (default: same as input files)"
-	echo "  -r, --rename-metadata BOOL  Enable/disable renaming based on metadata (true/false)"
+	echo "  -r, --rename-metadata BOOL  Enable/disable metadata-based renaming (true/false/1/0, case-insensitive)"
 	echo "  -c, --create-config         Create a sample config file at $CONFIG_FILE"
 	echo ""
 	echo "Notes:"
-	echo "  - Options with values can use spaces (e.g., '-f opus') or equals (e.g., '-f=opus')."
+	echo "  - Options with values can use spaces (e.g., '-f opus', '-r true') or equals (e.g., '-f=opus', '--rename-metadata=true')."
+	echo "  - Boolean options (-N, -m, -d, -r) accept 'true', 'false', 'TRUE', 'FALSE' (case-insensitive), '1', or '0'."
 	echo "  - Converting FLAC to FLAC is skipped with a warning to avoid redundant processing."
 	echo "  - Progress and success/failure counts are displayed during and after conversion."
 	echo "  - Normalization uses FFmpeg's loudnorm filter for consistent loudness."
-	echo "  - Metadata-based renaming requires TRACKNUMBER and TITLE metadata;"
-	echo "    - falls back to original basename if missing."
+	echo "  - Metadata-based renaming requires TRACKNUMBER and TITLE metadata; falls back to original basename if missing."
 	echo ""
 	echo "Configuration:"
 	echo "  Settings can be customized in $CONFIG_FILE"
@@ -224,23 +238,29 @@ parse_cli_options() {
 			-N|--normalize)
 				i=$((i + 1))
 				eval "NORMALIZE=\${$i}"
+				validate_bool "$NORMALIZE" "--normalize" && NORMALIZE="true" || NORMALIZE="false"
 				;;
 			--normalize=*)
 				NORMALIZE="${arg#*=}"
+				validate_bool "$NORMALIZE" "--normalize" && NORMALIZE="true" || NORMALIZE="false"
 				;;
 			-m|--copymeta)
 				i=$((i + 1))
 				eval "COPYMETA=\${$i}"
+				validate_bool "$COPYMETA" "--copymeta" && COPYMETA="true" || COPYMETA="false"
 				;;
 			--copymeta=*)
 				COPYMETA="${arg#*=}"
+				validate_bool "$COPYMETA" "--copymeta" && COPYMETA="true" || COPYMETA="false"
 				;;
 			-d|--delete-original)
 				i=$((i + 1))
 				eval "DELETE_ORIGINAL=\${$i}"
+				validate_bool "$DELETE_ORIGINAL" "--delete-original" && DELETE_ORIGINAL="true" || DELETE_ORIGINAL="false"
 				;;
 			--delete-original=*)
 				DELETE_ORIGINAL="${arg#*=}"
+				validate_bool "$DELETE_ORIGINAL" "--delete-original" && DELETE_ORIGINAL="true" || DELETE_ORIGINAL="false"
 				;;
 			-F|--ffmpeg-opts)
 				i=$((i + 1))
@@ -259,9 +279,11 @@ parse_cli_options() {
 			-r|--rename-metadata)
 				i=$((i + 1))
 				eval "RENAME_METADATA=\${$i}"
+				validate_bool "$RENAME_METADATA" "--rename-metadata" && RENAME_METADATA="true" || RENAME_METADATA="false"
 				;;
 			--rename-metadata=*)
 				RENAME_METADATA="${arg#*=}"
+				validate_bool "$RENAME_METADATA" "--rename-metadata" && RENAME_METADATA="true" || RENAME_METADATA="false"
 				;;
 			-c|--create-config)
 				create_config
@@ -301,22 +323,25 @@ set_quality_opts() {
 				;;
 			*)
 				error "Invalid output format: $OUTPUT_FORMAT. Use mp3, aac, ogg, wma, flac, opus, or alac."
+				exit 1
 				;;
 		esac
 	fi
 }
 
 detect_threads() {
-	if [[ -z "$THREADMAX" ]]; then
+	if [[ -n "$THREADMAX" && "$THREADMAX" =~ ^[0-9]+$ && "$THREADMAX" -ge 1 ]]; then
+		info "Using user-specified $THREADMAX threads"
+	else
 		if [[ "$(uname -s)" == "Linux" ]]; then
 			THREADMAX=$(nproc 2>/dev/null || grep -c "^processor" /proc/cpuinfo)
 		elif [[ "$(uname -s)" =~ ^(Darwin|*BSD)$ ]]; then
 			THREADMAX=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
+		else
+			THREADMAX=1
 		fi
 		[[ -z "$THREADMAX" || "$THREADMAX" -lt 1 ]] && THREADMAX=1
 		info "Detected $THREADMAX CPU threads for parallel processing"
-	else
-		info "Using user-specified $THREADMAX threads"
 	fi
 }
 
@@ -494,8 +519,6 @@ parse_cli_options "$@"
 # Set QUALITY_OPTS based on OUTPUT_FORMAT
 set_quality_opts
 
-[[ "${args[0]}" == "--help" || "${args[0]}" == "-h" ]] && print_help
-
 sanity_check
 detect_threads
 
@@ -531,7 +554,7 @@ done
 info "Processing $TOTAL_FILES files ($SKIPPED_FILES will be skipped)"
 
 # Export variables and functions for parallel processing
-export -f convert_wav convert_flac convert_file error warning info success
+export -f convert_wav convert_flac convert_file error warning info success validate_bool
 export FFMPEG_PATH FLACDECODER METAFLAC QUALITY_OPTS NORMALIZE COPYMETA DELETE_ORIGINAL OUTPUT_FORMAT OUTPUT_DIR RENAME_METADATA
 export RED YELLOW GREEN BLUE CYAN NC
 export SUCCESS_COUNT_FILE FAIL_COUNT_FILE SKIP_COUNT_FILE TOTAL_FILES
@@ -552,14 +575,12 @@ if [[ "$TOTAL_FILES" -eq 0 ]]; then
 		exit 0
 	else
 		error "No valid files to process"
+		exit 1
 	fi
 elif [[ "$SUCCESS_COUNT" -eq "$TOTAL_FILES" && "$FAIL_COUNT" -eq 0 ]]; then
 	success "Conversion process completed successfully ($SUCCESS_COUNT/$TOTAL_FILES files converted)"
 	exit 0
-elif [[ "$SUCCESS_COUNT" -gt 0 ]]; then
-	echo -e "${YELLOW}[INFO] Conversion process completed with some issues ($SUCCESS_COUNT/$TOTAL_FILES files converted successfully, $FAIL_COUNT failed)${NC}"
-	exit 1
 else
-	echo -e "${RED}[ERROR] Conversion process failed: No files were converted successfully ($FAIL_COUNT failed)${NC}"
+	echo -e "${YELLOW}[INFO] Conversion process completed with some issues ($SUCCESS_COUNT/$TOTAL_FILES files converted successfully, $FAIL_COUNT failed)${NC}"
 	exit 1
 fi
