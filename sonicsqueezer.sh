@@ -580,7 +580,10 @@ if [[ "$TOTAL_FILES" -eq 0 ]]; then
 elif [[ "$SUCCESS_COUNT" -eq "$TOTAL_FILES" && "$FAIL_COUNT" -eq 0 ]]; then
 	success "Conversion process completed successfully ($SUCCESS_COUNT/$TOTAL_FILES files converted)"
 	exit 0
-else
+elif [[ "$SUCCESS_COUNT" -gt 0 ]]; then
 	echo -e "${YELLOW}[INFO] Conversion process completed with some issues ($SUCCESS_COUNT/$TOTAL_FILES files converted successfully, $FAIL_COUNT failed)${NC}"
+	exit 1
+else
+	echo -e "${RED}[ERROR] Conversion process failed: No files were converted successfully ($FAIL_COUNT failed)${NC}"
 	exit 1
 fi
