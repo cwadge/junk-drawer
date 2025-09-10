@@ -28,7 +28,7 @@ THREADMAX="" # Leave blank for auto-detection
 TIMEOUT="30"  # 30-second timeout per file to prevent hung notes; increase for slow hardware or long MIDI
 OUTPUT_FORMAT="wav"  # Default output format is raw WAV straight out of fluidsynth
 BITRATE=""           # Bitrate in kbps; defaults to 256 for MP3, 192 for OGG/AAC, empty for others
-CONFIG_FILE="$HOME/.midi2wav.conf"
+CONFIG_FILE="$HOME/.config/midi2wav.conf"
 
 ## COLOR CODES ##
 RED='\033[0;31m'
