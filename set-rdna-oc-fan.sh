@@ -48,13 +48,13 @@ check_writable() {
 print_help() {
 	color_echo "$COLOR_CYAN" "Usage: $0 [OPTIONS]"
 	color_echo "$COLOR_CYAN" "Options:"
-	color_echo "$COLOR_CYAN" "  -h, --help                Display this help message"
-	color_echo "$COLOR_CYAN" "  --debug                   Enable verbose shell tracing"
-	color_echo "$COLOR_CYAN" "  --dry-run                 Print settings without applying them"
-	color_echo "$COLOR_CYAN" "  --reset                   Reset GPU to default settings"
-	color_echo "$COLOR_CYAN" "  --create-config           Create config file with safe defaults"
+	color_echo "$COLOR_CYAN" "  -h, --help                   Display this help message"
+	color_echo "$COLOR_CYAN" "  --debug                      Enable verbose shell tracing"
+	color_echo "$COLOR_CYAN" "  --dry-run                    Print settings without applying them"
+	color_echo "$COLOR_CYAN" "  --reset                      Reset GPU to default settings"
+	color_echo "$COLOR_CYAN" "  --create-config              Create config file with safe defaults"
 	color_echo "$COLOR_CYAN" "  --create-config-interactive  Interactively create config file with hardware defaults"
-	color_echo "$COLOR_CYAN" "  --status                  Display current GPU settings from hardware"
+	color_echo "$COLOR_CYAN" "  --status                     Display current GPU settings from hardware"
 	color_echo "$COLOR_CYAN" "Config file: $CONFIG_FILE"
 	exit 0
 }
@@ -755,7 +755,7 @@ else
 	    fan_curve_proposed_str+=$(printf "\n#     Point %s" "$point")
     done
 
-    # Write configuration file with improved comments
+    # Write configuration file with commentary
     if [[ "$RDNA_GEN" == "4" ]]; then
 	    cat << EOF > "$CONFIG_FILE"
 # AMD RDNA GPU Overclocking and Fan Curve Configuration

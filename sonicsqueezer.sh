@@ -175,7 +175,7 @@ print_help() {
 	echo "  -c, --create-config         Create a sample config file at $CONFIG_FILE"
 	echo ""
 	echo "Notes:"
-	echo "  - Options with values can use spaces (e.g., '-f opus', '-r true') or equals (e.g., '-f=opus', '--rename-metadata=true')."
+	echo "  - Options with values can use spaces (e.g., '-f opus', '-r true') or equals (e.g., '--rename-metadata=true')."
 	echo "  - Boolean options (-N, -m, -d, -r) accept 'true', 'false', 'TRUE', 'FALSE' (case-insensitive), '1', or '0'."
 	echo "  - Converting FLAC to FLAC is skipped with a warning to avoid redundant processing."
 	echo "  - Progress and success/failure counts are displayed during and after conversion."
