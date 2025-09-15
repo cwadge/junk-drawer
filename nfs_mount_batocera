@@ -13,88 +13,130 @@ NFS_MOUNTS="" # Mount point(s) for NFS export(s), space separated
 NFS_TARGET="/mnt/nfs" # The directory where we mount each export
 NFS_OPTIONS="vers=4,ro,timeo=10,rsize=1048576,wsize=1048576,async,proto=tcp,intr,noatime,nodev,nosuid"
 LOGFILE="/var/log/nfs_mount.log" # By default, /var is mounted on tmpfs
-MAX_ATTEMPTS=120  # ~10 minute with 5s sleep
+PING_ATTEMPTS=120  # ~10 minutes with 5s sleep for server ping
+MOUNT_RETRIES=5    # Number of per-mount attempts
+MOUNT_RETRY_DELAY=2  # Seconds to wait between per-mount attempts
+GLOBAL_MOUNT_RETRIES=3  # Number of global retry attempts for all mounts
 # ============================================================================================
 
 # Functions
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $@" >> "$LOGFILE"
+	echo "$(date '+%Y-%m-%d %H:%M:%S') - $@" >> "$LOGFILE"
 }
 
 mount_all() {
-    # Wait for server
-    local attempts=$MAX_ATTEMPTS
-    while ! ping -q -c 1 "$NFS_SERVER" &>/dev/null && [ $attempts -gt 0 ]; do
-        log "Waiting for $NFS_SERVER (attempts left: $attempts)"
-        sleep 5
-        attempts=$((attempts-1))
-    done
-    if [ $attempts -eq 0 ]; then
-        log "Failed to reach $NFS_SERVER after $MAX_ATTEMPTS attempts"
-        return 1
-    fi
+	# Wait for server
+	local attempts=$PING_ATTEMPTS
+	while ! ping -q -c 1 "$NFS_SERVER" &>/dev/null && [ $attempts -gt 0 ]; do
+		log "Waiting for $NFS_SERVER (attempts left: $attempts)"
+		sleep 5
+		attempts=$((attempts-1))
+	done
+	if [ $attempts -eq 0 ]; then
+		log "Failed to reach $NFS_SERVER after $PING_ATTEMPTS attempts"
+		return 1
+	fi
 
-    log "Mounting NFS exports"
-    for NFS_MOUNT in ${NFS_MOUNTS}; do
-        local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
-        mkdir -p "$mountpoint" || { log "Failed to create $mountpoint"; continue; }
-        if mount -t nfs4 -o "$NFS_OPTIONS" "${NFS_SERVER}:/${NFS_MOUNT}" "$mountpoint"; then
-            log "Mounted ${NFS_SERVER}:/${NFS_MOUNT} to $mountpoint"
-        else
-            log "Failed to mount ${NFS_SERVER}:/${NFS_MOUNT} to $mountpoint"
-        fi
+	log "Mounting NFS exports"
+	# Global retry loop
+	local global_attempt
+	for ((global_attempt=1; global_attempt<=GLOBAL_MOUNT_RETRIES; global_attempt++)); do
+		local all_success=1
+		local mountpoint
+		local success
+
+	# Attempt to mount each export
+	for NFS_MOUNT in ${NFS_MOUNTS}; do
+		mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
+		# Skip if already mounted
+		if grep -qs "$mountpoint " /proc/mounts; then
+			log "$mountpoint already mounted, skipping"
+			continue
+		fi
+		mkdir -p "$mountpoint" || { log "Failed to create $mountpoint"; all_success=0; continue; }
+
+	    # Per-mount retry loop
+	    success=0
+	    for ((i=1; i<=MOUNT_RETRIES; i++)); do
+		    if mount -t nfs4 -o "$NFS_OPTIONS" "${NFS_SERVER}:/${NFS_MOUNT}" "$mountpoint"; then
+			    log "Mounted ${NFS_SERVER}:/${NFS_MOUNT} to $mountpoint"
+			    success=1
+			    break
+		    else
+			    log "Attempt $i/$MOUNT_RETRIES failed to mount ${NFS_SERVER}:/${NFS_MOUNT} to $mountpoint (global attempt $global_attempt/$GLOBAL_MOUNT_RETRIES)"
+			    sleep "$MOUNT_RETRY_DELAY"
+		    fi
+	    done
+	    if [ $success -eq 0 ]; then
+		    log "Failed to mount ${NFS_SERVER}:/${NFS_MOUNT} to $mountpoint after $MOUNT_RETRIES attempts (global attempt $global_attempt/$GLOBAL_MOUNT_RETRIES)"
+		    all_success=0
+	    fi
     done
+
+	# Check if all mounts succeeded
+	if [ $all_success -eq 1 ]; then
+		log "All NFS mounts succeeded on global attempt $global_attempt"
+		return 0
+	else
+		log "Some mounts failed on global attempt $global_attempt/$GLOBAL_MOUNT_RETRIES, retrying..."
+		# Optional: Short delay before retrying all mounts
+		sleep "$MOUNT_RETRY_DELAY"
+	fi
+done
+
+log "Failed to mount all NFS exports after $GLOBAL_MOUNT_RETRIES global attempts"
+return 1
 }
 
 unmount_all() {
-    log "Unmounting NFS exports"
-    for NFS_MOUNT in ${NFS_MOUNTS}; do
-        local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
-        if grep -qs "$mountpoint " /proc/mounts; then
-            if umount "$mountpoint"; then
-                log "Unmounted $mountpoint"
-            else
-                log "Failed to unmount $mountpoint, trying lazy unmount"
-                umount -l "$mountpoint" && log "Lazy unmounted $mountpoint"
-            fi
-        fi
-    done
+	log "Unmounting NFS exports"
+	for NFS_MOUNT in ${NFS_MOUNTS}; do
+		local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
+		if grep -qs "$mountpoint " /proc/mounts; then
+			if umount "$mountpoint"; then
+				log "Unmounted $mountpoint"
+			else
+				log "Failed to unmount $mountpoint, trying lazy unmount"
+				umount -l "$mountpoint" && log "Lazy unmounted $mountpoint"
+			fi
+		fi
+	done
 }
 
 status() {
-    echo "NFS Mount Status:"
-    for NFS_MOUNT in ${NFS_MOUNTS}; do
-        local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
-        if grep -qs "$mountpoint " /proc/mounts; then
-            echo "$mountpoint: Mounted (from ${NFS_SERVER}:/${NFS_MOUNT})"
-        else
-            echo "$mountpoint: Not mounted"
-        fi
-    done
-    echo "Check $LOGFILE for details."
+	echo "NFS Mount Status:"
+	for NFS_MOUNT in ${NFS_MOUNTS}; do
+		local mountpoint="${NFS_TARGET}/${NFS_MOUNT}"
+		if grep -qs "$mountpoint " /proc/mounts; then
+			echo "$mountpoint: Mounted (from ${NFS_SERVER}:/${NFS_MOUNT})"
+		else
+			echo "$mountpoint: Not mounted"
+		fi
+	done
+	echo "Check $LOGFILE for details."
 }
 
 # Main logic
 case "$1" in
-    start)
-        log "Starting NFS mounts"
-        mount_all
-        ;;
-    stop)
-        unmount_all
-        ;;
-    restart|reload)
-        log "Remounting NFS exports"
-        unmount_all
-        mount_all
-        ;;
-    status)
-        status
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status}"
-        exit 1
-        ;;
+	start)
+		log "Starting NFS mounts"
+		mount_all
+		;;
+	stop)
+		unmount_all
+		;;
+	restart|reload)
+		log "Remounting NFS exports"
+		unmount_all
+		mount_all
+		;;
+	status)
+		status
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|status}"
+		exit 1
+		;;
 esac
 
 exit 0
