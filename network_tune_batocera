@@ -26,7 +26,7 @@ log() {
 }
 
 start() {
-	log "Starting network_tune_batocera service..."
+	log "Starting network_tune service..."
 
     # Check if INTERFACES is set
     if [ -z "$INTERFACES" ]; then
@@ -99,15 +99,15 @@ start() {
 	fi
 done
 
-log "network_tune_batocera service completed."
+log "network_tune service completed."
 }
 
 stop() {
-	log "Stopping network_tune_batocera service (no action taken)."
+	log "Stopping network_tune service (no action taken)."
 }
 
 status() {
-	log "Checking status of network_tune_batocera service..."
+	log "Checking status of network_tune service..."
 
     # Check if INTERFACES is set
     if [ -z "$INTERFACES" ]; then
@@ -149,7 +149,7 @@ status() {
 	echo ""
 done
 
-log "network_tune_batocera status check completed."
+log "network_tune status check completed."
 }
 
 case "$1" in
