@@ -1,0 +1,175 @@
+#!/bin/bash
+
+# A Batocera service to set custom network interface parameters (e.g., MTU, speed) at startup.
+# Create as /userdata/system/services/network_tune
+# Make it executable: chmod 755 /userdata/system/services/network_tune
+# Enable it: batocera-services enable network_tune
+# It will run automatically at boot
+
+# ============================================================================================
+# Configuration: Set these variables as needed
+# Leave blank to skip applying the setting
+INTERFACES=""  # Space-separated list of interfaces to tune (e.g., "eth0 eno1 enp4s0")
+MTU=""         # Maximum Transmission Unit in bytes (e.g., "9000" for jumbo frames)
+SPEED=""       # Link speed in megabits per second (e.g., "2500")
+DUPLEX=""      # Duplex mode (e.g., "full")
+AUTONEG=""     # Auto-negotiation setting (e.g., "off")
+TXQUEUELEN=""  # Transmit queue length (e.g., "1000")
+# ============================================================================================
+LOG_FILE="/var/log/network_tune.log" # By default, /var is mounted on tmpfs
+
+# Create log file if it doesn't exist
+touch "$LOG_FILE"
+
+log() {
+	echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+start() {
+	log "Starting network_tune_batocera service..."
+
+    # Check if INTERFACES is set
+    if [ -z "$INTERFACES" ]; then
+	    log "No interfaces specified. Exiting."
+	    exit 0
+    fi
+
+    # Loop through each interface
+    for INTERFACE in $INTERFACES; do
+	    log "Processing interface $INTERFACE..."
+
+	# Wait for network interface to be up (max 30 seconds)
+	local timeout=30
+	local counter=0
+	while [ $counter -lt $timeout ]; do
+		if ip link show "$INTERFACE" >/dev/null 2>&1; then
+			log "Interface $INTERFACE is up."
+			break
+		fi
+		log "Waiting for interface $INTERFACE to be up..."
+		sleep 1
+		counter=$((counter + 1))
+	done
+
+	if [ $counter -ge $timeout ]; then
+		log "Error: Interface $INTERFACE not found or not up after $timeout seconds."
+		continue
+	fi
+
+	# Apply MTU if set
+	if [ ! -z "$MTU" ]; then
+		log "Setting MTU to $MTU on interface $INTERFACE..."
+		if ip link set "$INTERFACE" mtu "$MTU"; then
+			log "Successfully set MTU to $MTU on $INTERFACE."
+		else
+			log "Error: Failed to set MTU to $MTU on $INTERFACE."
+		fi
+	fi
+
+	# Apply SPEED and DUPLEX if both are set
+	if [ ! -z "$SPEED" ] && [ ! -z "$DUPLEX" ]; then
+		log "Setting speed to $SPEED Mbps and duplex to $DUPLEX on $INTERFACE..."
+		if ethtool -s "$INTERFACE" speed "$SPEED" duplex "$DUPLEX"; then
+			log "Successfully set speed to $SPEED Mbps and duplex to $DUPLEX on $INTERFACE."
+		else
+			log "Error: Failed to set speed or duplex on $INTERFACE."
+		fi
+	elif [ ! -z "$SPEED" ] || [ ! -z "$DUPLEX" ]; then
+		log "Error: Both SPEED and DUPLEX must be set together for $INTERFACE. Skipping."
+	fi
+
+	# Apply AUTONEG if set
+	if [ ! -z "$AUTONEG" ]; then
+		log "Setting auto-negotiation to $AUTONEG on $INTERFACE..."
+		if ethtool -s "$INTERFACE" autoneg "$AUTONEG"; then
+			log "Successfully set auto-negotiation to $AUTONEG on $INTERFACE."
+		else
+			log "Error: Failed to set auto-negotiation on $INTERFACE."
+		fi
+	fi
+
+	# Apply TXQUEUELEN if set
+	if [ ! -z "$TXQUEUELEN" ]; then
+		log "Setting transmit queue length to $TXQUEUELEN on $INTERFACE..."
+		if ip link set "$INTERFACE" txqueuelen "$TXQUEUELEN"; then
+			log "Successfully set transmit queue length to $TXQUEUELEN on $INTERFACE."
+		else
+			log "Error: Failed to set transmit queue length on $INTERFACE."
+		fi
+	fi
+done
+
+log "network_tune_batocera service completed."
+}
+
+stop() {
+	log "Stopping network_tune_batocera service (no action taken)."
+}
+
+status() {
+	log "Checking status of network_tune_batocera service..."
+
+    # Check if INTERFACES is set
+    if [ -z "$INTERFACES" ]; then
+	    log "No interfaces specified."
+	    echo "No interfaces specified in configuration."
+	    exit 0
+    fi
+
+    # Loop through each interface
+    for INTERFACE in $INTERFACES; do
+	    log "Checking status for interface $INTERFACE..."
+
+	# Check if interface exists
+	if ! ip link show "$INTERFACE" >/dev/null 2>&1; then
+		log "Error: Interface $INTERFACE not found."
+		echo "Error: Interface $INTERFACE not found."
+		continue
+	fi
+
+	# Display and log ip link status, removing interface index (e.g., "2:")
+	log "ip link status for $INTERFACE:"
+	ip_output=$(ip link show "$INTERFACE" | sed 's/^[0-9]\+://')
+	log "$ip_output"
+	echo "Interface $INTERFACE (ip link):"
+	echo "$ip_output"
+	echo ""
+
+	# Display and log ethtool status
+	log "ethtool status for $INTERFACE:"
+	ethtool_output=$(ethtool "$INTERFACE" 2>/dev/null | grep -E "Speed|Duplex|Auto-negotiation")
+	if [ ! -z "$ethtool_output" ]; then
+		log "$ethtool_output"
+		echo "Interface $INTERFACE (ethtool):"
+		echo "$ethtool_output"
+	else
+		log "No relevant ethtool output for $INTERFACE."
+		echo "No relevant ethtool output for $INTERFACE."
+	fi
+	echo ""
+done
+
+log "network_tune_batocera status check completed."
+}
+
+case "$1" in
+	start)
+		start
+		;;
+	stop)
+		stop
+		;;
+	restart)
+		stop
+		start
+		;;
+	status)
+		status
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|status}"
+		exit 1
+		;;
+esac
+
+exit 0
