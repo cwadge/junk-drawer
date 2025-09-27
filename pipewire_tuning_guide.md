@@ -217,11 +217,31 @@ Compose `~/.config/pipewire/pipewire.conf.d/10-buffers.conf` with something like
 context.properties = {
     default.clock.min-quantum = 32
     default.clock.max-quantum = 1024
-    default.clock.quantum = 256
+    default.clock.quantum = 128
     default.clock.rate = 48000
 }
 ```
-Our quantums are our variable buffer size. Too small and we may have underruns if the card's too low-end, our system is too busy or too weak, etc. Too big and we'll cause unnecessary audio latency. These settings are great for my fairly humble system, at least by modern standards:
+Our quantums are our variable buffer size. Too small and we may have underruns if the card's too low-end, our system is too busy or too weak, etc. Too big and we'll cause unnecessary audio latency. 
+
+To calculate latency, we can use the following formula:
+
+$$
+\text{Latency (ms)} = \left( \frac{\text{quantum (samples)}}{\text{sample rate (Hz)}} \right) \times 1000
+$$
+
+So for 48kHz audio playback with a quantum of 128:
+
+$$
+\begin{aligned}
+\text{Latency (ms)} &= \left( \frac{128}{48000} \right) \times 1000 \\
+                    &= \frac{128}{48} \\
+                    &\approx 2.67
+\end{aligned}
+$$
+
+About 2.67ms.
+
+These settings are great for my fairly humble system, at least humble by modern standards:
 
  - Ryzen 7 3700X @4.63GHz (-48mV)
  - 32GB DDR4 3200 (XMP)
