@@ -78,7 +78,7 @@ $ cat /proc/asound/card0/stream0 | grep Rates
 
 We can see that this particular card supports 44.1k, 48k, 96k, and 192k.
 
-However, I have a weird card, and it doesn't use this straightforward `/proc` convention. So I had to use a different method (which should also work with any supported card out there):
+I have a weird card, however, and it doesn't use this straightforward `/proc` convention. So I had to use a different method (which should also work with any supported card out there):
 
 ```
 $ aplay -D hw:0,0 --dump-hw-params test.wav
@@ -250,7 +250,7 @@ These settings are great for my fairly humble system, at least humble by modern 
  - ASUS Xonar DX (C-Media Electronics Inc CMI8788 [Oxygen HD Audio])
  - Latest [Xanmod](https://xanmod.org/) kernel
 
-Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like Mount & Blade II: Bannerlord, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do.
+Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do.
 
 ### Sample Rates
 
@@ -311,7 +311,7 @@ AO: [alsa] 192000Hz 2ch s32le (4 bytes per sample)
 Starting playback...
 ```
 
-As you can see, the `AUDIO` rate is being output at 192kHz. Sounds amazing, and I can still stream basic 44.1kHz YT stuff or whatever, simultaneously. Excellent.
+As you can see, the `AO` (audio out) rate that's being output is 192kHz. Sounds amazing, and I can still stream basic 44.1kHz YT stuff or whatever, simultaneously. Excellent.
 
 We can use the `pw-dump` tool to examine our latency, among other things:
 
