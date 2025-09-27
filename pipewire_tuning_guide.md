@@ -126,7 +126,7 @@ Now that we know what range or series of sample rates our card supports natively
 mkdir -p ~/.config/wireplumber/main.lua.d/
 ```
 
-Then add `~/.config/wireplumber/main.lua.d/50-alsa-rate.lua` with a few stanzas like the following:
+Then add `~/.config/wireplumber/main.lua.d/50-alsa-rate.lua` with a stanza like the following:
 
 ```
 alsa_monitor.rules = {

@@ -9,8 +9,8 @@ A collection of miscellaneous scripts for Linux gaming and system tasks. These a
 | Emulation | [psp-shrink-ray.sh](psp-shrink-ray.sh) | Compresses PS2/PSP images to CHD format, deleting originals on success |
 | Hardware | [set-rdna-oc-fan.sh](set-rdna-oc-fan.sh) | Creates and applies overclocking / fan profiles for AMD RDNA GPUs |
 | Multimedia | [midi2wav.sh](midi2wav.sh) | Convert MIDI file(s) to digital audio like WAV, FLAC, AAC or MP3 |
-| Multimedia | [sonicsqueezer.sh](sonicsqueezer.sh) | A multi-threaded audio converter for WAV and FLAC to MP3, AAC, OGG, and more | 
 | Multimedia | [pipewire_tuning_guide.md](pipewire_tuning_guide.md) | Quick & dirty guide to setting up low-latency, multi-rate PipeWire |
+| Multimedia | [sonicsqueezer.sh](sonicsqueezer.sh) | A multi-threaded audio converter for WAV and FLAC to MP3, AAC, OGG, and more | 
 
 ## Installation
 Clone the whole repo:
