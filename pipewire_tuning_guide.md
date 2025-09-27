@@ -313,34 +313,24 @@ As you can see, the `AUDIO` rate is being output at 192kHz. Sounds amazing, and 
 
 We can use the `pw-dump` tool to examine our latency, among other things:
 
+```bash
+pw-dump | grep -i latency
 ```
-$ pw-dump | grep -i latency
 
-              "latencyOffsetNsec": 0
-        "Latency": [
-        "Latency": [
-            "id": "latencyOffsetNsec",
-            "description": "Latency offset (ns)",
-            "name": "latency.internal.rate",
-            "description": "Internal latency in samples",
-            "name": "latency.internal.ns",
-            "description": "Internal latency in nanoseconds",
-            "latencyOffsetNsec": 0,
-              "latency.internal.rate",
-              "latency.internal.ns",
-        "Latency": [
-        "ProcessLatency": [
-        "Latency": [
-        "Latency": [
-        "Latency": [
-        "Latency": [
-            "id": "latencyOffsetNsec",
-            "description": "Latency offset (ns)",
-            "latencyOffsetNsec": 0,
-        "Latency": [
-        "Latency": [
+To profile in near-realtime, the `pw-top` tool is useful:
+
 ```
-As for any buffer underruns or other hiccups, we can monitor WirePlumber in realtime via `journalctl`:
+S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR FORMAT           NAME                                                                                    
+S   30      0      0    ---     ---   ---   ---     0                  Dummy-Driver
+S   31      0      0    ---     ---   ---   ---     0                  Freewheel-Driver
+S   58      0      0    ---     ---   ---   ---     0                  Midi-Bridge
+S   61      0      0    ---     ---   ---   ---     0                  bluez_midi.server
+R   64   4096 192000  79.2us 614.6us  0.00  0.03    1    S32LE 2 48000 alsa_output.pci-0000_08_04.0.analog-stereo
+R   72   6000 192000   6.4us  15.7us  0.00  0.00    0   S32LE 2 192000  + alsa_playback.mplayer
+R   66   1024  48000  11.8us  63.0us  0.00  0.00    0    F32LE 2 48000  + Brave
+```
+
+As for any buffer underruns or other hiccups, we can monitor WirePlumber via `journalctl`:
 
 ```bash
 journalctl --user -u wireplumber -f | grep -E "underrun|xrun|resume"
