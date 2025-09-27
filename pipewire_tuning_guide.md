@@ -4,9 +4,9 @@ This is a quick and dirty guide to low-latency, high-fidelity audio via PipeWire
 
 ## Basic Linux Tuning
 
-It's really desirable to be running a kernel with RT support, e.g. Xanmod, Liquorix, zen, or an 'RT' patched kernel. To get the most out of this, we're also going to need to give our audio user(s) permissions to run in realtime.
+It's really desirable to be running a kernel with RT support, e.g. Xanmod, Liquorix, zen, or an 'RT' patched kernel. To take full advantage, we're also going to need to give our audio user(s) permissions to run in realtime.
 
-Create something like `/etc/security/limits.d/99-audio.conf` if it doesn't exist, and add:
+Create something like `/etc/security/limits.d/90-audio.conf` if it doesn't exist, and add:
 
 ```
 #
@@ -107,7 +107,7 @@ Available formats:
 - S32_LE
 ```
 
-In this case, I'm just playing a null WAV file I made with `sox`, but it could be literally any sound file that's supported by `aplay`. We only care about the hardware dump output, which tells us: `RATE: [32000 192000]`; this is a range, not a series like the other card. That means the card supports a floor and a ceiling in hardware, and everything in between, so we can use any rates in that range natively. Nice.
+In this case, I'm just playing a null WAV file I made with `sox`, but it could be literally any sound file that's supported by `aplay`. We only care about the hardware dump output, which tells us: `RATE: [32000 192000]`; this is a range, not a series like the previous card we looked at. That means this particular card supports a floor and a ceiling in hardware, and everything in between, so we can use any rates in that range natively. Nice.
 
 ## Setting Up WirePlumber
 
@@ -146,7 +146,7 @@ alsa_monitor.rules = {
   },
 }
 ```
-The `["audio.rate"]` is going to be our standard sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
+The `["audio.rate"]` is going to be our default sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
 
 `["audio.allowed-rates"]` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include `176400`, so I'd not have set that rate for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates.
 
@@ -193,7 +193,7 @@ Our quantums are our variable buffer size. Too small and we may have underruns i
  - ASUS Xonar DX (C-Media Electronics Inc CMI8788 [Oxygen HD Audio])
  - Latest [Xanmod](https://xanmod.org/) kernel
 
-Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, distortion, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like Mount & Blade II: Bannerlord, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do.
+Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like Mount & Blade II: Bannerlord, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do.
 
 ### Sample Rates
 
@@ -255,6 +255,41 @@ Starting playback...
 ```
 
 As you can see, the `AUDIO` rate is being output at 192kHz. Sounds amazing, and I can still stream basic 44.1kHz YT stuff or whatever, simultaneously. Excellent.
+
+We also want to verify that we're not experiencing any buffer underruns. We can use the `pw-dump` tool to examine our latency:
+
+```
+$ pw-dump | grep -i latency
+
+              "latencyOffsetNsec": 0
+        "Latency": [
+        "Latency": [
+            "id": "latencyOffsetNsec",
+            "description": "Latency offset (ns)",
+            "name": "latency.internal.rate",
+            "description": "Internal latency in samples",
+            "name": "latency.internal.ns",
+            "description": "Internal latency in nanoseconds",
+            "latencyOffsetNsec": 0,
+              "latency.internal.rate",
+              "latency.internal.ns",
+        "Latency": [
+        "ProcessLatency": [
+        "Latency": [
+        "Latency": [
+        "Latency": [
+        "Latency": [
+            "id": "latencyOffsetNsec",
+            "description": "Latency offset (ns)",
+            "latencyOffsetNsec": 0,
+        "Latency": [
+        "Latency": [
+```
+As for any buffer underruns or other hiccups, we can monitor WirePlumber in realtime via `journalctl`:
+
+```bash
+journalctl --user -u wireplumber -f | grep -E "underrun|xrun|resume"
+```
 
 ## Extras
 
