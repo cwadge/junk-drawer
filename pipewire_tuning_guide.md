@@ -78,7 +78,7 @@ $ cat /proc/asound/card0/stream0 | grep Rates
 
 We can see that this particular card supports 44.1k, 48k, 96k, and 192k.
 
-However, I have a weird card, and it doesn't use this straightforward convention. So I had to use a different method (which should also work with any supported card out there):
+However, I have a weird card, and it doesn't use this straightforward `/proc` convention. So I had to use a different method (which should also work with any supported card out there):
 
 ```
 $ aplay -D hw:0,0 --dump-hw-params test.wav
@@ -320,7 +320,7 @@ pw-dump | grep -i latency
 To profile in near-realtime, the `pw-top` tool is useful:
 
 ```
-S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR FORMAT           NAME                                                                                    
+S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR FORMAT           NAME
 S   30      0      0    ---     ---   ---   ---     0                  Dummy-Driver
 S   31      0      0    ---     ---   ---   ---     0                  Freewheel-Driver
 S   58      0      0    ---     ---   ---   ---     0                  Midi-Bridge
