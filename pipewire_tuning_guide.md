@@ -145,7 +145,7 @@ alsa_monitor.rules = {
       ["audio.allowed-rates"] = { 44100, 48000, 96000, 176400, 192000 },
       ["api.alsa.period-size"] = 128,
       ["api.alsa.headroom"] = 0,
-      ["resample.quality"] = 14,
+      ["resample.quality"] = 10,
     },
   },
 }
@@ -174,7 +174,7 @@ monitor.alsa.rules = [
         audio.allowed-rates = [ 44100, 48000, 96000, 176400, 192000 ]
         api.alsa.period-size = 128
         api.alsa.headroom = 0
-        resample.quality = 14
+        resample.quality = 10
       }
     }
   }
