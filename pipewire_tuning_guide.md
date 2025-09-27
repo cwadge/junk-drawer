@@ -17,7 +17,7 @@ Create something like `/etc/security/limits.d/99-audio.conf` if it doesn't exist
 @audio   -  memlock    unlimited
 @audio   -  nice      -19
 ```
-PipeWire currently only runs at `-11` by default, at least at present. If you ever want to use the `pipewire-jack` PipeWire JACK plugin, for JACK applications to output via PipeWire, allowing it to run at up to `-19` might be desirable. If not, `-11` is probably fine here.
+PipeWire currently only runs at `-11` by default, at least at present. If you ever want to use the PipeWire JACK plugin `pipewire-jack`, for JACK applications to output via PipeWire, allowing it to run at up to `-19` might be best. If not, `-11` is probably fine here.
 
 Next, make sure any users who will use PipeWire are in the `audio` group, e.g.:
 
@@ -59,7 +59,7 @@ card 1: HDMI [HDA ATI HDMI], device 9: HDMI 3 [HDMI 3]
   Subdevice #0: subdevice #0
 ```
 
-(If I'd wanted to list *recording* devices, I could use `arecord -l` instead, but I'm focused on optimizing playback in this guide). 
+*(If I'd wanted to list __recording__ devices, I could use `arecord -l` instead, but I'm focused on optimizing playback in this guide).* 
 
 In my case, I'm using my discrete sound card for playback, which is enumerated as `card 0`, `device 0`. This would typically be exposed to the system as `/proc/asound/card0/stream0`, and this will be the case on the vast majority of sound cards in Linux. Grabbing the sample rates your card supports in hardware is really easy using this interface:
 
@@ -76,7 +76,7 @@ $ cat /proc/asound/card0/stream0 | grep Rates
     Rates: 44100, 48000, 96000, 192000
 ```
 
-We can see that our card supports 44.1k, 48k, 96k, and 192k.
+We can see that this particular card supports 44.1k, 48k, 96k, and 192k.
 
 However, I have a weird card, and it doesn't use this straightforward convention. So I had to use a different method (which should also work with any supported card out there):
 
@@ -111,6 +111,8 @@ In this case, I'm just playing a null WAV file I made with `sox`, but it could b
 
 ## Setting Up WirePlumber
 
+WirePlumber is the modular session / policy manager for PipeWire.
+
 Running the latest version of `wireplumber` that's readily available to us is a good idea, so we can get all the latest bug fixes and optimizations. In my case, I'm running `Debian 13` aka "Trixie", so I'd do:
 
 ```bash
@@ -118,13 +120,13 @@ sudo apt -t trixie-backports install wireplumber
 ```
 
 ### Configuring a WirePlumber Lua
-Now that we know what range or series of sample rates our card supports natively, we can apply it to WirePlumber, the modular session / policy manager for PipeWire. Create `~/.config/wireplumber/main.lua.d/` if it doesn't already exist (it didn't for me):
+Now that we know what range or series of sample rates our card supports natively, we can apply it to WirePlumber. Create `~/.config/wireplumber/main.lua.d/` if it doesn't already exist (it didn't for me):
 
 ```bash
 mkdir -p ~/.config/wireplumber/main.lua.d/
 ```
 
-Then create `~/.config/wireplumber/main.lua.d/50-alsa-rate.lua` with a few stanzas like the following:
+Then add `~/.config/wireplumber/main.lua.d/50-alsa-rate.lua` with a few stanzas like the following:
 
 ```
 alsa_monitor.rules = {
@@ -174,7 +176,7 @@ Now we need to set up PipeWire itself. Create the local config directory, if it 
 mkdir -p ~/.config/pipewire/pipewire.conf.d/
 ```
 
-Create `~/.config/pipewire/pipewire.conf.d/10-buffers.conf` with something like this:
+Compose `~/.config/pipewire/pipewire.conf.d/10-buffers.conf` with something like this:
 
 ```
 context.properties = {
@@ -256,7 +258,7 @@ As you can see, the `AUDIO` rate is being output at 192kHz. Sounds amazing, and 
 
 ## Extras
 
-Optionally, if you're not routinely playing MIDI as a matter of course, you can disable `fluidsynth` sessions, which can free up resources and avoid potential conflicts.
+Optionally, if you're not routinely playing MIDI from your desktop as a matter of course, you can disable `fluidsynth` sessions, which can free up resources and avoid potential conflicts.
 
 ```bash
 systemctl --user stop fluidsynth
