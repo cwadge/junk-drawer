@@ -241,7 +241,7 @@ $$
 
 About 2.67ms. 
 
-**Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `128`, the quantum will scale to `512` if the sample rate is `192000` &mdash; 4x the sample rate = 4x the quantum.
+**Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `128`, the quantum will scale to `512` if the sample rate is `192000`&mdash;4x the sample rate = 4x the quantum.
 
 These settings are great for my fairly humble system, at least humble by modern standards:
 
