@@ -119,8 +119,12 @@ Running the latest version of `wireplumber` that's readily available to us is a 
 sudo apt -t trixie-backports install wireplumber
 ```
 
-### Configuring a WirePlumber Lua
-Now that we know what range or series of sample rates our card supports natively, we can apply it to WirePlumber. Create `~/.config/wireplumber/main.lua.d/` if it doesn't already exist (it didn't for me):
+### Configuring WirePlumber
+Now that we know what range or series of sample rates our card supports natively, we can apply it to WirePlumber. Depending on whether we're running version `<= 0.4` or `>=0.5`, we'll either need to create a Lua or a SPA-JSON config.
+
+#### For Old WirePlumber (0.4 or earlier)
+
+Create `~/.config/wireplumber/main.lua.d/` if it doesn't already exist:
 
 ```bash
 mkdir -p ~/.config/wireplumber/main.lua.d/
@@ -128,7 +132,7 @@ mkdir -p ~/.config/wireplumber/main.lua.d/
 
 Then add `~/.config/wireplumber/main.lua.d/50-alsa-rate.lua` with a stanza like the following:
 
-```
+```lua
 alsa_monitor.rules = {
   {
     matches = {
@@ -146,6 +150,37 @@ alsa_monitor.rules = {
   },
 }
 ```
+#### For Newer WirePlumber (0.5 or later)
+
+Create `~/.config/wireplumber/wireplumber.conf.d/` if it doesn't exist:
+
+```bash
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d/
+```
+
+Add a new config as `~/.config/wireplumber/wireplumber.conf.d/50-alsa-rate.conf`:
+
+```json
+monitor.alsa.rules = [
+  {
+    matches = [
+      {
+        node.name = "~alsa_output.*"
+      }
+    ]
+    actions = {
+      update-props = {
+        audio.rate = 48000
+        audio.allowed-rates = [ 44100, 48000, 96000, 176400, 192000 ]
+        api.alsa.period-size = 128
+        api.alsa.headroom = 0
+        resample.quality = 14
+      }
+    }
+  }
+]
+```
+
 The `["audio.rate"]` is going to be our default sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
 
 `["audio.allowed-rates"]` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include `176400`, so I'd not have set that rate for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates.
