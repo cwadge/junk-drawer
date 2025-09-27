@@ -4,7 +4,7 @@ This is a quick and dirty guide to low-latency, high-fidelity audio via PipeWire
 
 ## Basic Linux Tuning
 
-It's really desirable to be running a kernel with RT support, e.g. Xanmod, Liquorix, zen, or an 'RT' patched kernel. To take full advantage, we're also going to need to give our audio user(s) permissions to run in realtime.
+It's really desirable to be running a kernel with RT support, e.g. Xanmod, Liquorix, zen, or an 'RT' patched kernel. To take full advantage, we're also going to need to give our audio user(s) permissions to run in real-time.
 
 Create something like `/etc/security/limits.d/90-audio.conf` if it doesn't exist, and add:
 
@@ -120,7 +120,7 @@ sudo apt -t trixie-backports install wireplumber
 ```
 
 ### Configuring WirePlumber
-Now that we know what range or series of sample rates our card supports natively, we can apply it to WirePlumber. Depending on whether we're running version `<= 0.4` or `>=0.5`, we'll either need to create a Lua or a SPA-JSON config.
+Now that we know what range or series of sample rates our card supports natively, we can apply it to WirePlumber. Depending on whether we're running version `<= 0.4` or `>=0.5`, we'll either need to create a `Lua` or a `SPA-JSON` config.
 
 #### For Old WirePlumber (0.4 or earlier)
 
@@ -160,7 +160,7 @@ mkdir -p ~/.config/wireplumber/wireplumber.conf.d/
 
 Add a new config as `~/.config/wireplumber/wireplumber.conf.d/50-alsa-rate.conf`:
 
-```json
+```
 monitor.alsa.rules = [
   {
     matches = [
@@ -319,7 +319,7 @@ We can use the `pw-dump` tool to examine our latency, among other things:
 pw-dump | grep -i latency
 ```
 
-To profile in near-realtime, the `pw-top` tool is useful:
+To profile in near real-time, the `pw-top` tool is useful:
 
 ```
 S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR FORMAT           NAME
