@@ -256,7 +256,7 @@ Starting playback...
 
 As you can see, the `AUDIO` rate is being output at 192kHz. Sounds amazing, and I can still stream basic 44.1kHz YT stuff or whatever, simultaneously. Excellent.
 
-We also want to verify that we're not experiencing any buffer underruns. We can use the `pw-dump` tool to examine our latency:
+We can use the `pw-dump` tool to examine our latency, among other things:
 
 ```
 $ pw-dump | grep -i latency
