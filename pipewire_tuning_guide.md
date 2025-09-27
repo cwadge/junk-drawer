@@ -181,13 +181,13 @@ monitor.alsa.rules = [
 ]
 ```
 
-The `["audio.rate"]` is going to be our default sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
+The `audio.rate` value is going to be our default sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
 
-`["audio.allowed-rates"]` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include `176400`, so I'd not have set that rate for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates.
+`audio.allowed-rates` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include `176400`, so I'd not have set that rate for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates.
 
 Note that while I *could* include 32k, this is generally not recommended, as the sample rate isn't commonly encountered outside of VoIP, and it's better to just let the system resample in software for sample rates that low.
 
-`["resample.quality"]` is a range of `0 - 14` with `0` essentially being "linear" and `14` being the maximum quality. A value of `10` is generally considered the sweet spot for modern hardware, `4` being a good middle ground for constrained or embedded systems, and `14` being uncompromising. Ideally we're playing sample rates that are supported directly by our hardware and our configuration, and no resampling will even be necessary.
+`resample.quality` is a range of `0 - 14` with `0` essentially being "linear" and `14` being the maximum quality. A value of `10` is generally considered the sweet spot for modern hardware, `4` being a good middle ground for constrained or embedded systems, and `14` being uncompromising. Ideally we're playing sample rates that are supported directly by our hardware and our configuration, and no resampling will even be necessary.
 
 ## Setting Up PipeWire
 
