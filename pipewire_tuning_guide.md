@@ -61,7 +61,7 @@ card 1: HDMI [HDA ATI HDMI], device 9: HDMI 3 [HDMI 3]
 
 *(If I'd wanted to list __recording__ devices, I could use `arecord -l` instead, but I'm focused on optimizing playback in this guide).* 
 
-In my case, I'm using my discrete sound card for playback, which is enumerated as `card 0`, `device 0`. This would typically be exposed to the system as `/proc/asound/card0/stream0`, and this will be the case on the vast majority of sound cards in Linux. Grabbing the sample rates your card supports in hardware is really easy using this interface:
+In my case, I'm using my discrete sound card for playback, which is enumerated as `card 0`, `device 0`. This would typically be exposed to the system as `/proc/asound/card0/stream0`, and this will be the case on the vast majority of sound cards in Linux. Grabbing the sample rates your card supports in hardware is really easy using this interface. For example, here's the output from a sound card in someone else's sytem:
 
 ```
 $ cat /proc/asound/card0/stream0 | grep Rates
