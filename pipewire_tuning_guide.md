@@ -17,7 +17,7 @@ Create something like `/etc/security/limits.d/90-audio.conf` if it doesn't exist
 @audio   -  memlock    unlimited
 @audio   -  nice      -19
 ```
-PipeWire currently only runs at `-11` by default, at least at present. If you ever want to use the PipeWire JACK plugin `pipewire-jack`, for JACK applications to output via PipeWire, allowing it to run at up to `-19` might be best. If not, `-11` is probably fine here.
+PipeWire runs at `-11` by default, at least at present. If you ever want to use the PipeWire JACK plugin `pipewire-jack`, for JACK applications to output via PipeWire, allowing it to run at up to `-19` might be best. If not, `-11` is probably fine here.
 
 Next, make sure any users who will use PipeWire are in the `audio` group, e.g.:
 
@@ -142,7 +142,7 @@ alsa_monitor.rules = {
     },
     apply_properties = {
       ["audio.rate"] = 48000,
-      ["audio.allowed-rates"] = { 44100, 48000, 96000, 176400, 192000 },
+      ["audio.allowed-rates"] = { 44100, 48000, 88200, 96000, 176400, 192000 },
       ["api.alsa.period-size"] = 128,
       ["api.alsa.headroom"] = 0,
       ["resample.quality"] = 10,
@@ -171,7 +171,7 @@ monitor.alsa.rules = [
     actions = {
       update-props = {
         audio.rate = 48000
-        audio.allowed-rates = [ 44100, 48000, 96000, 176400, 192000 ]
+        audio.allowed-rates = [ 44100, 48000, 88200, 96000, 176400, 192000 ]
         api.alsa.period-size = 128
         api.alsa.headroom = 0
         resample.quality = 10
@@ -183,7 +183,7 @@ monitor.alsa.rules = [
 
 The `audio.rate` value is going to be our default sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
 
-`audio.allowed-rates` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include `176400`, so I'd not have set that rate for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates.
+`audio.allowed-rates` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include the less standard `88200` or `176400`, so I'd not have set those rates for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates.
 
 Note that while I *could* include 32k, this is generally not recommended, as the sample rate isn't commonly encountered outside of VoIP, and it's better to just let the system resample in software for sample rates that low.
 
