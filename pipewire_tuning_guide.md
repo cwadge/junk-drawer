@@ -4,7 +4,7 @@ This is a quick and dirty guide to low-latency, high-fidelity audio via PipeWire
 
 ## Basic Linux Tuning
 
-It's really desirable to be running a kernel with RT support, e.g. Xanmod, Liquorix, zen, or an 'RT' patched kernel. To take full advantage, we're also going to need to give our audio user(s) permissions to run in real-time.
+It's really desirable to be running a kernel with RT support, e.g. XanMod, Liquorix, zen, or an 'RT' patched kernel from your distro. To take full advantage, we're also going to need to give our audio user(s) permissions to run in real-time.
 
 Create something like `/etc/security/limits.d/90-audio.conf` if it doesn't exist, and add:
 
@@ -243,14 +243,14 @@ About 2.67ms.
 
 **Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `128`, the quantum will scale to `512` if the sample rate is `192000`&mdash;4x the sample rate = 4x the quantum.
 
-These settings are great for my fairly humble system, at least humble by modern standards:
+A `default.clock.quantum` of 128 is pretty aggressive, but it works well for my particular system:
 
  - Ryzen 7 3700X @4.63GHz (-48mV)
  - 32GB DDR4 3200 (XMP)
  - ASUS Xonar DX (C-Media Electronics Inc CMI8788 [Oxygen HD Audio])
- - Latest [Xanmod](https://xanmod.org/) kernel
+ - Latest [XanMod](https://xanmod.org/) kernel
 
-Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do.
+Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do. If you do need to tune, I'd start with the `default.clock.quantum` value. `default.clock.quantum = 256` is probably the right choice for most systems, and the latency is still going to be extremely low at ~5ms.
 
 ### Sample Rates
 
