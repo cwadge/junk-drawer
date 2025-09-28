@@ -1,5 +1,5 @@
-# Misc. Utils
-A collection of miscellaneous scripts for Linux gaming and system tasks. These are low-effort and largely unpolished scripts, but I found them useful, so you might also.
+# Junk Drawer
+A collection of miscellaneous resources for Linux gaming and system tasks. These are low-effort and largely unpolished, but I found them useful, so you might also.
 
 ## Scripts
 | Category | Script | Description |
