@@ -217,7 +217,7 @@ Compose `~/.config/pipewire/pipewire.conf.d/10-buffers.conf` with something like
 context.properties = {
     default.clock.min-quantum = 32
     default.clock.max-quantum = 1024
-    default.clock.quantum = 128
+    default.clock.quantum = 256
     default.clock.rate = 48000
 }
 ```
@@ -229,28 +229,28 @@ $$
 \text{Latency (ms)} = \left( \frac{\text{quantum (samples)}}{\text{sample rate (Hz)}} \right) \times 1000
 $$
 
-So for 48kHz audio playback with a quantum of 128:
+So for 48kHz audio playback with a quantum of 256:
 
 $$
 \begin{aligned}
-\text{Latency (ms)} &= \left( \frac{128}{48000} \right) \times 1000 \\
-                    &= \frac{128}{48} \\
-                    &\approx 2.67
+\text{Latency (ms)} &= \left( \frac{256}{48000} \right) \times 1000 \\
+                    &= \frac{256}{48} \\
+                    &\approx 5.33
 \end{aligned}
 $$
 
-About 2.67ms. 
+About 5.3ms. 
 
-**Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `128`, the quantum will scale to `512` if the sample rate is `192000`&mdash;4x the sample rate = 4x the quantum.
+**Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `256`, the quantum will scale to `1024` if the sample rate is `192000`&mdash;4x the sample rate = 4x the quantum.
 
-A `default.clock.quantum` of 128 is pretty aggressive, but it works well for my particular system:
+A `default.clock.quantum` of 256 works well for my particular system:
 
  - Ryzen 7 3700X @4.63GHz (-48mV)
  - 32GB DDR4 3200 (XMP)
  - ASUS Xonar DX (C-Media Electronics Inc CMI8788 [Oxygen HD Audio])
  - Latest [XanMod](https://xanmod.org/) kernel
 
-Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do. If you do need to tune, I'd start with the `default.clock.quantum` value. `default.clock.quantum = 256` is probably the right choice for most systems, and the latency is still going to be extremely low at ~5ms.
+Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do. If you do need to tune, I'd by experimenting with the `default.clock.quantum` value.
 
 ### Sample Rates
 
@@ -313,26 +313,25 @@ Starting playback...
 
 As you can see, the `AO` (audio out) rate that's being output is 192kHz. Sounds amazing, and I can still stream basic 44.1kHz YT stuff or whatever, simultaneously. Excellent.
 
-We can use the `pw-dump` tool to examine our latency, among other things:
+We can use the `pw-dump` tool to examine our latency, among many other things:
 
 ```bash
 pw-dump | grep -i latency
 ```
 
-To profile in near real-time, the `pw-top` tool is useful:
+To profile in near real-time, the `pw-top` tool is extremely useful:
 
 ```
 S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR FORMAT           NAME 
 S   30      0      0    ---     ---   ---   ---     0                  Dummy-Driver
 S   31      0      0    ---     ---   ---   ---     0                  Freewheel-Driver
-S   57      0      0    ---     ---   ---   ---     0                  Midi-Bridge
-S   60      0      0    ---     ---   ---   ---     0                  bluez_midi.server
-R   63   1024  48000  67.3us  10.2us  0.00  0.00   74    S32LE 2 48000 alsa_output.pci-0000_08_04.0.analog-stereo
-R   83   1024  48000  12.5us  14.6us  0.00  0.00    0    F32LE 2 48000  + Brave
-R   72   6000 192000   6.4us  15.7us  0.00  0.00    0   S32LE 2 192000  + alsa_playback.mplayer
-R   73   8192 192000  27.3us  35.7us  0.00  0.00    0   F32LE 2 192000  + Clementine
-R   65    128  48000  15.6us   1.2us  0.01  0.00    0   BGRx 2558x1367 kwin_wayland
-R   67      0      0  20.0us   7.0us  0.01  0.00    0   BGRx 2558x1367  + plasmashell
+S   50      0      0    ---     ---   ---   ---     0                  Midi-Bridge
+S   53      0      0    ---     ---   ---   ---     0                  bluez_midi.server
+R   56   4096 192000  68.8us  87.7us  0.00  0.00    0    S32LE 2 48000 alsa_output.pci-0000_08_04.0.analog-stereo
+R   64   6000 192000  12.2us  22.9us  0.00  0.00    0   S32LE 2 192000  + alsa_playback.mplayer
+R   81   1024  48000  10.9us  51.7us  0.00  0.00    0    F32LE 2 48000  + Brave
+R   85    256  48000  39.6us   0.8us  0.01  0.00    0   BGRx 2560x1396 kwin_wayland
+R   76      0      0   0.0us   0.0us  0.00  0.00    0   BGRx 2560x1396  + plasmashell
 ```
 It also supports batch output, so you can log stats in the background, for example:
 
@@ -345,6 +344,113 @@ As for any buffer underruns or other hiccups, we can monitor WirePlumber via `jo
 ```bash
 journalctl --user -u wireplumber -f | grep -E "underrun|xrun|resume"
 ```
+
+And for deep inspection of your WirePlumber instance for fine-tuning or troubleshooting, there's `wpctl`:
+
+```
+$ wpctl status
+PipeWire 'pipewire-0' [1.4.7, chris@crow, cookie:2686875995]
+ └─ Clients:
+        33. pipewire                            [1.4.7, chris@crow, pid:1924]
+        34. WirePlumber                         [1.4.7, chris@crow, pid:1923]
+        43. kwin_wayland                        [1.4.7, chris@crow, pid:1975]
+        47. WirePlumber [export]                [1.4.7, chris@crow, pid:1923]
+        57. libcanberra                         [1.4.7, chris@crow, pid:2122]
+        58. xdg-desktop-portal                  [1.4.7, chris@crow, pid:1981]
+        59.                                     [1.4.7, chris@crow, pid:2122]
+        60. libcanberra                         [1.4.7, chris@crow, pid:2172]
+        61. plasmashell                         [1.4.7, chris@crow, pid:2172]
+        62.                                     [1.4.7, chris@crow, pid:2172]
+        63. Steam Voice Settings                [1.4.7, chris@crow, pid:2938]
+        65. Brave input                         [1.4.7, chris@crow, pid:6495]
+        67. Steam                               [1.4.7, chris@crow, pid:2938]
+        76. wpctl                               [1.4.7, chris@crow, pid:8363]
+
+Audio
+ ├─ Devices:
+ │      48. CMI8788 [Oxygen HD Audio] (Virtuoso 100 (Xonar DX)) [alsa]
+ │      49. Navi 48 HDMI/DP Audio Controller    [alsa]
+ │  
+ ├─ Sinks:
+ │  *   56. CMI8788 [Oxygen HD Audio] (Virtuoso 100 (Xonar DX)) Analog Stereo [vol: 1.00]
+ │  
+ ├─ Sources:
+ │  
+ ├─ Filters:
+ │  
+ └─ Streams:
+
+Video
+ ├─ Devices:
+ │  
+ ├─ Sinks:
+ │  
+ ├─ Sources:
+ │  
+ ├─ Filters:
+ │  
+ └─ Streams:
+
+Settings
+ └─ Default Configured Devices:
+         0. Audio/Sink    alsa_output.pci-0000_08_04.0.analog-stereo
+         
+$ wpctl inspect 56
+id 56, type PipeWire:Interface:Node
+    alsa.card = "0"
+    alsa.card_name = "Xonar DX"
+    alsa.class = "generic"
+    alsa.components = "CS4398 CS4362A CS5361 AV200"
+    alsa.device = "0"
+    alsa.driver_name = "snd_virtuoso"
+    alsa.id = "Multichannel"
+    alsa.long_card_name = "Asus Virtuoso 100 at 0xf000, irq 33"
+    alsa.mixer_name = "AV200"
+    alsa.name = "Multichannel"
+    alsa.resolution_bits = "16"
+    alsa.subclass = "generic-mix"
+    alsa.subdevice = "0"
+    alsa.subdevice_name = "subdevice #0"
+    alsa.sync.id = "00000000:00000000:00000000:00000000"
+    api.alsa.card.longname = "Asus Virtuoso 100 at 0xf000, irq 33"
+    api.alsa.card.name = "Xonar DX"
+    api.alsa.path = "front:0"
+    api.alsa.pcm.card = "0"
+    api.alsa.pcm.stream = "playback"
+    api.alsa.period-size = "128"
+    audio.allowed-rates = "[ 44100, 48000, 88200, 96000, 176400, 192000 ]"
+    audio.channels = "2"
+    audio.position = "FL,FR"
+    audio.rate = "48000"
+    card.profile.device = "6"
+  * client.id = "47"
+    clock.quantum-limit = "8192"
+    device.api = "alsa"
+    device.class = "sound"
+    device.icon-name = "audio-card-analog"
+  * device.id = "48"
+    device.profile.description = "Analog Stereo"
+    device.profile.name = "analog-stereo"
+    device.routes = "1"
+  * factory.id = "19"
+    factory.name = "api.alsa.pcm.sink"
+    library.name = "audioconvert/libspa-audioconvert"
+  * media.class = "Audio/Sink"
+  * node.description = "CMI8788 [Oxygen HD Audio] (Virtuoso 100 (Xonar DX)) Analog Stereo"
+    node.driver = "true"
+    node.loop.name = "data-loop.0"
+  * node.name = "alsa_output.pci-0000_08_04.0.analog-stereo"
+  * node.nick = "Multichannel"
+    node.pause-on-idle = "false"
+  * object.path = "alsa:acp:DX:6:playback"
+  * object.serial = "56"
+    port.group = "playback"
+  * priority.driver = "1009"
+  * priority.session = "1009"
+    resample.quality = "10"
+```
+
+There are a lot of great tools in the WirePlumber / PipeWire chest, and they can be extremely useful to help you get the best results.
 
 ## Extras
 
