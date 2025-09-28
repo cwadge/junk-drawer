@@ -322,14 +322,22 @@ pw-dump | grep -i latency
 To profile in near real-time, the `pw-top` tool is useful:
 
 ```
-S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR FORMAT           NAME
+S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR FORMAT           NAME 
 S   30      0      0    ---     ---   ---   ---     0                  Dummy-Driver
 S   31      0      0    ---     ---   ---   ---     0                  Freewheel-Driver
-S   58      0      0    ---     ---   ---   ---     0                  Midi-Bridge
-S   61      0      0    ---     ---   ---   ---     0                  bluez_midi.server
-R   64   4096 192000  79.2us 614.6us  0.00  0.03    1    S32LE 2 48000 alsa_output.pci-0000_08_04.0.analog-stereo
+S   57      0      0    ---     ---   ---   ---     0                  Midi-Bridge
+S   60      0      0    ---     ---   ---   ---     0                  bluez_midi.server
+R   63   1024  48000  67.3us  10.2us  0.00  0.00   74    S32LE 2 48000 alsa_output.pci-0000_08_04.0.analog-stereo
+R   83   1024  48000  12.5us  14.6us  0.00  0.00    0    F32LE 2 48000  + Brave
 R   72   6000 192000   6.4us  15.7us  0.00  0.00    0   S32LE 2 192000  + alsa_playback.mplayer
-R   66   1024  48000  11.8us  63.0us  0.00  0.00    0    F32LE 2 48000  + Brave
+R   73   8192 192000  27.3us  35.7us  0.00  0.00    0   F32LE 2 192000  + Clementine
+R   65    128  48000  15.6us   1.2us  0.01  0.00    0   BGRx 2558x1367 kwin_wayland
+R   67      0      0  20.0us   7.0us  0.01  0.00    0   BGRx 2558x1367  + plasmashell
+```
+It also supports batch output, so you can log stats in the background, for example:
+
+```bash
+pw-top -b > /tmp/pipewire-latency-`date +%F`.log
 ```
 
 As for any buffer underruns or other hiccups, we can monitor WirePlumber via `journalctl`:
