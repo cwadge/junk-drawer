@@ -61,7 +61,7 @@ card 1: HDMI [HDA ATI HDMI], device 9: HDMI 3 [HDMI 3]
 
 *(If I'd wanted to list __recording__ devices, I could use `arecord -l` instead, but I'm focused on optimizing playback in this guide).* 
 
-In my case, I'm using my discrete sound card for playback, which is enumerated as `card 0`, `device 0`. This would typically be exposed to the system as `/proc/asound/card0/stream0`, and this will be the case on the vast majority of sound cards in Linux. Grabbing the sample rates your card supports in hardware is really easy using this interface. For example, here's the output from a sound card in someone else's sytem:
+In my case, I'm using my discrete sound card for playback, which is enumerated as `card 0`, `device 0`. This would typically be exposed to the system as `/proc/asound/card0/stream0`, and this will be the case on the vast majority of sound cards in Linux. Grabbing the sample rates your card supports in hardware is really easy using this interface. For example, here's the output from a sound card in someone else's system:
 
 ```
 $ cat /proc/asound/card0/stream0 | grep Rates
@@ -235,7 +235,7 @@ $$
 \begin{aligned}
 \text{Latency (ms)} &= \left( \frac{256}{48000} \right) \times 1000 \\
                     &= \frac{256}{48} \\
-                    &\approx 5.33
+                    &\approx 5.33 \\
 \end{aligned}
 $$
 
@@ -278,7 +278,7 @@ systemctl --user restart pipewire pipewire-pulse wireplumber
 
 ## Testing
 
-In my case, I tested some 192kHz FLAC from [www.2L.no](https://www.2L.no/) via `mplayer`, for maximum verbiage:
+In my case, I tested some 192kHz FLAC from [www.2L.no](https://www.2L.no/) via `mplayer`, for maximum verbosity:
 
 ```
 Playing 2L-090C_stereo-192kHz_01.flac.
