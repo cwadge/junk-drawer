@@ -239,9 +239,9 @@ $$
 \end{aligned}
 $$
 
-About 5.3ms. 
+About **5.3ms**. 
 
-**Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `256`, the quantum will scale to `1024` if the sample rate is `192000`&mdash;4x the sample rate = 4x the quantum.
+**Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `256`, the quantum will scale to `1024` if the sample rate is `192000`&mdash;4x the sample rate = 4x the quantum. The latency remains consistent.
 
 A `default.clock.quantum` of 256 works well for my particular system:
 
