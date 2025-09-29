@@ -189,6 +189,8 @@ Note that while I *could* include 32k, this is generally not recommended, as the
 
 `resample.quality` is a range of `0 - 14` with `0` essentially being "linear" and `14` being the maximum quality. A value of `10` is generally considered the sweet spot for modern hardware, `4` being a good middle ground for constrained or embedded systems, and `14` being uncompromising. Ideally we're playing sample rates that are supported directly by our hardware and our configuration, and no resampling will even be necessary.
 
+Note also that this setup targets *all* nodes with `node.name = "~alsa_output.*"` for the sake of simplicity. If this isn't what you want, you could certainly have multiple stanzas, each with different policies, targeted at specific audio devices instead. I'll leave that scenario as an exercise for the reader.
+
 ## Setting Up PipeWire
 
 Even more so than WirePlumber, having the latest version of `pipewire` that's within arm's reach is a really good idea. E.g.:
@@ -450,7 +452,7 @@ id 56, type PipeWire:Interface:Node
     resample.quality = "10"
 ```
 
-There are a lot of great tools in the WirePlumber / PipeWire chest, and they can be extremely useful to help you get the best results.
+I've only really touched lightly on the utilities you've got at your disposal. Feel free to experiment. 
 
 ## Extras
 
