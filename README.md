@@ -15,12 +15,12 @@ A collection of miscellaneous resources for Linux gaming and system tasks. These
 ## Installation
 Clone the whole repo:
 ```bash
-git clone https://github.com/cwadge/misc-utils.git
+git clone https://github.com/cwadge/junk-drawer.git
 ```
 
 or download an individual script, e.g.
 ```bash
-wget https://raw.githubusercontent.com/cwadge/misc-utils/main/set-rdna-oc-fan.sh
+wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.sh
 ```
 
 ## Usage
