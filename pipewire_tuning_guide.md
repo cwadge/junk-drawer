@@ -187,7 +187,7 @@ The `audio.rate` value is going to be our default sample rate. For my needs (mos
 
 Note that while I *could* include 32k, this is generally not recommended, as the sample rate isn't commonly encountered outside of VoIP, and it's better to just let the system resample in software for sample rates that low.
 
-`resample.quality` is a range of `0 - 14` with `0` essentially being "linear" and `14` being the maximum quality. A value of `10` is generally considered the sweet spot for modern hardware, `4` being a good middle ground for constrained or embedded systems, and `14` being uncompromising but computationally expensive. Ideally we're playing sample rates that are supported directly by our hardware and our configuration, and no resampling will even be necessary, but there are always edge cases.
+`resample.quality` is a range of `0 - 14` with `0` essentially being "linear" and `14` being the maximum quality. A value of `10` is generally considered the sweet spot for modern hardware, `4` being a good middle ground for constrained or embedded systems, and `14` being uncompromising but computationally expensive. Ideally we're playing sample rates that are supported directly by our hardware and our configuration, and no resampling will even be necessary, though there's always the odd edge case or two.
 
 Note also that this setup targets *all* nodes with `node.name = "~alsa_output.*"` for the sake of simplicity. If this isn't what you want, you could certainly have multiple stanzas, each with different policies, targeted at specific audio devices instead. I'll leave that scenario as an exercise for the reader.
 
