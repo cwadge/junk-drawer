@@ -4,7 +4,7 @@ This is a quick and dirty guide to low-latency, high-fidelity audio via PipeWire
 
 ## Basic Linux Tuning
 
-It's really desirable to be running a kernel with RT support, e.g. XanMod, Liquorix, zen, or an 'RT' patched kernel from your distro. To take full advantage, we're also going to need to give our audio user(s) permissions to run in real-time.
+It's really desirable to be running a kernel with low latency support, e.g. XanMod, Liquorix, zen, or an 'RT' patched kernel from your distro. To take full advantage, we're also going to need to give our audio user(s) permissions to run in real-time.
 
 Create something like `/etc/security/limits.d/90-audio.conf` if it doesn't exist, and add:
 
@@ -187,7 +187,7 @@ The `audio.rate` value is going to be our default sample rate. For my needs (mos
 
 Note that while I *could* include 32k, this is generally not recommended, as the sample rate isn't commonly encountered outside of VoIP, and it's better to just let the system resample in software for sample rates that low.
 
-`resample.quality` is a range of `0 - 14` with `0` essentially being "linear" and `14` being the maximum quality. A value of `10` is generally considered the sweet spot for modern hardware, `4` being a good middle ground for constrained or embedded systems, and `14` being uncompromising. Ideally we're playing sample rates that are supported directly by our hardware and our configuration, and no resampling will even be necessary.
+`resample.quality` is a range of `0 - 14` with `0` essentially being "linear" and `14` being the maximum quality. A value of `10` is generally considered the sweet spot for modern hardware, `4` being a good middle ground for constrained or embedded systems, and `14` being uncompromising but computationally expensive. Ideally we're playing sample rates that are supported directly by our hardware and our configuration, and no resampling will even be necessary, but there are always edge cases.
 
 Note also that this setup targets *all* nodes with `node.name = "~alsa_output.*"` for the sake of simplicity. If this isn't what you want, you could certainly have multiple stanzas, each with different policies, targeted at specific audio devices instead. I'll leave that scenario as an exercise for the reader.
 
