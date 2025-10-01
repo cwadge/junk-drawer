@@ -183,7 +183,7 @@ monitor.alsa.rules = [
 
 The `audio.rate` value is going to be our default sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
 
-`audio.allowed-rates` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include the less standard `88200` or `176400`, so I'd not have set those rates for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates.
+`audio.allowed-rates` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include the less standard `88200` or `176400`, so I'd not have set those rates for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates. PipeWire presently supports up to 32 sample rates in `audio.allowed-rates`.
 
 Note that while I *could* include 32k, this is generally not recommended, as the sample rate isn't commonly encountered outside of VoIP, and it's better to just let the system resample in software for sample rates that low.
 
