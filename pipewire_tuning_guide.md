@@ -141,7 +141,6 @@ alsa_monitor.rules = {
       },
     },
     apply_properties = {
-      ["audio.rate"] = 48000,
       ["audio.allowed-rates"] = { 44100, 48000, 88200, 96000, 176400, 192000 },
       ["api.alsa.period-size"] = 128,
       ["api.alsa.headroom"] = 0,
@@ -170,7 +169,6 @@ monitor.alsa.rules = [
     ]
     actions = {
       update-props = {
-        audio.rate = 48000
         audio.allowed-rates = [ 44100, 48000, 88200, 96000, 176400, 192000 ]
         api.alsa.period-size = 128
         api.alsa.headroom = 0
@@ -180,8 +178,6 @@ monitor.alsa.rules = [
   }
 ]
 ```
-
-The `audio.rate` value is going to be our default sample rate. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
 
 `audio.allowed-rates` are what we want to advertise to the system as supported. I chose these because they're standard sample rates and my card supports them without resampling. On the other card I looked at earlier, it only supported a series of sample rates that didn't include the less standard `88200` or `176400`, so I'd not have set those rates for that particular card. As my card allows a range from `32000 - 192000`, I'm all good for any arbitrary sample rates, and PipeWire itself presently supports up to 32 allowed rates.
 
@@ -252,7 +248,7 @@ A `default.clock.quantum` of 256 works well for my particular system:
  - ASUS Xonar DX (C-Media Electronics Inc CMI8788 [Oxygen HD Audio])
  - Latest [XanMod](https://xanmod.org/) kernel
 
-Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do. If you do need to tune, I'd by experimenting with the `default.clock.quantum` value.
+Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do. If you do need to tune, I'd start by experimenting with the `default.clock.quantum` value.
 
 ### Sample Rates
 
@@ -266,7 +262,8 @@ context.properties = {
     default.clock.allowed-rates = [ 44100 48000 88200 96000 176400 192000 ]
 }
 ```
-Same deal, a default clock rate and our list of allowed sample rates. 
+
+The `default.clock.rate` value is going to be our default sample rate, from our list of allowed rates. For my needs (mostly games, music, YT and similar), 48kHz is my sweet spot. It's *probably* yours, too.
 
 ## Applying Our Changes
 
@@ -329,11 +326,11 @@ S   30      0      0    ---     ---   ---   ---     0                  Dummy-Dri
 S   31      0      0    ---     ---   ---   ---     0                  Freewheel-Driver
 S   50      0      0    ---     ---   ---   ---     0                  Midi-Bridge
 S   53      0      0    ---     ---   ---   ---     0                  bluez_midi.server
-R   56   4096 192000  68.8us  87.7us  0.00  0.00    0    S32LE 2 48000 alsa_output.pci-0000_08_04.0.analog-stereo
-R   64   6000 192000  12.2us  22.9us  0.00  0.00    0   S32LE 2 192000  + alsa_playback.mplayer
-R   81   1024  48000  10.9us  51.7us  0.00  0.00    0    F32LE 2 48000  + Brave
-R   85    256  48000  39.6us   0.8us  0.01  0.00    0   BGRx 2560x1396 kwin_wayland
-R   76      0      0   0.0us   0.0us  0.00  0.00    0   BGRx 2560x1396  + plasmashell
+R   56   4096 192000  67.8us  19.9us  0.00  0.00    0   S32LE 2 192000 alsa_output.pci-0000_08_04.0.analog-stereo
+R   78   1024  48000   9.8us  52.6us  0.00  0.00    0    F32LE 2 48000  + Brave
+R   65   6000 192000  12.5us  20.0us  0.00  0.00    0   S32LE 2 192000  + alsa_playback.mplayer
+R   81    256  48000  20.9us   1.3us  0.00  0.00    0   BGRx 2560x1368 kwin_wayland
+R   84      0      0   0.0us   0.0us  0.00  0.00    0   BGRx 2560x1368  + plasmashell
 ```
 It also supports batch output, so you can log stats in the background, for example:
 
@@ -416,14 +413,15 @@ id 56, type PipeWire:Interface:Node
     alsa.sync.id = "00000000:00000000:00000000:00000000"
     api.alsa.card.longname = "Asus Virtuoso 100 at 0xf000, irq 33"
     api.alsa.card.name = "Xonar DX"
+    api.alsa.headroom = "0"
     api.alsa.path = "front:0"
     api.alsa.pcm.card = "0"
     api.alsa.pcm.stream = "playback"
+    api.alsa.period-num = "256"
     api.alsa.period-size = "128"
     audio.allowed-rates = "[ 44100, 48000, 88200, 96000, 176400, 192000 ]"
     audio.channels = "2"
     audio.position = "FL,FR"
-    audio.rate = "48000"
     card.profile.device = "6"
   * client.id = "47"
     clock.quantum-limit = "8192"
@@ -441,6 +439,7 @@ id 56, type PipeWire:Interface:Node
   * node.description = "CMI8788 [Oxygen HD Audio] (Virtuoso 100 (Xonar DX)) Analog Stereo"
     node.driver = "true"
     node.loop.name = "data-loop.0"
+    node.max-latency = "16384/192000"
   * node.name = "alsa_output.pci-0000_08_04.0.analog-stereo"
   * node.nick = "Multichannel"
     node.pause-on-idle = "false"
@@ -456,6 +455,10 @@ I've only really touched lightly on the utilities you've got at your disposal. F
 
 ## Extras
 
+Some things that may or may not be interesting or relevant for your situation:
+
+### Disable FluidSynth Daemon
+
 Optionally, if you're not routinely playing MIDI from your desktop as a matter of course, you can disable `fluidsynth` sessions, which can free up resources and avoid potential conflicts.
 
 ```bash
@@ -463,6 +466,60 @@ systemctl --user stop fluidsynth
 systemctl --user mask fluidsynth
 ```
 Personally I prefer `qsynth` anyway, launching it if and when I need it rather than `fluidsynth` constantly daemonized in the background. 
+
+### Usage-Specific Tuning
+
+You may have noticed that `api.alsa.period-size = 128` in my example config for WirePlumber and `default.clock.quantum = 256` don't align. You may have also noticed that some other guides will advise you to make these equal, e.g. `api.alsa.period-size = 256` for efficiency. They're not wrong; that *is* more efficient. If your primary focus in tuning your Linux audio system is for pro audio, video editing, etc. you'll probably want to do exactly that. Matching the ALSA period size and the default clock quantum will reduce CPU interrupts, and give you more consistent timings for steady loads. But if your loads are *dynamic*, like multitasking on your desktop, listening to music and watching video tutorials at the same time, playing games with crazy amounts of polyphony like *Cyberpunk 2077*, *Red Dead Redemption 2*, *Mount & Blade II: Bannerlord*, etc. this is no longer ideal. Having an `api.alsa.period-size` that's lower than your `default.clock.quantum` generates more interrupts, but also handles bursts better and provides better protection against underruns. The same goes for the `default.clock.min-quantum`; raising it slightly can help provide more predictable latency for more constant workloads, but it also raises the granularity, which is worse for dynamic workloads like games.
+
+So, in general:
+
+#### If your system is going to be a professional audio / video workstation:
+
+ - Setting your `api.alsa.period-size` and `default.clock.quantum` to a matching value, e.g. `256`, will give you more efficiency and more predictable timings.
+ - Adjusting your `default.clock.min-quantum` higher, e.g. `64` or `128` may further smooth out average latencies, depending on your rig and your workloads.
+
+#### If your system is going to be a general purpose, gaming, or multimedia system:
+
+ - The `api.alsa.period-size` should be smaller than the `default.clock.quantum` to force finer-grained interrupt polling.
+ - `default.clock.min-quantum` should be really low to absorb more sudden or bursty workloads. If your system hiccups with a low min-quantum, try raising it, but it could also be that your kernel is tuned to be too coarse-grained. Make sure you're running one with `PREEMPT` or `RT` tuning, e.g.:
+
+```
+$ uname -a
+Linux crow 6.16.9-x64v3-xanmod1 #0~20250925.g836ee36 SMP PREEMPT_DYNAMIC Thu Sep 25 15:19:46 UTC x86_64 GNU/Linux
+```
+If you've already checked all the obvious things and you're having issues, try running a dynamic workload (like a heavy video game benchmark with lots of polyphony) while batch-logging from `pw-top`:
+
+```bash
+pw-top -b > /tmp/pw-game-benchmark-`date +%F`.log
+```
+
+If you're seeing crazy spikes in latency, or especially the `ERR` counter incrementing, that'll help point you in the right direction of where to start adjusting your settings.
+
+#### If you're outputting to a sound system with a fixed sample rate, e.g. 192kHz:
+
+In the instance where you're sending audio to a receiver, external DAC, or other equipment that expects a *fixed sample rate*, you should specify that in your WirePlumber configuration. For example, in `~/.config/wireplumber/wireplumber.conf.d/50-alsa-rate.conf`:
+
+```
+monitor.alsa.rules = [
+  {
+    matches = [
+      {
+        node.name = "~alsa_output.*"
+      }
+    ]
+    actions = {
+      update-props = {
+        audio.rate = 192000
+        audio.allowed-rates = [ 44100, 48000, 88200, 96000, 176400, 192000 ]
+        api.alsa.period-size = 128
+        api.alsa.headroom = 0
+        resample.quality = 10
+      }
+    }
+  }
+]
+```
+or whatever rate the receiving end of the connection is expecting, e.g., `audio.rate = 48000`.
 
 ---
 
