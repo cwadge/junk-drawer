@@ -469,16 +469,16 @@ Personally I prefer `qsynth` anyway, launching it if and when I need it rather t
 
 ### Usage-Specific Tuning
 
-You may have noticed that `api.alsa.period-size = 128` in my example config for WirePlumber and `default.clock.quantum = 256` don't align. You may have also noticed that some other guides will advise you to make these equal, e.g. `api.alsa.period-size = 256` for efficiency. They're not wrong; that *is* more efficient. If your primary focus in tuning your Linux audio system is for pro audio, video editing, etc. you'll probably want to do exactly that. Matching the ALSA period size and the default clock quantum will reduce CPU interrupts, and give you more consistent timings for steady loads. But if your loads are *dynamic*, like multitasking on your desktop, listening to music and watching video tutorials at the same time, playing games with crazy amounts of polyphony like *Cyberpunk 2077*, *Red Dead Redemption 2*, *Mount & Blade II: Bannerlord*, etc. this is no longer ideal. Having an `api.alsa.period-size` that's lower than your `default.clock.quantum` generates more interrupts, but also handles bursts better and provides better protection against underruns. The same goes for the `default.clock.min-quantum`; raising it slightly can help provide more predictable latency for more constant workloads, but it also raises the granularity, which is worse for dynamic workloads like games.
+You may have noticed that `api.alsa.period-size = 128` in my example config for WirePlumber and `default.clock.quantum = 256` don't align. You may have also noticed that some other guides will advise you to make these equal, e.g. `api.alsa.period-size = 256` for efficiency. They're not wrong; that *is* more efficient. If your primary focus in tuning your Linux audio system is for pro audio, video editing, etc. you'll probably want to do exactly that. Matching the ALSA period size and the default clock quantum will reduce CPU interrupts, and give you more consistent timings for steady loads. But if your loads are *dynamic*, like multitasking on your desktop, listening to music and watching video tutorials at the same time, playing games with crazy amounts of polyphony like *Cyberpunk 2077*, *Red Dead Redemption 2*, *Mount & Blade II: Bannerlord*, etc. this is no longer ideal. Having an `api.alsa.period-size` that's lower than your `default.clock.quantum` generates more interrupts, but also handles bursts better and provides better protection against underruns. The same goes for the `default.clock.min-quantum`; raising it slightly can help provide more predictable latency for more constant workloads, but it also reduces the granularity, which is worse for dynamic workloads like games.
 
 So, in general:
 
-#### If your system is going to be a professional audio / video workstation:
+#### If your system is going to be a professional audio / video workstation
 
  - Setting your `api.alsa.period-size` and `default.clock.quantum` to a matching value, e.g. `256`, will give you more efficiency and more predictable timings.
  - Adjusting your `default.clock.min-quantum` higher, e.g. `64` or `128` may further smooth out average latencies, depending on your rig and your workloads.
 
-#### If your system is going to be a general purpose, gaming, or multimedia system:
+#### If your system is going to be a general purpose, gaming, or multimedia system
 
  - The `api.alsa.period-size` should be smaller than the `default.clock.quantum` to force finer-grained interrupt polling.
  - `default.clock.min-quantum` should be really low to absorb more sudden or bursty workloads. If your system hiccups with a low min-quantum, try raising it, but it could also be that your kernel is tuned to be too coarse-grained. Make sure you're running one with `PREEMPT` or `RT` tuning, e.g.:
@@ -495,7 +495,7 @@ pw-top -b > /tmp/pw-game-benchmark-`date +%F`.log
 
 If you're seeing crazy spikes in latency, or especially the `ERR` counter incrementing, that'll help point you in the right direction of where to start adjusting your settings.
 
-#### If you're outputting to a sound system with a fixed sample rate, e.g. 192kHz:
+#### If you're outputting to a sound system with a fixed sample rate
 
 In the instance where you're sending audio to a receiver, external DAC, or other equipment that expects a *fixed sample rate*, you should specify that in your WirePlumber configuration. For example, in `~/.config/wireplumber/wireplumber.conf.d/50-alsa-rate.conf`:
 
@@ -519,7 +519,7 @@ monitor.alsa.rules = [
   }
 ]
 ```
-or whatever rate the receiving end of the connection is expecting, e.g., `audio.rate = 48000`.
+or whatever rate the receiving end of the connection is expecting, like `audio.rate = 48000`.
 
 ---
 
