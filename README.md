@@ -19,9 +19,24 @@ Clone the whole repo:
 git clone https://github.com/cwadge/junk-drawer.git
 ```
 
-or download an individual script, e.g.
+or download an individual script:
 ```bash
 wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.sh
+```
+
+You could also download & install with a one-liner:
+```bash
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.sh -O /usr/local/sbin/set-rdna-oc-fan.sh && sudo chmod 755 /usr/local/sbin/set-rdna-oc-fan.sh
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/psp-shrink-ray.sh -O /usr/local/bin/psp-shrink-ray.sh && sudo chmod 755 /usr/local/bin/psp-shrink-ray.sh
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/midi2wav.sh -O /usr/local/bin/midi2wav.sh && sudo chmod 755 /usr/local/bin/midi2wav.sh
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/sonicsqueezer.sh -O /usr/local/bin/sonicsqueezer.sh && sudo chmod 755 /usr/local/bin/sonicsqueezer.sh
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/transcode-monster.sh -O /usr/local/bin/transcode-monster.sh && sudo chmod 755 /usr/local/bin/transcode-monster.sh
+```
+
+On Batocera:
+```bash
+wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/network_tune_batocera -O /userdata/system/services/network_tune && sudo chmod 755 /userdata/system/services/network_tune
+wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/nfs_mount_batocera -O /userdata/system/services/nfs_mount && sudo chmod 755 /userdata/system/services/nfs_mount
 ```
 
 ## Usage
