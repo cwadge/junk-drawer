@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -184,6 +184,7 @@ OPTIONS:
   -t, --type TYPE     Override auto-detection: 'series' or 'movie'
   -n, --name NAME     Set title name (e.g., "Firefly" or "Dune")
   -s, --season NUM    Process only specific season (default: all seasons)
+  -e, --episode NUM   Process only specific episode in series mode
   -y, --year YEAR     Add year to movie title (e.g., 1984)
 
   -q, --quality NUM   Video quality CQP/CRF value (default: ${DEFAULT_QUALITY})
@@ -216,12 +217,12 @@ OPTIONS:
 
 ENCODER:
   The script uses hybrid encoding for optimal speed and quality:
-  - SD content (≤576p): libx265 software encoding with correct color handling
-  - HD content (>576p): hevc_vaapi hardware encoding at 50x+ speed
+  - SD content (≤576p): libx265 software encoding with robust image processing
+  - HD content (>576p): hevc_vaapi hardware encoding for a massive speedup
 
   For software encoding (SD content):
-  - Uses 'medium' preset by default for balanced speed/quality
-  - Runs with reduced priority (nice/ionice) to avoid system impact
+  - Performs color correction to avoid chroma subsampling errors, etc.
+  - Runs with reduced priority (nice/ionice) to lessen system impact
   - Maximizes CPU utilization with automatic thread pooling
   - You can adjust preset with --preset for speed/quality tradeoff
 
@@ -229,8 +230,8 @@ AUDIO ENCODING:
   The script copies the first audio track and encodes others to HE-AAC:
   - First track: Copied as-is (preserves original quality)
   - Other tracks: HE-AAC with channel-appropriate bitrates
-    - Mono: 96 kbps (transparent)
-    - Stereo: 128 kbps (transparent)
+    - Mono: 96 kbps
+    - Stereo: 128 kbps
     - 5.1 surround: 192 kbps
     - 7.1+ surround: 256 kbps
 
@@ -275,13 +276,16 @@ EXAMPLES:
   # Override season detection
   transcode-monster.sh -s 2 "/media/rips/disc1" "/media/tv/House"
 
+  # Process only episode 3 of season 1
+  transcode-monster.sh -s 1 -e 3 "/media/tv/Show/S1D1"
+
   # Custom quality and disable crop detection
   transcode-monster.sh -q 20 --no-crop "/media/rips"
 
-  # Anime mode: prefer Japanese audio with English subs
+  # "Anime mode": prefer foreign audio with subs in our default language
   transcode-monster.sh --original-lang jpn "/media/anime/Cowboy Bebop/"
 
-  # Spanish content: default Spanish audio, no English subs needed
+  # Default language override: Spanish audio for maðɾe, no default subs needed
   transcode-monster.sh --language spa "/media/series/La Casa de Papel/"
 
 EOF
@@ -422,7 +426,18 @@ detect_interlacing() {
 # Detect crop
 detect_crop() {
 	local input="$1"
-	local crop_line=$(ffmpeg -v quiet -i "$input" -vf cropdetect=0.1:16:100 -frames:v 1000 -f null - 2>&1 | grep 'crop=' | tail -20 | sort | uniq -c | sort -nr | head -1 | grep -o 'crop=[0-9:]*' | cut -d'=' -f2)
+
+	# Get total duration and seek to ~10% in to avoid title cards
+	local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+	duration=${duration//,/}
+
+	local seek_time="0"
+	if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+		seek_time=$(echo "scale=2; $duration * 0.1" | bc 2>/dev/null || echo "0")
+	fi
+
+	# Don't use -v quiet here - we need the cropdetect output!
+	local crop_line=$(ffmpeg -ss "$seek_time" -i "$input" -vf cropdetect=0.1:16:100 -frames:v 1000 -f null - 2>&1 | grep 'crop=' | tail -20 | sort | uniq -c | sort -nr | head -1 | grep -o 'crop=[0-9:]*' | cut -d'=' -f2)
 
 	if [[ -z "$crop_line" ]]; then
 		echo ""
@@ -483,7 +498,6 @@ build_vf() {
 	local vf=""
 	local vf_cpu=""  # CPU-side filters (before hwupload)
 	local vf_gpu=""  # GPU-side filters (after hwupload)
-	local post_crop_h=""
 
   # Get height for later use
   local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input")
@@ -494,8 +508,6 @@ build_vf() {
 	  local crop=$(detect_crop "$input")
 	  if [[ -n "$crop" ]]; then
 		  vf_cpu="crop=$crop"
-		  # Extract the height after crop for padding calculation
-		  post_crop_h=$(echo "$crop" | cut -d: -f2)
 	  fi
   fi
 
@@ -550,23 +562,6 @@ build_vf() {
 
     # Add GPU filters if any
     [[ -n "$vf_gpu" ]] && vf="$vf,$vf_gpu"
-
-    # Check if we need padding (height must be multiple of 32)
-    local height_to_pad
-    if [[ -n "$post_crop_h" ]]; then
-	    height_to_pad="$post_crop_h"
-    else
-	    height_to_pad="$height"
-    fi
-
-    if [[ "$height_to_pad" =~ ^[0-9]+$ ]]; then
-	    local pad_h=$(( (32 - (height_to_pad % 32)) % 32 ))
-	    if [[ $pad_h -ne 0 ]]; then
-		    local new_height=$((height_to_pad + pad_h))
-		    vf="$vf,scale_vaapi=w=iw:h=${new_height}"
-		    echo "    Using scale_vaapi to pad height from ${height_to_pad} to ${new_height} (multiple of 32)" >&2
-	    fi
-    fi
 
 else
 	# ============================================================
@@ -1040,6 +1035,20 @@ extract_name() {
 	local source="$1"
 	local type="$2"
 
+  # For movie mode with a file, try filename first
+  if [[ "$type" == "movie" && -f "$source" ]]; then
+	  local filename=$(basename "$source")
+	  # Remove extension
+	  filename="${filename%.*}"
+	  # Remove technical suffixes like _t00, _t01, etc.
+	  filename=$(echo "$filename" | sed -E 's/_t[0-9]{2}$//')
+	  # If we got a meaningful name, use it
+	  if [[ -n "$filename" && "$filename" != "." ]]; then
+		  echo "$filename"
+		  return
+	  fi
+  fi
+
   # If source is a file, get its directory
   if [[ -f "$source" ]]; then
 	  source="$(dirname "$source")"
@@ -1119,6 +1128,7 @@ normalize_source() {
 CONTENT_TYPE=""
 CONTENT_NAME=""
 SEASON_NUM=""
+EPISODE_NUM=""
 YEAR=""
 DRY_RUN=false
 
@@ -1142,6 +1152,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		-s|--season)
 			SEASON_NUM="$2"
+			shift 2
+			;;
+		-e|--episode)
+			EPISODE_NUM="$2"
 			shift 2
 			;;
 		-y|--year)
@@ -1334,6 +1348,7 @@ echo -e "${BOLD}Output:${RESET}       $OUTPUT_DIR"
 echo -e "${BOLD}Type:${RESET}         $CONTENT_TYPE"
 echo -e "${BOLD}Name:${RESET}         $CONTENT_NAME"
 [[ "$CONTENT_TYPE" == "series" ]] && echo -e "${BOLD}Seasons:${RESET}      ${SEASONS_TO_PROCESS[*]}"
+[[ "$CONTENT_TYPE" == "series" && -n "$EPISODE_NUM" ]] && echo -e "${BOLD}Episode:${RESET}      $EPISODE_NUM"
 echo -e "${BOLD}Quality:${RESET}      $QUALITY (CQP)"
 echo -e "${BOLD}Codec:${RESET}        $VIDEO_CODEC"
 echo -e "${BOLD}Profile:${RESET}      $PROFILE"
@@ -1484,19 +1499,12 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	  # VAAPI encoding
 	  vaapi_profile=$(get_vaapi_profile "$bit_depth")
 
-    # Build color metadata options
-    sei_opts=""
-    if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
-	    sei_opts="-color_primaries smpte170m -color_trc smpte170m -colorspace smpte170m -color_range tv"
-    else
-	    sei_opts="-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv"
-    fi
-
     # Build priority prefix (beneficial even for VAAPI when CPU-decoding)
     priority_prefix=$(build_priority_prefix)
 
     # Note: Hardware decode attempted but not all codecs supported (e.g., VC-1 Advanced Profile)
     # CPU decode is the bottleneck for these cases, not VAAPI encoding
+    # NO color metadata for VAAPI - modern content doesn't need it and it forces CPU processing
     eval $priority_prefix ffmpeg -i \"$mkv_file\" \
 	    -map 0:v:0 \
 	    $audio_opts \
@@ -1505,7 +1513,6 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	    -g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf 2 -low_power false \
 	    -refs \"$REFS\" -profile:v \"$vaapi_profile\" \
 	    -vf \"$vf\" \
-	    $sei_opts \
 	    -map_chapters 0 \
 	    -f \"$CONTAINER\" \"$output_file\" -y
 	else
@@ -1722,6 +1729,12 @@ else
     for sorted_line in "${sorted_files[@]}"; do
 	    IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
 
+	    # Skip if user specified a specific episode and this isn't it
+	    if [[ -n "$EPISODE_NUM" ]] && [[ "$ep_index" -ne "$EPISODE_NUM" ]]; then
+		    ((ep_index++))
+		    continue
+	    fi
+
 	    episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
 	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 
@@ -1869,16 +1882,10 @@ else
 	      # VAAPI encoding
 	      vaapi_profile=$(get_vaapi_profile "$bit_depth")
 
-	      sei_opts=""
-	      if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
-		      sei_opts="-color_primaries smpte170m -color_trc smpte170m -colorspace smpte170m -color_range tv"
-	      else
-		      sei_opts="-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv"
-	      fi
-
 	# Build priority prefix (beneficial even for VAAPI when CPU-decoding)
 	priority_prefix=$(build_priority_prefix)
 
+	# NO color metadata for VAAPI - modern content doesn't need it and it forces CPU processing
 	eval $priority_prefix ffmpeg $input_opts -i \"$source_file\" \
 		-map 0:v:0 \
 		$audio_opts \
@@ -1887,7 +1894,6 @@ else
 		-g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf 2 -low_power false \
 		-refs \"$REFS\" -profile:v \"$vaapi_profile\" \
 		-vf \"$vf\" \
-		$sei_opts \
 		-map_chapters 0 \
 		-f \"$CONTAINER\" \"$output_file\" -y
 		else
