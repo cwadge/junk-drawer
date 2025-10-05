@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.3"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -228,8 +228,8 @@ ENCODER:
 
 AUDIO ENCODING:
   The script copies the first audio track and encodes others to HE-AAC:
-  - First track: Copied as-is (preserves original quality)
-  - Other tracks: HE-AAC with channel-appropriate bitrates
+  - First track: Copied as-is (e.g. for passthrough to an A/V receiver)
+  - Other tracks: HE-AAC with channel-appropriate, transparent bitrates
     - Mono: 96 kbps
     - Stereo: 128 kbps
     - 5.1 surround: 192 kbps
@@ -253,7 +253,7 @@ CONFIG FILE:
     QUALITY="20"
     VIDEO_CODEC="hevc_vaapi"
     PRESET="medium"
-    OUTPUT_DIR="/media/videos"
+    OUTPUT_DIR="/tmp/videos"
     AUDIO_BITRATE_STEREO="128k"
     AUDIO_BITRATE_SURROUND="192k"
 
@@ -261,32 +261,32 @@ CONFIG FILE:
 
 EXAMPLES:
   # Auto-detect everything from directory
-  transcode-monster.sh "/media/Firefly/S1D1"
+  transcode-monster.sh "/path/to/Firefly/S1D1"
 
   # Transcode specific file(s)
-  transcode-monster.sh "/media/rips/movie.mkv" "/media/movies"
-  transcode-monster.sh "/media/rips/episode_*.mkv" "/media/tv"
+  transcode-monster.sh "/path/to/rips/movie.mkv" "/path/to/movies"
+  transcode-monster.sh "/path/to/rips/episode_*.mkv" "/path/to/tv"
 
   # Specify series name and output
-  transcode-monster.sh -n "Firefly" "/media/rips/S1D1" "/media/tv/Firefly"
+  transcode-monster.sh -n "Firefly" "/path/to/rips/S1D1" "/path/to/tv/Firefly"
 
   # Transcode a movie with year
-  transcode-monster.sh -t movie -n "Dune" -y 1984 "/media/rips/dune"
+  transcode-monster.sh -t movie -n "Dune" -y 1984 "/path/to/rips/dune"
 
-  # Override season detection
-  transcode-monster.sh -s 2 "/media/rips/disc1" "/media/tv/House"
+  # Override season detection to only process a particular season
+  transcode-monster.sh -s 2 "/path/to/rips/disc1" "/path/to/tv/House"
 
   # Process only episode 3 of season 1
-  transcode-monster.sh -s 1 -e 3 "/media/tv/Show/S1D1"
+  transcode-monster.sh -s 1 -e 3 "/path/to/tv/Show/"
 
   # Custom quality and disable crop detection
-  transcode-monster.sh -q 20 --no-crop "/media/rips"
+  transcode-monster.sh -q 21 --no-crop "/path/to/rips"
 
   # "Anime mode": prefer foreign audio with subs in our default language
-  transcode-monster.sh --original-lang jpn "/media/anime/Cowboy Bebop/"
+  transcode-monster.sh --original-lang jpn "/path/to/anime/Cowboy Bebop/"
 
   # Default language override: Spanish audio for maðɾe, no default subs needed
-  transcode-monster.sh --language spa "/media/series/La Casa de Papel/"
+  transcode-monster.sh --language spa "/path/to/series/La Casa de Papel/"
 
 EOF
 }
@@ -348,7 +348,7 @@ detect_telecine() {
 	  return
   fi
 
-  # Check for repeated fields first - this is the most reliable telecine indicator
+  # Check for repeated fields first - this is the ONLY reliable telecine indicator
   # In 3:2 pulldown, every 5 frames has 2 repeated fields (40% of frames)
   local total_repeated=$((rep_top + rep_bot))
   if [[ $total_repeated -gt 0 ]]; then
@@ -360,21 +360,9 @@ detect_telecine() {
 	  fi
   fi
 
-  # Fallback: Check interlaced percentage
-  # Telecine can show anywhere from 40-100% interlaced depending on how it was encoded
-  # But combined with field_order metadata, high interlacing on 29.97fps content is suspicious
-  local interlaced=$((tff + bff))
-  local interlaced_pct=$((interlaced * 100 / total))
-
-  # If highly interlaced (>60%) check the frame rate - 29.97fps + high interlacing often = telecine
-  if [[ $interlaced_pct -gt 60 ]]; then
-	  local fps=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
-	  # Check for 30000/1001 (29.97) or similar NTSC rates
-	  if [[ "$fps" =~ ^(30000/1001|2997/100|29\.97)$ ]]; then
-		  echo "telecine"
-		  return
-	  fi
-  fi
+  # No repeated fields detected - this is NOT telecine
+  # Even if it's highly interlaced at 29.97fps, that's native interlaced video
+  # We removed the fallback check that was incorrectly detecting native interlaced as telecine
 
   echo "none"
 }
@@ -954,16 +942,16 @@ echo "$best_grouping"
 infer_type() {
 	local source="$1"
 
-  # Check for season/disc patterns
-  if [[ "$source" =~ S[0-9]+D[0-9]+ ]] || [[ "$source" =~ [Ss]eason.*[0-9]+ ]]; then
+  # Check for season/disc patterns (case-insensitive)
+  if [[ "$source" =~ [Ss][0-9]+[Dd][0-9]+ ]] || [[ "$source" =~ [Ss]eason.*[0-9]+ ]]; then
 	  echo "series"
 	  return
   fi
 
-  # Check if directory contains S#D# subdirectories (multi-season series)
-  shopt -s nullglob
-  local season_dirs=("$source"/S[0-9]*D[0-9]*)
-  shopt -u nullglob
+  # Check if directory contains S#D# subdirectories (multi-season series, case-insensitive)
+  shopt -s nullglob nocaseglob
+  local season_dirs=("$source"/[Ss][0-9]*[Dd][0-9]*)
+  shopt -u nullglob nocaseglob
   if [[ ${#season_dirs[@]} -gt 0 ]]; then
 	  echo "series"
 	  return
@@ -985,13 +973,13 @@ get_all_seasons() {
 	local source="$1"
 	local seasons=()
 
-	shopt -s nullglob
-	local season_dirs=("$source"/S[0-9]*D[0-9]*)
-	shopt -u nullglob
+	shopt -s nullglob nocaseglob
+	local season_dirs=("$source"/[Ss][0-9]*[Dd][0-9]*)
+	shopt -u nullglob nocaseglob
 
 	for dir in "${season_dirs[@]}"; do
 		local basename=$(basename "$dir")
-		if [[ "$basename" =~ S([0-9]+)D[0-9]+ ]]; then
+		if [[ "$basename" =~ [Ss]([0-9]+)[Dd][0-9]+ ]]; then
 			local season_num="${BASH_REMATCH[1]}"
 			# Remove leading zeros
 			season_num=$((10#$season_num))
@@ -1009,20 +997,20 @@ get_all_seasons() {
 extract_season() {
 	local source="$1"
 
-  # Try S#D# pattern
-  if [[ "$source" =~ S([0-9]+)D[0-9]+ ]]; then
+  # Try S#D# pattern (case-insensitive)
+  if [[ "$source" =~ [Ss]([0-9]+)[Dd][0-9]+ ]]; then
 	  echo "${BASH_REMATCH[1]}"
 	  return
   fi
 
-  # Try "Season #" pattern
+  # Try "Season #" pattern (case-insensitive)
   if [[ "$source" =~ [Ss]eason[[:space:]]*([0-9]+) ]]; then
 	  echo "${BASH_REMATCH[1]}"
 	  return
   fi
 
-  # Try S## pattern
-  if [[ "$source" =~ S([0-9]{2}) ]]; then
+  # Try S## pattern (case-insensitive)
+  if [[ "$source" =~ [Ss]([0-9]{2}) ]]; then
 	  echo "${BASH_REMATCH[1]}"
 	  return
   fi
@@ -1035,13 +1023,23 @@ extract_name() {
 	local source="$1"
 	local type="$2"
 
-  # For movie mode with a file, try filename first
+  # For movie mode with a file, try metadata title first, then filename
   if [[ "$type" == "movie" && -f "$source" ]]; then
+	  # Try to get title from metadata
+	  local metadata_title=$(ffprobe -v quiet -show_entries format_tags=title -of default=noprint_wrappers=1:nokey=1 "$source" 2>/dev/null)
+	  if [[ -n "$metadata_title" && "$metadata_title" != "N/A" ]]; then
+		  echo "$metadata_title"
+		  return
+	  fi
+
+	  # Fall back to filename
 	  local filename=$(basename "$source")
 	  # Remove extension
 	  filename="${filename%.*}"
 	  # Remove technical suffixes like _t00, _t01, etc.
 	  filename=$(echo "$filename" | sed -E 's/_t[0-9]{2}$//')
+	  # Remove disc/title markers like -B1, -D1, etc.
+	  filename=$(echo "$filename" | sed -E 's/-[BDT][0-9]+$//')
 	  # If we got a meaningful name, use it
 	  if [[ -n "$filename" && "$filename" != "." ]]; then
 		  echo "$filename"
@@ -1057,8 +1055,8 @@ extract_name() {
   # Try to get parent directory name
   local dirname=""
 
-  # If source itself is a disc directory (S#D# pattern), go up one level
-  if [[ "$(basename "$source")" =~ ^S[0-9]+D[0-9]+$ ]]; then
+  # If source itself is a disc directory (S#D# pattern), go up one level (case-insensitive)
+  if [[ "$(basename "$source")" =~ ^[Ss][0-9]+[Dd][0-9]+$ ]]; then
 	  dirname=$(basename "$(dirname "$source")")
   else
 	  # Get the parent directory name
@@ -1070,10 +1068,10 @@ extract_name() {
     fi
   fi
 
-  # Clean up season/disc markers
-  dirname=$(echo "$dirname" | sed -E 's/[[:space:]]*S[0-9]+D?[0-9]*//gi')
+  # Clean up season/disc markers (case-insensitive)
+  dirname=$(echo "$dirname" | sed -E 's/[[:space:]]*[Ss][0-9]+[Dd]?[0-9]*//g')
   dirname=$(echo "$dirname" | sed -E 's/[[:space:]]*[Ss]eason[[:space:]]*[0-9]+//g')
-  dirname=$(echo "$dirname" | sed -E 's/[[:space:]]*Disc[[:space:]]*[0-9]+//gi')
+  dirname=$(echo "$dirname" | sed -E 's/[[:space:]]*[Dd]isc[[:space:]]*[0-9]+//g')
   dirname=$(echo "$dirname" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
   if [[ -z "$dirname" || "$dirname" == "." ]]; then
@@ -1086,39 +1084,35 @@ extract_name() {
 # Normalize source input - handles both directories and files
 # Sets SOURCE_DIR and populates SOURCE_FILES array if files were specified
 normalize_source() {
-	local source="$1"
+	# Accept all arguments as separate files (handles glob expansion by shell)
 	SOURCE_FILES=()
 	SOURCE_DIR=""
 
-  # Check if source is a file
-  if [[ -f "$source" ]]; then
-	  # Single file
-	  SOURCE_FILES=("$source")
-	  SOURCE_DIR="$(dirname "$source")"
-	  return 0
-  fi
+	# If we got multiple arguments, they're pre-expanded files from shell globbing
+	if [[ $# -gt 1 ]]; then
+		SOURCE_FILES=("$@")
+		SOURCE_DIR="$(dirname "${SOURCE_FILES[0]}")"
+		return 0
+	fi
 
-  # Check if source is a directory
-  if [[ -d "$source" ]]; then
-	  SOURCE_DIR="$source"
-	  return 0
-  fi
+	local source="$1"
 
-  # Check if source contains wildcards/glob pattern
-  shopt -s nullglob
-  local expanded_files=($source)
-  shopt -u nullglob
+	# Check if source is a file
+	if [[ -f "$source" ]]; then
+		# Single file
+		SOURCE_FILES=("$source")
+		SOURCE_DIR="$(dirname "$source")"
+		return 0
+	fi
 
-  if [[ ${#expanded_files[@]} -gt 0 ]]; then
-	  # Glob matched files
-	  SOURCE_FILES=("${expanded_files[@]}")
-	  # Use directory of first file
-	  SOURCE_DIR="$(dirname "${expanded_files[0]}")"
-	  return 0
-  fi
+	# Check if source is a directory
+	if [[ -d "$source" ]]; then
+		SOURCE_DIR="$source"
+		return 0
+	fi
 
-  # Nothing found
-  return 1
+	# Nothing found
+	return 1
 }
 
 # ============================================================================
@@ -1252,20 +1246,37 @@ if [[ $# -lt 1 ]]; then
 	exit 1
 fi
 
-SOURCE_INPUT="$1"
-if [[ $# -ge 2 ]]; then
-	OUTPUT_DIR="$2"
+# Separate source files/directory from output directory
+# Everything except the last arg (if it's a directory) is source
+OUTPUT_DIR_ARG=""
+SOURCE_ARGS=()
+
+# Check if last argument is a directory - if so, it's the output directory
+if [[ -d "${!#}" ]]; then
+	OUTPUT_DIR_ARG="${!#}"
+	# All arguments except the last are source files/directory
+	for ((i=1; i<$#; i++)); do
+		SOURCE_ARGS+=("${!i}")
+	done
+else
+	# No output directory specified, all arguments are source files/directory
+	SOURCE_ARGS=("$@")
+fi
+
+# Override with -o if specified
+if [[ -n "$OUTPUT_DIR_ARG" ]]; then
+	OUTPUT_DIR="$OUTPUT_DIR_ARG"
 fi
 
 # Initialize SOURCE_FILES array and SOURCE_DIR before normalize_source sets them
 SOURCE_FILES=()
 SOURCE_DIR=""
 
-# Normalize source - handles files, directories, and globs
-normalize_source "$SOURCE_INPUT"
+# Normalize source - handles files, directories, and globs (pre-expanded by shell)
+normalize_source "${SOURCE_ARGS[@]}"
 
 if [[ -z "$SOURCE_DIR" ]]; then
-	echo -e "${RED}Error: Source not found: $SOURCE_INPUT${RESET}"
+	echo -e "${RED}Error: Source not found${RESET}"
 	exit 1
 fi
 
@@ -1599,17 +1610,28 @@ done
 else
 	# Directory mode: use existing disc directory logic
 	# Find all disc directories for this season
-	shopt -s nullglob
-	disc_dirs=("$SOURCE_DIR"/S${SEASON_NUM}D*)
-	shopt -u nullglob
+	shopt -s nullglob nocaseglob
+	disc_dirs=("$SOURCE_DIR"/[Ss]${SEASON_NUM}[Dd]*)
+	shopt -u nullglob nocaseglob
 
 	if [[ ${#disc_dirs[@]} -eq 0 ]]; then
-		echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (S${SEASON_NUM}D*)${RESET}"
-		echo ""
-		continue
-	fi
+		# No S#D# subdirectories found - check if files are directly in the source directory
+		shopt -s nullglob
+		direct_mkv_files=("$SOURCE_DIR"/*.mkv)
+		shopt -u nullglob
 
-	echo -e "${CYAN}Processing ${#disc_dirs[@]} disc(s)/directory(ies) for season $SEASON_NUM${RESET}"
+		if [[ ${#direct_mkv_files[@]} -gt 0 ]]; then
+			# Files are directly in the source directory (single-disc series)
+			echo -e "${CYAN}Processing ${#direct_mkv_files[@]} file(s) directly from source directory${RESET}"
+			disc_dirs=("$SOURCE_DIR")
+		else
+			echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (S${SEASON_NUM}D*) and no .mkv files in source directory${RESET}"
+			echo ""
+			continue
+		fi
+	else
+		echo -e "${CYAN}Processing ${#disc_dirs[@]} disc(s)/directory(ies) for season $SEASON_NUM${RESET}"
+	fi
 
       # Collect episodes
       for disc_dir in "${disc_dirs[@]}"; do
