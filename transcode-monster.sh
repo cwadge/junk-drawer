@@ -243,7 +243,7 @@ CONTENT DETECTION:
     /path/to/Show/S1D1/, /path/to/Show Season 1/, /path/Show S01/
 
   Output examples:
-    Series: "Firefly - S01E01 - Episode 1.mkv"
+    Series: "Firefly - S01E01.mkv"
     Movie:  "Dune (1984).mkv"
 
 CONFIG FILE:
@@ -253,7 +253,7 @@ CONFIG FILE:
     QUALITY="20"
     VIDEO_CODEC="hevc_vaapi"
     PRESET="medium"
-    OUTPUT_DIR="/tmp/videos"
+    OUTPUT_DIR="/path/to/videos"
     AUDIO_BITRATE_STEREO="128k"
     AUDIO_BITRATE_SURROUND="192k"
 
@@ -348,7 +348,6 @@ detect_telecine() {
 	  return
   fi
 
-  # Check for repeated fields first - this is the ONLY reliable telecine indicator
   # In 3:2 pulldown, every 5 frames has 2 repeated fields (40% of frames)
   local total_repeated=$((rep_top + rep_bot))
   if [[ $total_repeated -gt 0 ]]; then
@@ -359,10 +358,6 @@ detect_telecine() {
 		  return
 	  fi
   fi
-
-  # No repeated fields detected - this is NOT telecine
-  # Even if it's highly interlaced at 29.97fps, that's native interlaced video
-  # We removed the fallback check that was incorrectly detecting native interlaced as telecine
 
   echo "none"
 }
@@ -383,7 +378,7 @@ detect_interlacing() {
 	  return
   fi
 
-  # Field order didn't give us clear answer, run idet analysis
+  # Run idet analysis
   local idet_output=$(ffmpeg -i "$input" -vf idet -frames:v 200 -an -f null - 2>&1)
 
   # Parse the "Multi frame detection" line
@@ -539,7 +534,7 @@ build_vf() {
       fi
     fi
 
-    # Build complete filter chain
+    # Build complete filter chain 
     # Format and upload to GPU
     [[ -n "$vf_cpu" ]] && vf="$vf_cpu,"
     if [[ "$bit_depth" == "10" ]]; then
@@ -772,7 +767,9 @@ detect_forced_subs() {
 	local input="$1"
 
   # Disabled: Now handled by get_subtitle_disposition() with smarter logic
+  # In practice, almost no videos actually do this properly
   # Users can manually set subtitle preferences in their player
+
   echo "-1"
   return
 }
