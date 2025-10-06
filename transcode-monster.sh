@@ -763,11 +763,11 @@ get_subtitle_disposition() {
 }
 
 # Detect forced subtitles (legacy - kept for compatibility)
+# In practice, almost no videos actually did this properly
 detect_forced_subs() {
 	local input="$1"
 
   # Disabled: Now handled by get_subtitle_disposition() with smarter logic
-  # In practice, almost no videos actually do this properly
   # Users can manually set subtitle preferences in their player
 
   echo "-1"
