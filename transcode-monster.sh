@@ -28,35 +28,8 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.3.3"
+SCRIPT_VERSION="1.4.0"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
-
-# ============================================================================
-# COLORS
-# ============================================================================
-
-# Check if stdout is a terminal
-if [[ -t 1 ]]; then
-	RED='\033[0;31m'
-	YELLOW='\033[1;33m'
-	GREEN='\033[0;32m'
-	BLUE='\033[0;34m'
-	CYAN='\033[0;36m'
-	BOLD='\033[1m'
-	BOLDBLUE='\033[1;34m'
-	BOLDGREEN='\033[1;32m'
-	RESET='\033[0m'
-else
-	RED=''
-	YELLOW=''
-	GREEN=''
-	BLUE=''
-	CYAN=''
-	BOLD=''
-	BOLDBLUE=''
-	BOLDGREEN=''
-	RESET=''
-fi
 
 # ============================================================================
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -68,15 +41,14 @@ DEFAULT_VAAPI_DEVICE="/dev/dri/renderD128"
 # Video encoding settings
 DEFAULT_VIDEO_CODEC="auto"  # Will choose hevc_vaapi or libx265 based on resolution
 DEFAULT_QUALITY="20"  # CQP/CRF value
-DEFAULT_PROFILE="auto"  # Will be set based on bit depth
-DEFAULT_PRESET="medium"  # For libx265 - balanced speed/quality
-DEFAULT_X265_POOLS="+"  # Use auto thread pools (optimal for multicore)
+DEFAULT_PRESET="medium"  # For libx265 (software encoding only) - balanced speed/quality
+DEFAULT_X265_POOLS="+"  # Thread pools for libx265 (software encoding only) - auto-detect optimal
 DEFAULT_GOP_SIZE="120"
 DEFAULT_MIN_KEYINT="12"
-DEFAULT_BFRAMES="4"
+DEFAULT_BFRAMES="0"  # B-frames: 0=max compatibility (older AMD), 1-2=balanced, 3-4=best compression
 DEFAULT_REFS="4"
 
-# Process priority (for software encoding only)
+# Process priority
 DEFAULT_USE_NICE="true"
 DEFAULT_NICE_LEVEL="10"  # 0-19, higher = lower priority
 DEFAULT_USE_IONICE="true"
@@ -112,6 +84,33 @@ DEFAULT_OUTPUT_DIR="${HOME}/Videos"
 DEFAULT_CONTAINER="matroska"  # mkv
 
 # ============================================================================
+# TERMINAL SETUP
+# ============================================================================
+
+# Check if stdout is a terminal
+if [[ -t 1 ]]; then
+	RED='\033[0;31m'
+	YELLOW='\033[1;33m'
+	GREEN='\033[0;32m'
+	BLUE='\033[0;34m'
+	CYAN='\033[0;36m'
+	BOLD='\033[1m'
+	BOLDBLUE='\033[1;34m'
+	BOLDGREEN='\033[1;32m'
+	RESET='\033[0m'
+else
+	RED=''
+	YELLOW=''
+	GREEN=''
+	BLUE=''
+	CYAN=''
+	BOLD=''
+	BOLDBLUE=''
+	BOLDGREEN=''
+	RESET=''
+fi
+
+# ============================================================================
 # LOAD USER CONFIG (Priority 2: User .conf)
 # ============================================================================
 
@@ -124,7 +123,6 @@ fi
 VAAPI_DEVICE="${VAAPI_DEVICE:-$DEFAULT_VAAPI_DEVICE}"
 VIDEO_CODEC="${VIDEO_CODEC:-$DEFAULT_VIDEO_CODEC}"
 QUALITY="${QUALITY:-$DEFAULT_QUALITY}"
-PROFILE="${PROFILE:-$DEFAULT_PROFILE}"
 PRESET="${PRESET:-$DEFAULT_PRESET}"
 X265_POOLS="${X265_POOLS:-$DEFAULT_X265_POOLS}"
 GOP_SIZE="${GOP_SIZE:-$DEFAULT_GOP_SIZE}"
@@ -189,10 +187,11 @@ OPTIONS:
 
   -q, --quality NUM   Video quality CQP/CRF value (default: ${DEFAULT_QUALITY})
   -c, --codec CODEC   Video codec: 'auto', 'hevc_vaapi', 'libx265' (default: ${DEFAULT_VIDEO_CODEC})
-  -p, --profile PROF  Video profile (default: ${DEFAULT_PROFILE})
   --preset PRESET     x265 encoding preset for software encoding (default: ${DEFAULT_PRESET})
 		      Options: ultrafast, superfast, veryfast, faster, fast,
 			       medium, slow, slower, veryslow, placebo
+  --bframes NUM       Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
+		      0 = max compatibility, 1-2 = balanced, 3-4 = best compression
 
   --no-crop           Disable automatic crop detection
   --no-deinterlace    Disable automatic deinterlacing
@@ -225,6 +224,15 @@ ENCODER:
   - Runs with reduced priority (nice/ionice) to lessen system impact
   - Maximizes CPU utilization with automatic thread pooling
   - You can adjust preset with --preset for speed/quality tradeoff
+
+  B-frames (Bidirectional frames):
+  - Improve compression by referencing both past and future frames
+  - Default: 0 (disabled) safe default for hardware compatibility
+  - Values: 0 = max compatibility (required for older AMD GPUs like RX 400/500)
+	   1-2 = balanced efficiency with minimal overhead
+	   3-4 = best compression for high-quality archiving
+  - Hardware support varies: Intel QSV and newer AMD (RX 6000+) support 2-4
+  - Configure via BFRAMES in config file or --bframes option
 
 AUDIO ENCODING:
   The script copies the first audio track and encodes others to HE-AAC:
@@ -534,7 +542,7 @@ build_vf() {
       fi
     fi
 
-    # Build complete filter chain 
+    # Build complete filter chain
     # Format and upload to GPU
     [[ -n "$vf_cpu" ]] && vf="$vf_cpu,"
     if [[ "$bit_depth" == "10" ]]; then
@@ -616,7 +624,7 @@ build_x265_params() {
   # "+" means auto-detect optimal thread count and distribution
   params="${params}:pools=${X265_POOLS}"
 
-  # Set appropriate profile and pixel format
+  # Set appropriate profile and pixel format based on bit depth
   local profile pix_fmt
   if [[ "$bit_depth" == "10" ]]; then
 	  profile="main10"
@@ -645,10 +653,20 @@ build_priority_prefix() {
 	fi
 
 	if [[ "$USE_IONICE" == "true" ]]; then
-		if [[ -n "$prefix" ]]; then
-			prefix="${prefix} ionice -c ${IONICE_CLASS} -n ${IONICE_LEVEL}"
+		# Class 3 (idle) doesn't use priority levels
+		if [[ "$IONICE_CLASS" == "3" ]]; then
+			if [[ -n "$prefix" ]]; then
+				prefix="${prefix} ionice -c ${IONICE_CLASS}"
+			else
+				prefix="ionice -c ${IONICE_CLASS}"
+			fi
 		else
-			prefix="ionice -c ${IONICE_CLASS} -n ${IONICE_LEVEL}"
+			# Classes 1 (realtime) and 2 (best-effort) use levels 0-7
+			if [[ -n "$prefix" ]]; then
+				prefix="${prefix} ionice -c ${IONICE_CLASS} -n ${IONICE_LEVEL}"
+			else
+				prefix="ionice -c ${IONICE_CLASS} -n ${IONICE_LEVEL}"
+			fi
 		fi
 	fi
 
@@ -760,18 +778,6 @@ get_subtitle_disposition() {
 
   # No native language subtitle found
   echo "-1"
-}
-
-# Detect forced subtitles (legacy - kept for compatibility)
-# In practice, almost no videos actually did this properly
-detect_forced_subs() {
-	local input="$1"
-
-  # Disabled: Now handled by get_subtitle_disposition() with smarter logic
-  # Users can manually set subtitle preferences in their player
-
-  echo "-1"
-  return
 }
 
 # Check if file should be split by chapters
@@ -1112,6 +1118,121 @@ normalize_source() {
 	return 1
 }
 
+# Display ffmpeg command for dry-run mode
+show_ffmpeg_command() {
+	local source_file="$1"
+	local output_file="$2"
+	local input_opts="$3"  # Optional, for chapter extraction
+
+	# Detect bit depth and height
+	local bit_depth=$(detect_bit_depth "$source_file")
+	local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
+	height=${height//,/}
+
+	# Determine encoder
+	local actual_codec=""
+	local encoder_type=""
+	if [[ "$VIDEO_CODEC" == "auto" ]]; then
+		if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
+			actual_codec="libx265"
+			encoder_type="software"
+		else
+			actual_codec="hevc_vaapi"
+			encoder_type="vaapi"
+		fi
+	else
+		actual_codec="$VIDEO_CODEC"
+		if [[ "$actual_codec" == "hevc_vaapi" ]]; then
+			encoder_type="vaapi"
+		else
+			encoder_type="software"
+		fi
+	fi
+
+	# Build filter chain
+	local vf=$(build_vf "$source_file" "$encoder_type" "$bit_depth")
+
+	# Count audio tracks
+	local num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
+
+	# Determine preferred audio track
+	local preferred_audio_lang=""
+	if [[ "$PREFER_ORIGINAL" == "true" && -n "$ORIGINAL_LANGUAGE" ]]; then
+		preferred_audio_lang="$ORIGINAL_LANGUAGE"
+	fi
+
+	local default_audio_idx default_audio_lang
+	IFS='|' read -r default_audio_idx default_audio_lang <<< "$(get_audio_track_info "$source_file" "$preferred_audio_lang")"
+
+	# Build audio options
+	local audio_opts=""
+	if [[ "$AUDIO_COPY_FIRST" == "true" && $num_audio -gt 0 ]]; then
+		audio_opts="-map 0:a:$default_audio_idx -c:a:0 copy"
+	else
+		local bitrate=$(get_audio_bitrate "$source_file" $default_audio_idx)
+		audio_opts="-map 0:a:$default_audio_idx -c:a:0 $AUDIO_CODEC -profile:a:0 $AUDIO_PROFILE -b:a:0 $bitrate"
+	fi
+
+	if [[ $num_audio -gt 1 ]]; then
+		local track_idx=1
+		for ((i=0; i<num_audio; i++)); do
+			if [[ $i -eq $default_audio_idx ]]; then
+				continue
+			fi
+			local bitrate=$(get_audio_bitrate "$source_file" $i)
+			audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx $AUDIO_CODEC -profile:a:$track_idx $AUDIO_PROFILE -b:a:$track_idx $bitrate"
+			((track_idx++))
+		done
+	fi
+	audio_opts="$audio_opts -disposition:a:0 default"
+
+	# Smart subtitle handling
+	local sub_default_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
+	local sub_opts="-c:s copy -map 0:s?"
+	if [[ "$sub_default_idx" != "-1" ]]; then
+		sub_opts="$sub_opts -disposition:s 0 -disposition:s:$sub_default_idx default"
+	else
+		sub_opts="$sub_opts -disposition:s 0"
+	fi
+
+	# Display command based on encoder type
+	echo ""
+	echo -e "${CYAN}Command that would be executed:${RESET}"
+	echo ""
+
+	if [[ "$encoder_type" == "vaapi" ]]; then
+		local vaapi_profile=$(get_vaapi_profile "$bit_depth")
+		local priority_prefix=$(build_priority_prefix)
+
+		echo "$priority_prefix ffmpeg${input_opts:+ $input_opts} -i \"$source_file\" \\"
+		echo "  -map 0:v:0 \\"
+		echo "  $audio_opts \\"
+		echo "  $sub_opts \\"
+		echo "  -c:v \"$actual_codec\" -vaapi_device \"$VAAPI_DEVICE\" -rc_mode CQP -qp \"$QUALITY\" \\"
+		echo "  -g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf \"$BFRAMES\" -low_power false \\"
+		echo "  -refs \"$REFS\" -profile:v \"$vaapi_profile\" \\"
+		echo "  -vf \"$vf\" \\"
+		echo "  -map_chapters 0 \\"
+		echo "  -f \"$CONTAINER\" \"$output_file\" -y"
+	else
+		local x265_profile pix_fmt x265_params
+		IFS='|' read -r x265_profile pix_fmt x265_params <<< "$(build_x265_params "$bit_depth" "$height")"
+
+		echo "ffmpeg${input_opts:+ $input_opts} -i \"$source_file\" \\"
+		echo "  -map 0:v:0 \\"
+		echo "  $audio_opts \\"
+		echo "  $sub_opts \\"
+		echo "  -c:v $actual_codec -preset $PRESET -crf $QUALITY -pix_fmt $pix_fmt \\"
+		if [[ -n "$vf" ]]; then
+			echo "  -vf \"$vf\" \\"
+		fi
+		echo "  -x265-params \"$x265_params\" \\"
+		echo "  -map_chapters 0 \\"
+		echo "  -f \"$CONTAINER\" \"$output_file\" -y"
+	fi
+	echo ""
+}
+
 # ============================================================================
 # PARSE COMMAND LINE ARGUMENTS (Priority 3: CLI)
 # ============================================================================
@@ -1161,12 +1282,12 @@ while [[ $# -gt 0 ]]; do
 			VIDEO_CODEC="$2"
 			shift 2
 			;;
-		-p|--profile)
-			PROFILE="$2"
-			shift 2
-			;;
 		--preset)
 			PRESET="$2"
+			shift 2
+			;;
+		--bframes)
+			BFRAMES="$2"
 			shift 2
 			;;
 		--no-crop)
@@ -1346,7 +1467,17 @@ if [[ "$CONTENT_TYPE" == "movie" && -n "$YEAR" ]]; then
 fi
 
 # Create output directory
-mkdir -p "$OUTPUT_DIR"
+if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
+	echo -e "${RED}Error: Cannot create output directory: $OUTPUT_DIR${RESET}"
+	echo "Check permissions and path validity"
+	exit 1
+fi
+
+# Verify output directory is writable
+if [[ ! -w "$OUTPUT_DIR" ]]; then
+	echo -e "${RED}Error: Output directory is not writable: $OUTPUT_DIR${RESET}"
+	exit 1
+fi
 
 echo -e "${BLUE}============================================${RESET}"
 echo -e "${BOLDBLUE}Transcode Monster v${SCRIPT_VERSION}${RESET}"
@@ -1359,7 +1490,6 @@ echo -e "${BOLD}Name:${RESET}         $CONTENT_NAME"
 [[ "$CONTENT_TYPE" == "series" && -n "$EPISODE_NUM" ]] && echo -e "${BOLD}Episode:${RESET}      $EPISODE_NUM"
 echo -e "${BOLD}Quality:${RESET}      $QUALITY (CQP)"
 echo -e "${BOLD}Codec:${RESET}        $VIDEO_CODEC"
-echo -e "${BOLD}Profile:${RESET}      $PROFILE"
 echo -e "${BOLD}Crop:${RESET}         $DETECT_CROP"
 echo -e "${BOLD}Deinterlace:${RESET}  $DETECT_INTERLACING"
 echo -e "${BOLD}Pulldown:${RESET}     $DETECT_PULLDOWN"
@@ -1408,6 +1538,7 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 
   if [[ "$DRY_RUN" == true ]]; then
 	  echo -e "${YELLOW}[DRY RUN] Would transcode to: $output_file${RESET}"
+	  show_ffmpeg_command "$mkv_file" "$output_file" ""
 	  exit 0
   fi
 
@@ -1438,7 +1569,14 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	  fi
   fi
 
-  echo -e "${CYAN}Bit depth: ${bit_depth}-bit, Height: ${height}p, Encoder: $actual_codec${RESET}"
+  # Determine profile based on bit depth
+  if [[ "$bit_depth" == "10" ]]; then
+	  detected_profile="main10"
+  else
+	  detected_profile="main"
+  fi
+
+  echo -e "${CYAN}Bit depth: ${bit_depth}-bit, Height: ${height}p, Encoder: $actual_codec, Profile: $detected_profile${RESET}"
 
   # Build filter chain
   vf=$(build_vf "$mkv_file" "$encoder_type" "$bit_depth")
@@ -1518,7 +1656,7 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	    $audio_opts \
 	    $sub_opts \
 	    -c:v \"$actual_codec\" -vaapi_device \"$VAAPI_DEVICE\" -rc_mode CQP -qp \"$QUALITY\" \
-	    -g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf 2 -low_power false \
+	    -g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf \"$BFRAMES\" -low_power false \
 	    -refs \"$REFS\" -profile:v \"$vaapi_profile\" \
 	    -vf \"$vf\" \
 	    -map_chapters 0 \
@@ -1740,6 +1878,37 @@ else
 		    ((ep_index++))
 	    done
 	    echo ""
+
+	    # Show command for first episode as an example
+	    echo -e "${CYAN}Example command for first episode:${RESET}"
+	    IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "${sorted_files[0]}"
+	    episode_num="S$(printf "%02d" $SEASON_NUM)E01"
+	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
+
+	    # Build input options for chapter extraction if needed
+	    input_opts=""
+	    if [[ "$start_ch" != "-1" ]]; then
+		    readarray -t chapter_times < <(get_chapter_times "$source_file")
+		    local start_time="${chapter_times[$start_ch]}"
+		    start_time=$(echo "$start_time" | tr -d '[:space:]')
+
+		    if [[ "$start_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+			    local end_time=""
+			    if [[ $((end_ch + 1)) -lt ${#chapter_times[@]} ]]; then
+				    end_time="${chapter_times[$((end_ch + 1))]}"
+				    end_time=$(echo "$end_time" | tr -d '[:space:]')
+			    fi
+
+			    input_opts="-ss $start_time"
+			    if [[ -n "$end_time" ]] && [[ "$end_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+				    local duration=$(echo "$end_time - $start_time" | bc)
+				    input_opts="$input_opts -t $duration"
+			    fi
+		    fi
+	    fi
+
+	    show_ffmpeg_command "$source_file" "$output_file" "$input_opts"
+
 	    continue
     fi
 
@@ -1833,7 +2002,14 @@ else
 	      fi
       fi
 
-      echo "    Bit depth: ${bit_depth}-bit, Encoder: $actual_codec"
+      # Determine profile based on bit depth
+      if [[ "$bit_depth" == "10" ]]; then
+	      detected_profile="main10"
+      else
+	      detected_profile="main"
+      fi
+
+      echo "    Bit depth: ${bit_depth}-bit, Encoder: $actual_codec, Profile: $detected_profile"
 
       # Build filter chain
       vf=$(build_vf "$source_file" "$encoder_type" "$bit_depth")
@@ -1910,7 +2086,7 @@ else
 		$audio_opts \
 		$sub_opts \
 		-c:v \"$actual_codec\" -vaapi_device \"$VAAPI_DEVICE\" -rc_mode CQP -qp \"$QUALITY\" \
-		-g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf 2 -low_power false \
+		-g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf \"$BFRAMES\" -low_power false \
 		-refs \"$REFS\" -profile:v \"$vaapi_profile\" \
 		-vf \"$vf\" \
 		-map_chapters 0 \
