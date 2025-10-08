@@ -281,7 +281,6 @@ ENCODER:
   B-frames (Bidirectional frames):
   - Improve compression by referencing both past and future frames
   - Default: 0 (disabled) for maximum hardware compatibility
-  - Values: 0 = max compatibility (required for older AMD GPUs like RX 400/500)
 	   1-2 = balanced efficiency with minimal overhead
 	   3-4 = best compression for archiving (higher decode complexity)
   - Hardware support varies: Intel QSV and newer AMD (RX 6000+) support 2-4
