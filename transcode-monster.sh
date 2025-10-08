@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.2"
+SCRIPT_VERSION="1.5.3"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -244,10 +244,9 @@ OPTIONS:
   --no-crop              Disable automatic crop detection
   --no-deinterlace       Disable automatic deinterlacing
   --adaptive-deinterlace Force adaptive deinterlacing for mixed progressive/interlaced content
-			 Uses yadif in adaptive mode (SD content only, software encoding)
-			 Only deinterlaces frames detected as interlaced, leaving progressive
+			 Only processes frames detected as interlaced, leaving progressive
 			 frames untouched. Useful for content like film transfers with
-			 interlaced title cards (e.g., Crouching Tiger, Hidden Dragon)
+			 interlaced title cards or mixed-source compilations
   --no-pulldown          Disable 3:2 pulldown detection (inverse telecine)
   --force-ivtc           Force inverse telecine detection even on HD content
 			 (by default, only runs on SD content ≤576p)
@@ -593,14 +592,18 @@ build_vf() {
 		fi
 	fi
 
-	# Interlacing detection - use VAAPI deinterlacer for speed
-	if [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
+	# Check if adaptive deinterlacing is requested (for mixed content)
+	if [[ "$ADAPTIVE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
+		# Force adaptive deinterlacing regardless of detection
+		vf_gpu="deinterlace_vaapi=mode=motion_adaptive:rate=frame"
+		echo "    Added adaptive GPU deinterlacer: deinterlace_vaapi (motion adaptive)" >&2
+		# Interlacing detection - use VAAPI deinterlacer for speed
+	elif [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
 		local interlacing=$(detect_interlacing "$input")
 		echo "    Interlacing detected: $interlacing" >&2
 
 	    # Only add deinterlacer if we explicitly detected interlacing
 	    if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
-		    # Use deinterlace_vaapi on GPU instead of bwdif on CPU!
 		    vf_gpu="deinterlace_vaapi=rate=frame"
 		    echo "    Using GPU deinterlacer: deinterlace_vaapi" >&2
 	    fi
