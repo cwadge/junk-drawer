@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -66,14 +66,17 @@ DEFAULT_AUDIO_BITRATE_MONO="96k"     # HE-AAC transparent for mono
 DEFAULT_AUDIO_BITRATE_STEREO="128k"  # HE-AAC transparent for stereo
 DEFAULT_AUDIO_BITRATE_SURROUND="192k" # HE-AAC for 5.1
 DEFAULT_AUDIO_BITRATE_SURROUND_PLUS="256k" # HE-AAC for 7.1+
+DEFAULT_AUDIO_FILTER_LANGUAGES="true"  # Filter audio by language (skip foreign overdubs)
 
 # Language and subtitle settings
-DEFAULT_LANGUAGE="eng"  # ISO 639-2 three-letter code (eng, jpn, spa, etc.)
+DEFAULT_LANGUAGE="eng"  # ISO 639-2 code(s), comma-separated for multilingual (e.g., "eng,spa,fra")
+# First language in list has priority for subtitle selection
 DEFAULT_PREFER_ORIGINAL="false"  # When true, prefer original audio + native subs over dubs
 DEFAULT_ORIGINAL_LANGUAGE=""  # Set this for original language mode (e.g., "jpn" for anime)
 
 # Processing options
 DEFAULT_DETECT_INTERLACING="true"
+DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Force adaptive deinterlacing for mixed content
 DEFAULT_DETECT_CROP="true"
 DEFAULT_DETECT_PULLDOWN="auto"  # auto = SD only, true = force on, false = force off
 DEFAULT_SPLIT_CHAPTERS="auto"  # auto = series files >60min, true = force on, false = force off
@@ -82,6 +85,49 @@ DEFAULT_CHAPTERS_PER_EPISODE="auto"  # auto = detect optimal grouping, or specif
 # Output settings
 DEFAULT_OUTPUT_DIR="${HOME}/Videos"
 DEFAULT_CONTAINER="matroska"  # mkv
+
+# ============================================================================
+# ERROR HANDLING
+# ============================================================================
+
+# Track what we're currently processing for better error messages
+CURRENT_OPERATION=""
+CURRENT_FILE=""
+
+# Error handler function
+error_handler() {
+	local exit_code=$?
+	local line_number=$1
+
+	echo ""
+	echo -e "${RED}============================================${RESET}"
+	echo -e "${RED}ERROR: Script failed with exit code $exit_code${RESET}"
+	echo -e "${RED}============================================${RESET}"
+	echo -e "${RED}Line number: $line_number${RESET}"
+
+	if [[ -n "$CURRENT_OPERATION" ]]; then
+		echo -e "${RED}Operation: $CURRENT_OPERATION${RESET}"
+	fi
+
+	if [[ -n "$CURRENT_FILE" ]]; then
+		echo -e "${RED}File: $CURRENT_FILE${RESET}"
+	fi
+
+	echo ""
+
+	exit $exit_code
+}
+
+# Interrupt handler for Ctrl+C
+interrupt_handler() {
+	echo ""
+	echo -e "${YELLOW}Transcoding interrupted by user${RESET}"
+	exit 130
+}
+
+# Set up traps
+trap 'error_handler ${LINENO}' ERR
+trap 'interrupt_handler' INT
 
 # ============================================================================
 # TERMINAL SETUP
@@ -145,12 +191,14 @@ AUDIO_BITRATE_MONO="${AUDIO_BITRATE_MONO:-$DEFAULT_AUDIO_BITRATE_MONO}"
 AUDIO_BITRATE_STEREO="${AUDIO_BITRATE_STEREO:-$DEFAULT_AUDIO_BITRATE_STEREO}"
 AUDIO_BITRATE_SURROUND="${AUDIO_BITRATE_SURROUND:-$DEFAULT_AUDIO_BITRATE_SURROUND}"
 AUDIO_BITRATE_SURROUND_PLUS="${AUDIO_BITRATE_SURROUND_PLUS:-$DEFAULT_AUDIO_BITRATE_SURROUND_PLUS}"
+AUDIO_FILTER_LANGUAGES="${AUDIO_FILTER_LANGUAGES:-$DEFAULT_AUDIO_FILTER_LANGUAGES}"
 
 LANGUAGE="${LANGUAGE:-$DEFAULT_LANGUAGE}"
 PREFER_ORIGINAL="${PREFER_ORIGINAL:-$DEFAULT_PREFER_ORIGINAL}"
 ORIGINAL_LANGUAGE="${ORIGINAL_LANGUAGE:-$DEFAULT_ORIGINAL_LANGUAGE}"
 
 DETECT_INTERLACING="${DETECT_INTERLACING:-$DEFAULT_DETECT_INTERLACING}"
+ADAPTIVE_DEINTERLACE="${ADAPTIVE_DEINTERLACE:-$DEFAULT_ADAPTIVE_DEINTERLACE}"
 DETECT_CROP="${DETECT_CROP:-$DEFAULT_DETECT_CROP}"
 DETECT_PULLDOWN="${DETECT_PULLDOWN:-$DEFAULT_DETECT_PULLDOWN}"
 SPLIT_CHAPTERS="${SPLIT_CHAPTERS:-$DEFAULT_SPLIT_CHAPTERS}"
@@ -172,47 +220,52 @@ USAGE:
   transcode-monster.sh [options] <source> [output_dir]
 
 ARGUMENTS:
-  source              Source directory or file(s) to transcode
-  output_dir          Output directory (default: ${DEFAULT_OUTPUT_DIR})
+  source                 Source directory or file(s) to transcode
+  output_dir             Output directory (default: ${DEFAULT_OUTPUT_DIR})
 
 OPTIONS:
-  -h, --help          Show this help message
-  -v, --version       Show version information
+  -h, --help             Show this help message
+  -v, --version          Show version information
 
-  -t, --type TYPE     Override auto-detection: 'series' or 'movie'
-  -n, --name NAME     Set title name (e.g., "Firefly" or "Dune")
-  -s, --season NUM    Process only specific season (default: all seasons)
-  -e, --episode NUM   Process only specific episode in series mode
-  -y, --year YEAR     Add year to movie title (e.g., 1984)
+  -t, --type TYPE        Override auto-detection: 'series' or 'movie'
+  -n, --name NAME        Set title name (e.g., "Firefly" or "Dune")
+  -s, --season NUM       Process only specific season (default: all seasons)
+  -e, --episode NUM      Process only specific episode in series mode
+  -y, --year YEAR        Add year to movie title (e.g., 1984)
 
-  -q, --quality NUM   Video quality CQP/CRF value (default: ${DEFAULT_QUALITY})
-  -c, --codec CODEC   Video codec: 'auto', 'hevc_vaapi', 'libx265' (default: ${DEFAULT_VIDEO_CODEC})
-  --preset PRESET     x265 encoding preset for software encoding (default: ${DEFAULT_PRESET})
-		      Options: ultrafast, superfast, veryfast, faster, fast,
-			       medium, slow, slower, veryslow, placebo
-  --bframes NUM       Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
-		      0 = max compatibility, 1-2 = balanced, 3-4 = best compression
+  -q, --quality NUM      Video quality CQP/CRF value (default: ${DEFAULT_QUALITY})
+  -c, --codec CODEC      Video codec: 'auto', 'hevc_vaapi', 'libx265' (default: ${DEFAULT_VIDEO_CODEC})
+  --preset PRESET        x265 encoding preset for software encoding (default: ${DEFAULT_PRESET})
+			 Options: ultrafast, superfast, veryfast, faster, fast,
+				  medium, slow, slower, veryslow, placebo
+  --bframes NUM          Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
+			 0 = max compatibility, 1-2 = balanced, 3-4 = best compression
 
-  --no-crop           Disable automatic crop detection
-  --no-deinterlace    Disable automatic deinterlacing
-  --no-pulldown       Disable 3:2 pulldown detection (inverse telecine)
-  --force-ivtc        Force inverse telecine detection even on HD content
-		      (by default, only runs on SD content ≤576p)
-  --split-chapters    Force chapter splitting for multi-episode files
-  --no-split-chapters Disable chapter splitting (process file as single video)
+  --no-crop              Disable automatic crop detection
+  --no-deinterlace       Disable automatic deinterlacing
+  --adaptive-deinterlace Force adaptive deinterlacing for mixed progressive/interlaced content
+			 Uses yadif in adaptive mode (SD content only, software encoding)
+			 Only deinterlaces frames detected as interlaced, leaving progressive
+			 frames untouched. Useful for content like film transfers with
+			 interlaced title cards (e.g., Crouching Tiger, Hidden Dragon)
+  --no-pulldown          Disable 3:2 pulldown detection (inverse telecine)
+  --force-ivtc           Force inverse telecine detection even on HD content
+			 (by default, only runs on SD content ≤576p)
+  --split-chapters       Force chapter splitting for multi-episode files
+  --no-split-chapters    Disable chapter splitting (process file as single video)
   --chapters-per-episode N
-		      Group N chapters into each episode (default: auto-detect)
-		      Auto-detection finds most uniform episode grouping
+			 Group N chapters into each episode (default: auto-detect)
+			 Auto-detection finds most uniform episode grouping
 
-  --language LANG     Default language (ISO 639-2 code, default: eng)
-  --original-lang LANG Prefer original language mode (e.g., jpn for anime)
-		      Selects original language audio + default language subs
+  --language LANG        Default language (ISO 639-2 code, default: eng)
+  --original-lang LANG   Prefer original language mode (e.g., jpn for anime)
+			 Selects original language audio + default language subs
 
-  -o, --output DIR    Output directory (overrides argument)
-  --device PATH       VAAPI device path (default: ${DEFAULT_VAAPI_DEVICE})
-  --overwrite         Overwrite existing output files
+  -o, --output DIR       Output directory (overrides argument)
+  --device PATH          VAAPI device path (default: ${DEFAULT_VAAPI_DEVICE})
+  --overwrite            Overwrite existing output files
 
-  -d, --dry-run       Show what would be processed without encoding
+  -d, --dry-run          Show what would be processed without encoding
 
 ENCODER:
   The script uses hybrid encoding for optimal speed and quality:
@@ -227,11 +280,13 @@ ENCODER:
 
   B-frames (Bidirectional frames):
   - Improve compression by referencing both past and future frames
-  - Default: 0 (disabled) safe default for hardware compatibility
+  - Default: 0 (disabled) for maximum hardware compatibility
   - Values: 0 = max compatibility (required for older AMD GPUs like RX 400/500)
 	   1-2 = balanced efficiency with minimal overhead
-	   3-4 = best compression for high-quality archiving
+	   3-4 = best compression for archiving (higher decode complexity)
   - Hardware support varies: Intel QSV and newer AMD (RX 6000+) support 2-4
+  - Note: Higher B-frame values increase decode complexity; may not play
+	  smoothly on older/low-power devices (smart TVs, older phones, etc.)
   - Configure via BFRAMES in config file or --bframes option
 
 AUDIO ENCODING:
@@ -242,6 +297,14 @@ AUDIO ENCODING:
     - Stereo: 128 kbps
     - 5.1 surround: 192 kbps
     - 7.1+ surround: 256 kbps
+
+  Language filtering (enabled by default):
+  - Keeps audio tracks matching your default language (LANGUAGE setting)
+  - When using --original-lang, also keeps that language (e.g., jpn for anime)
+  - Always keeps commentary tracks (regardless of language)
+  - Always keeps 'und' (undetermined language) tracks
+  - Skips foreign overdubs (e.g., French/German/Spanish dubs on English content)
+  - Disable filtering with --all-audio to keep all tracks
 
 CONTENT DETECTION:
   - Series: Multiple files in S#D# directories or sequential files
@@ -264,6 +327,7 @@ CONFIG FILE:
     OUTPUT_DIR="/path/to/videos"
     AUDIO_BITRATE_STEREO="128k"
     AUDIO_BITRATE_SURROUND="192k"
+    ADAPTIVE_DEINTERLACE="true"
 
   Priority: Built-in defaults < Config file < Command line arguments
 
@@ -290,10 +354,13 @@ EXAMPLES:
   # Custom quality and disable crop detection
   transcode-monster.sh -q 21 --no-crop "/path/to/rips"
 
+  # Mixed progressive/interlaced content (film with interlaced titles)
+  transcode-monster.sh --adaptive-deinterlace "/path/to/rips/ctd.mkv"
+
   # "Anime mode": prefer foreign audio with subs in our default language
   transcode-monster.sh --original-lang jpn "/path/to/anime/Cowboy Bebop/"
 
-  # Default language override: Spanish audio for maðɾe, no default subs needed
+  # Default language override: Spanish audio for native speakers
   transcode-monster.sh --language spa "/path/to/series/La Casa de Papel/"
 
 EOF
@@ -374,33 +441,31 @@ detect_telecine() {
 detect_interlacing() {
 	local input="$1"
 
-  # Get field order metadata
-  local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+  # Get total duration and seek to ~10% in to avoid title cards/production logos
+  local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+  duration=${duration//,/}
 
-  # Check field order - tt/tb = top field first, bb/bt = bottom field first
-  if [[ "$field_order" == "tt" || "$field_order" == "tb" ]]; then
-	  echo "tff"
-	  return
-  elif [[ "$field_order" == "bb" || "$field_order" == "bt" ]]; then
-	  echo "bff"
-	  return
+  local seek_time="0"
+  if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+	  seek_time=$(echo "scale=2; $duration * 0.1" | bc 2>/dev/null || echo "0")
   fi
 
-  # Run idet analysis
-  local idet_output=$(ffmpeg -i "$input" -vf idet -frames:v 200 -an -f null - 2>&1)
+  # Run idet analysis - don't trust metadata, analyze actual content
+  local idet_output=$(ffmpeg -ss "$seek_time" -i "$input" -vf idet -frames:v 200 -an -f null - 2>&1)
 
   # Parse the "Multi frame detection" line
   local tff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'TFF:\s*\K[0-9]+' || echo "0")
   local bff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'BFF:\s*\K[0-9]+' || echo "0")
   local prog_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'Progressive:\s*\K[0-9]+' || echo "0")
 
-  # Use threshold-based detection: if >50% of frames are interlaced, treat as interlaced
+  # Use threshold-based detection: if >80% of frames are interlaced, treat as interlaced
+  # This avoids false positives from progressive content with bad metadata
   local total=$((tff_count + bff_count + prog_count))
   if [[ $total -gt 0 ]]; then
 	  local interlaced_count=$((tff_count + bff_count))
 	  local interlaced_pct=$((interlaced_count * 100 / total))
 
-	  if [[ $interlaced_pct -gt 50 ]]; then
+	  if [[ $interlaced_pct -gt 80 ]]; then
 		  if [[ $tff_count -gt $bff_count ]]; then
 			  echo "tff"
 			  return
@@ -582,8 +647,14 @@ else
 	    fi
     fi
 
-    # Interlacing detection (use CPU bwdif for software encoding)
-    if [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
+    # Check if adaptive deinterlacing is requested
+    if [[ "$ADAPTIVE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
+	    # Force adaptive deinterlacing regardless of detection
+	    [[ -n "$vf" ]] && vf="$vf,"
+	    vf="${vf}yadif=mode=0:parity=-1:deint=1"
+	    echo "    Added adaptive deinterlacer: yadif (deint=interlaced only)" >&2
+	    # Normal interlacing detection (use CPU bwdif for software encoding)
+    elif [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
 	    local interlacing=$(detect_interlacing "$input")
 	    echo "    Interlacing detected: $interlacing" >&2
 
@@ -743,7 +814,7 @@ get_audio_track_info() {
 		  echo "$default_index|$lang"
 		  return
 	  fi
-	  ((track_index++))
+	  track_index=$((track_index + 1))
   done <<< "$audio_info"
 
   # No match found, return first track with its language
@@ -751,29 +822,112 @@ get_audio_track_info() {
   echo "0|${first_lang:-und}"
 }
 
+# Check if an audio track should be included based on language filtering
+should_include_audio_track() {
+	local input="$1"
+	local track_index="$2"
+
+	# If language filtering is disabled, include all tracks
+	if [[ "$AUDIO_FILTER_LANGUAGES" != "true" ]]; then
+		echo "true"
+		return
+	fi
+
+	# Get track language and title
+	local lang=$(ffprobe -v quiet -select_streams a:$track_index -show_entries stream_tags=language -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+	local title=$(ffprobe -v quiet -select_streams a:$track_index -show_entries stream_tags=title -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+
+	# Always include if it's a commentary track (check title for "commentary" case-insensitive)
+	if [[ -n "$title" ]] && [[ "$title" =~ [Cc]ommentary ]]; then
+		echo "true"
+		return
+	fi
+
+	# Build list of allowed languages
+	# Start with user's default language
+	local allowed_langs="$LANGUAGE"
+
+	# Add original language if in original language mode
+	if [[ "$PREFER_ORIGINAL" == "true" && -n "$ORIGINAL_LANGUAGE" ]]; then
+		allowed_langs="$allowed_langs,$ORIGINAL_LANGUAGE"
+	fi
+
+	# Always include 'und' (undetermined) tracks
+	allowed_langs="$allowed_langs,und"
+
+	# Check if track language is in the allowed list
+	IFS=',' read -ra ALLOWED_LANGS <<< "$allowed_langs"
+	for allowed in "${ALLOWED_LANGS[@]}"; do
+		# Trim whitespace
+		allowed=$(echo "$allowed" | xargs)
+		if [[ "$lang" == "$allowed" ]]; then
+			echo "true"
+			return
+		fi
+	done
+
+	# Track doesn't match criteria
+	echo "false"
+}
+
+# Check if a subtitle track should be included based on language filtering
+should_include_subtitle_track() {
+	local input="$1"
+	local track_index="$2"
+
+	# Get track language
+	local lang=$(ffprobe -v quiet -select_streams s:$track_index -show_entries stream_tags=language -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+
+	# Build list of allowed languages from LANGUAGE setting (can be comma-separated)
+	local allowed_langs="$LANGUAGE"
+
+	# Check if track language is in the allowed list
+	IFS=',' read -ra ALLOWED_LANGS <<< "$allowed_langs"
+	for allowed in "${ALLOWED_LANGS[@]}"; do
+		# Trim whitespace
+		allowed=$(echo "$allowed" | xargs)
+		if [[ "$lang" == "$allowed" ]]; then
+			echo "true"
+			return
+		fi
+	done
+
+	# Track doesn't match criteria
+	echo "false"
+}
+
 # Determine subtitle disposition based on audio/subtitle languages
 get_subtitle_disposition() {
 	local input="$1"
 	local audio_lang="$2"      # Language of the default audio track
-	local native_lang="$3"     # User's native language (e.g., "eng")
+	local native_langs="$3"    # User's native language(s) - comma-separated (e.g., "eng" or "eng,spa")
 
   # Get all subtitle tracks with their language
   local sub_info=$(ffprobe -v quiet -select_streams s -show_entries stream_tags=language -of csv=p=0 "$input" 2>/dev/null)
 
-  # If audio is already in native language, no default subtitle needed
-  if [[ "$audio_lang" == "$native_lang" ]]; then
-	  echo "-1"
-	  return
-  fi
+  # Parse native languages into array
+  IFS=',' read -ra NATIVE_LANGS <<< "$native_langs"
 
-  # Audio is NOT in native language, find first native language subtitle
-  local track_index=0
-  while IFS=',' read -r lang; do
-	  if [[ "$lang" == "$native_lang" ]]; then
-		  echo "$track_index"
+  # If audio is already in one of the native languages, no default subtitle needed
+  for native in "${NATIVE_LANGS[@]}"; do
+	  native=$(echo "$native" | xargs)  # Trim whitespace
+	  if [[ "$audio_lang" == "$native" ]]; then
+		  echo "-1"
 		  return
 	  fi
-	  ((track_index++))
+  done
+
+  # Audio is NOT in native language, find first matching native language subtitle
+  local track_index=0
+  while IFS=',' read -r lang; do
+	  for native in "${NATIVE_LANGS[@]}"; do
+		  native=$(echo "$native" | xargs)  # Trim whitespace
+		  if [[ "$lang" == "$native" ]]; then
+			  echo "$track_index"
+			  return
+		  fi
+	  done
+	  track_index=$((track_index + 1))
   done <<< "$sub_info"
 
   # No native language subtitle found
@@ -845,7 +999,7 @@ detect_chapters_per_episode() {
 
   # Calculate duration of each chapter
   local durations=()
-  for ((i=0; i<chapter_count; i++)); do
+  for ((i=0; i<chapter_count; i=i+1)); do
 	  local start="${chapter_times[$i]}"
 	  local end
 	  if [[ $((i + 1)) -lt $chapter_count ]]; then
@@ -880,9 +1034,9 @@ done
 
     # Calculate episode durations for this grouping
     local episode_durations=()
-    for ((ep=0; ep<chapter_count; ep+=grouping)); do
+    for ((ep=0; ep<chapter_count; ep=ep+grouping)); do
 	    local ep_duration=0
-	    for ((ch=0; ch<grouping; ch++)); do
+	    for ((ch=0; ch<grouping; ch=ch+1)); do
 		    local idx=$((ep + ch))
 		    if [[ $idx -lt ${#durations[@]} ]]; then
 			    ep_duration=$(echo "$ep_duration + ${durations[$idx]}" | bc 2>/dev/null)
@@ -1091,6 +1245,11 @@ normalize_source() {
 	SOURCE_FILES=()
 	SOURCE_DIR=""
 
+	# Check if we have any arguments at all
+	if [[ $# -eq 0 ]]; then
+		return 1
+	fi
+
 	# If we got multiple arguments, they're pre-expanded files from shell globbing
 	if [[ $# -gt 1 ]]; then
 		SOURCE_FILES=("$@")
@@ -1098,7 +1257,7 @@ normalize_source() {
 		return 0
 	fi
 
-	local source="$1"
+	local source="${1}"
 
 	# Check if source is a file
 	if [[ -f "$source" ]]; then
@@ -1120,9 +1279,9 @@ normalize_source() {
 
 # Display ffmpeg command for dry-run mode
 show_ffmpeg_command() {
-	local source_file="$1"
-	local output_file="$2"
-	local input_opts="$3"  # Optional, for chapter extraction
+	local source_file="${1}"
+	local output_file="${2}"
+	local input_opts="${3:-}"  # Optional, for chapter extraction (default to empty)
 
 	# Detect bit depth and height
 	local bit_depth=$(detect_bit_depth "$source_file")
@@ -1175,24 +1334,49 @@ show_ffmpeg_command() {
 
 	if [[ $num_audio -gt 1 ]]; then
 		local track_idx=1
-		for ((i=0; i<num_audio; i++)); do
+		for ((i=0; i<num_audio; i=i+1)); do
 			if [[ $i -eq $default_audio_idx ]]; then
 				continue
 			fi
 			local bitrate=$(get_audio_bitrate "$source_file" $i)
 			audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx $AUDIO_CODEC -profile:a:$track_idx $AUDIO_PROFILE -b:a:$track_idx $bitrate"
-			((track_idx++))
+			track_idx=$((track_idx + 1))
 		done
 	fi
 	audio_opts="$audio_opts -disposition:a:0 default"
 
-	# Smart subtitle handling
-	local sub_default_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
-	local sub_opts="-c:s copy -map 0:s?"
-	if [[ "$sub_default_idx" != "-1" ]]; then
-		sub_opts="$sub_opts -disposition:s 0 -disposition:s:$sub_default_idx default"
-	else
-		sub_opts="$sub_opts -disposition:s 0"
+	# Smart subtitle handling with language filtering
+	local num_subs=$(ffprobe -v quiet -select_streams s -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
+
+	# Build subtitle mapping - only include subtitles in our language(s)
+	local sub_opts=""
+	local sub_track_idx=0
+	local -A input_to_output_sub_map
+
+	for ((i=0; i<num_subs; i=i+1)); do
+		# Check if we should include this subtitle track
+		if [[ "$(should_include_subtitle_track "$source_file" $i)" == "true" ]]; then
+			sub_opts="$sub_opts -map 0:s:$i"
+			input_to_output_sub_map[$i]=$sub_track_idx
+			sub_track_idx=$((sub_track_idx + 1))
+		fi
+	done
+
+	# Add codec if we have any subtitles
+	if [[ $sub_track_idx -gt 0 ]]; then
+		sub_opts="$sub_opts -c:s copy"
+
+		# Determine which subtitle should be default based on audio language
+		local sub_default_input_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
+
+		# Check if the default subtitle exists in our filtered set (safe associative array check)
+		if [[ "$sub_default_input_idx" != "-1" ]] && [[ -v input_to_output_sub_map[$sub_default_input_idx] ]]; then
+			# Map input index to output index
+			local sub_default_output_idx="${input_to_output_sub_map[$sub_default_input_idx]}"
+			sub_opts="$sub_opts -disposition:s 0 -disposition:s:$sub_default_output_idx default"
+		else
+			sub_opts="$sub_opts -disposition:s 0"
+		fi
 	fi
 
 	# Display command based on encoder type
@@ -1218,7 +1402,9 @@ show_ffmpeg_command() {
 		local x265_profile pix_fmt x265_params
 		IFS='|' read -r x265_profile pix_fmt x265_params <<< "$(build_x265_params "$bit_depth" "$height")"
 
-		echo "ffmpeg${input_opts:+ $input_opts} -i \"$source_file\" \\"
+		local priority_prefix=$(build_priority_prefix)
+
+		echo "$priority_prefix ffmpeg${input_opts:+ $input_opts} -i \"$source_file\" \\"
 		echo "  -map 0:v:0 \\"
 		echo "  $audio_opts \\"
 		echo "  $sub_opts \\"
@@ -1298,6 +1484,10 @@ while [[ $# -gt 0 ]]; do
 			DETECT_INTERLACING="false"
 			shift
 			;;
+		--adaptive-deinterlace)
+			ADAPTIVE_DEINTERLACE="true"
+			shift
+			;;
 		--no-pulldown)
 			DETECT_PULLDOWN="false"
 			shift
@@ -1326,6 +1516,10 @@ while [[ $# -gt 0 ]]; do
 			ORIGINAL_LANGUAGE="$2"
 			PREFER_ORIGINAL="true"
 			shift 2
+			;;
+		--all-audio)
+			AUDIO_FILTER_LANGUAGES="false"
+			shift
 			;;
 		-o|--output)
 			OUTPUT_DIR="$2"
@@ -1365,19 +1559,30 @@ if [[ $# -lt 1 ]]; then
 fi
 
 # Separate source files/directory from output directory
-# Everything except the last arg (if it's a directory) is source
+# If last arg is a directory AND we have more than one positional arg, it's output_dir
+# OR if last arg looks like a path (contains /) and we have >1 arg, treat as output_dir
+# Otherwise, the single arg is the source
 OUTPUT_DIR_ARG=""
 SOURCE_ARGS=()
 
-# Check if last argument is a directory - if so, it's the output directory
-if [[ -d "${!#}" ]]; then
-	OUTPUT_DIR_ARG="${!#}"
-	# All arguments except the last are source files/directory
-	for ((i=1; i<$#; i++)); do
-		SOURCE_ARGS+=("${!i}")
-	done
+if [[ $# -gt 1 ]]; then
+	# Multiple arguments - last one might be output directory
+	last_arg="${!#}"
+
+	# Check if last arg is an existing directory OR looks like a path (contains /)
+	if [[ -d "$last_arg" ]] || [[ "$last_arg" == */* ]]; then
+		# Last arg is output directory (or intended to be)
+		OUTPUT_DIR_ARG="$last_arg"
+		# All arguments except the last are source files/directory
+		for ((i=1; i<$#; i=i+1)); do
+			SOURCE_ARGS+=("${!i}")
+		done
+	else
+		# Last arg is not a path - all arguments are source
+		SOURCE_ARGS=("$@")
+	fi
 else
-	# No output directory specified, all arguments are source files/directory
+	# Single arg - must be source
 	SOURCE_ARGS=("$@")
 fi
 
@@ -1391,7 +1596,12 @@ SOURCE_FILES=()
 SOURCE_DIR=""
 
 # Normalize source - handles files, directories, and globs (pre-expanded by shell)
-normalize_source "${SOURCE_ARGS[@]}"
+if [[ ${#SOURCE_ARGS[@]} -gt 0 ]]; then
+	normalize_source "${SOURCE_ARGS[@]}"
+else
+	echo -e "${RED}Error: No source files or directories specified${RESET}"
+	exit 1
+fi
 
 if [[ -z "$SOURCE_DIR" ]]; then
 	echo -e "${RED}Error: Source not found${RESET}"
@@ -1492,6 +1702,7 @@ echo -e "${BOLD}Quality:${RESET}      $QUALITY (CQP)"
 echo -e "${BOLD}Codec:${RESET}        $VIDEO_CODEC"
 echo -e "${BOLD}Crop:${RESET}         $DETECT_CROP"
 echo -e "${BOLD}Deinterlace:${RESET}  $DETECT_INTERLACING"
+[[ "$ADAPTIVE_DEINTERLACE" == "true" ]] && echo -e "${BOLD}Adaptive:${RESET}     $ADAPTIVE_DEINTERLACE"
 echo -e "${BOLD}Pulldown:${RESET}     $DETECT_PULLDOWN"
 echo -e "${BOLD}Split Chapters:${RESET} $SPLIT_CHAPTERS"
 [[ "$DRY_RUN" == true ]] && echo -e "${YELLOW}Mode:         DRY RUN${RESET}"
@@ -1506,6 +1717,8 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	# ========================================
 	# MOVIE MODE
 	# ========================================
+
+	CURRENT_OPERATION="Finding movie file"
 
   # Find the file to process
   mkv_file=""
@@ -1525,6 +1738,9 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	  exit 1
   fi
 
+  CURRENT_FILE="$mkv_file"
+  CURRENT_OPERATION="Preparing output"
+
   output_file="${OUTPUT_DIR%/}/${CONTENT_NAME}.mkv"
 
   if [[ -f "$output_file" && "$OVERWRITE" != "true" ]]; then
@@ -1538,9 +1754,11 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 
   if [[ "$DRY_RUN" == true ]]; then
 	  echo -e "${YELLOW}[DRY RUN] Would transcode to: $output_file${RESET}"
-	  show_ffmpeg_command "$mkv_file" "$output_file" ""
+	  show_ffmpeg_command "$mkv_file" "$output_file"
 	  exit 0
   fi
+
+  CURRENT_OPERATION="Detecting video properties"
 
   # Detect bit depth and height
   bit_depth=$(detect_bit_depth "$mkv_file")
@@ -1578,11 +1796,15 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 
   echo -e "${CYAN}Bit depth: ${bit_depth}-bit, Height: ${height}p, Encoder: $actual_codec, Profile: $detected_profile${RESET}"
 
+  CURRENT_OPERATION="Building video filter chain"
+
   # Build filter chain
   vf=$(build_vf "$mkv_file" "$encoder_type" "$bit_depth")
   if [[ -n "$vf" ]]; then
 	  echo -e "${CYAN}Video filters: $vf${RESET}"
   fi
+
+  CURRENT_OPERATION="Analyzing audio tracks"
 
   # Count audio tracks
   num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$mkv_file" 2>/dev/null | wc -l)
@@ -1611,39 +1833,78 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
   # Map remaining audio tracks and encode with appropriate bitrate
   if [[ $num_audio -gt 1 ]]; then
 	  track_idx=1
-	  for ((i=0; i<num_audio; i++)); do
+	  skipped_count=0
+	  for ((i=0; i<num_audio; i=i+1)); do
 		  # Skip the track we already mapped
 		  if [[ $i -eq $default_audio_idx ]]; then
 			  continue
 		  fi
 
+		  # Check if we should include this track (language filter)
+		  if [[ "$(should_include_audio_track "$mkv_file" $i)" != "true" ]]; then
+			  skipped_count=$((skipped_count + 1))
+			  continue
+		  fi
+
 		  bitrate=$(get_audio_bitrate "$mkv_file" $i)
 		  audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx $AUDIO_CODEC -profile:a:$track_idx $AUDIO_PROFILE -b:a:$track_idx $bitrate"
-		  ((track_idx++))
+		  track_idx=$((track_idx + 1))
 	  done
+
+	  if [[ $skipped_count -gt 0 ]]; then
+		  echo -e "${CYAN}Skipped $skipped_count audio track(s) due to language filtering${RESET}"
+	  fi
   fi
 
   # Set first audio track as default
   audio_opts="$audio_opts -disposition:a:0 default"
 
-  # Smart subtitle handling
-  sub_default_idx=$(get_subtitle_disposition "$mkv_file" "$default_audio_lang" "$LANGUAGE")
-  sub_opts="-c:s copy -map 0:s?"
+  # Smart subtitle handling with language filtering
+  num_subs=$(ffprobe -v quiet -select_streams s -show_entries stream=index -of csv=p=0 "$mkv_file" 2>/dev/null | wc -l)
 
-  if [[ "$sub_default_idx" != "-1" ]]; then
-	  # Set specific subtitle as default, clear all others
-	  sub_opts="$sub_opts -disposition:s 0 -disposition:s:$sub_default_idx default"
-	  echo -e "${CYAN}Subtitles: Track $sub_default_idx ($LANGUAGE) will be default (audio is $default_audio_lang)${RESET}"
+  # Build subtitle mapping - only include subtitles in our language(s)
+  sub_opts=""
+  sub_track_idx=0
+  declare -A input_to_output_sub_map  # Associative array: maps input subtitle index to output subtitle index
+
+  for ((i=0; i<num_subs; i=i+1)); do
+	  # Check if we should include this subtitle track
+	  if [[ "$(should_include_subtitle_track "$mkv_file" $i)" == "true" ]]; then
+		  sub_opts="$sub_opts -map 0:s:$i"
+		  input_to_output_sub_map[$i]=$sub_track_idx
+		  sub_track_idx=$((sub_track_idx + 1))
+	  fi
+  done
+
+  # Add codec if we have any subtitles
+  if [[ $sub_track_idx -gt 0 ]]; then
+	  sub_opts="$sub_opts -c:s copy"
+
+	  # Determine which subtitle should be default based on audio language
+	  sub_default_input_idx=$(get_subtitle_disposition "$mkv_file" "$default_audio_lang" "$LANGUAGE")
+
+	  # Check if the default subtitle exists in our filtered set (safe associative array check)
+	  if [[ "$sub_default_input_idx" != "-1" ]] && [[ -v input_to_output_sub_map[$sub_default_input_idx] ]]; then
+		  # Map input index to output index
+		  sub_default_output_idx="${input_to_output_sub_map[$sub_default_input_idx]}"
+		  sub_opts="$sub_opts -disposition:s 0 -disposition:s:$sub_default_output_idx default"
+		  echo -e "${CYAN}Subtitles: $sub_track_idx track(s) kept, track $sub_default_output_idx ($LANGUAGE) will be default (audio is $default_audio_lang)${RESET}"
+	  else
+		  # No default subtitle - explicitly clear all subtitle dispositions
+		  sub_opts="$sub_opts -disposition:s 0"
+		  echo -e "${CYAN}Subtitles: $sub_track_idx track(s) kept, no default (audio already in $LANGUAGE)${RESET}"
+	  fi
   else
-	  # No default subtitle - explicitly clear all subtitle dispositions
-	  sub_opts="$sub_opts -disposition:s 0"
-	  echo -e "${CYAN}Subtitles: No default (audio already in $LANGUAGE)${RESET}"
+	  # No subtitles matched our language criteria
+	  echo -e "${CYAN}Subtitles: None matched language filter${RESET}"
   fi
 
   # Encode with appropriate encoder
   if [[ "$encoder_type" == "vaapi" ]]; then
 	  # VAAPI encoding
 	  vaapi_profile=$(get_vaapi_profile "$bit_depth")
+
+	  CURRENT_OPERATION="Encoding with VAAPI (hardware)"
 
     # Build priority prefix (beneficial even for VAAPI when CPU-decoding)
     priority_prefix=$(build_priority_prefix)
@@ -1665,6 +1926,8 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 		# Software encoding (libx265)
 		IFS='|' read -r x265_profile pix_fmt x265_params <<< "$(build_x265_params "$bit_depth" "$height")"
 
+		CURRENT_OPERATION="Encoding with libx265 (software)"
+
 		video_opts="-c:v $actual_codec -preset $PRESET -crf $QUALITY -pix_fmt $pix_fmt"
 		if [[ -n "$vf" ]]; then
 			video_opts="$video_opts -vf \"$vf\""
@@ -1680,449 +1943,13 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 			-f \"$CONTAINER\" \"$output_file\" -y
   fi
 
+  CURRENT_OPERATION=""
+  CURRENT_FILE=""
+
   echo -e "${BOLDGREEN}Complete: $output_file${RESET}"
 
 else
-	# ========================================
-	# SERIES MODE
-	# ========================================
-
-  # Process each season
-  for SEASON_NUM in "${SEASONS_TO_PROCESS[@]}"; do
-	  echo -e "${BLUE}========================================${RESET}"
-	  echo -e "${BOLDBLUE}PROCESSING SEASON $SEASON_NUM${RESET}"
-	  echo -e "${BLUE}========================================${RESET}"
-	  echo ""
-
-	  episode_files=()
-
-	  if [[ "$FILE_MODE" == true ]]; then
-		  # File mode: use specified files directly
-		  echo -e "${CYAN}Processing ${#SOURCE_FILES[@]} specified file(s)${RESET}"
-
-		  for source_file in "${SOURCE_FILES[@]}"; do
-			  echo "Processing: $(basename "$source_file")"
-
-	# Check if this file should be split by chapters
-	should_split=$(should_split_by_chapters "$source_file" "$CONTENT_TYPE")
-
-	if [[ "$should_split" == "true" ]]; then
-		# Determine chapters per episode
-		chapters_per_ep=""
-		if [[ "$CHAPTERS_PER_EPISODE" == "auto" ]]; then
-			chapters_per_ep=$(detect_chapters_per_episode "$source_file")
-			echo "  Auto-detected $chapters_per_ep chapter(s) per episode"
-		else
-			chapters_per_ep="$CHAPTERS_PER_EPISODE"
-			echo "  Using $chapters_per_ep chapter(s) per episode (manual override)"
-		fi
-
-	  # Get chapter count
-	  chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]")
-	  episode_count=$((chapter_count / chapters_per_ep))
-	  echo "  File has $chapter_count chapters - will split into $episode_count episodes"
-
-	  # Add each episode (group of chapters)
-	  for ((ep=0; ep<episode_count; ep++)); do
-		  start_chapter=$((ep * chapters_per_ep))
-		  end_chapter=$((start_chapter + chapters_per_ep - 1))
-		  ep_num=$((ep + 1))
-		  # Store: disc_dir|episode_num|source_file|start_chapter|end_chapter
-		  episode_files+=("$(dirname "$source_file")|$ep_num|$source_file|$start_chapter|$end_chapter")
-	  done
-  else
-	  # Regular file - parse episode number from filename
-	  ep_num=$(get_episode_num "$(basename "$source_file")")
-	  if [[ "$ep_num" != "UNKNOWN" ]]; then
-		  # Store with chapter markers as -1 to indicate whole file
-		  episode_files+=("$(dirname "$source_file")|$ep_num|$source_file|-1|-1")
-	  else
-		  # No episode number, use sequential numbering
-		  episode_files+=("$(dirname "$source_file")|${#episode_files[@]}|$source_file|-1|-1")
-	  fi
-	fi
-done
-else
-	# Directory mode: use existing disc directory logic
-	# Find all disc directories for this season
-	shopt -s nullglob nocaseglob
-	disc_dirs=("$SOURCE_DIR"/[Ss]${SEASON_NUM}[Dd]*)
-	shopt -u nullglob nocaseglob
-
-	if [[ ${#disc_dirs[@]} -eq 0 ]]; then
-		# No S#D# subdirectories found - check if files are directly in the source directory
-		shopt -s nullglob
-		direct_mkv_files=("$SOURCE_DIR"/*.mkv)
-		shopt -u nullglob
-
-		if [[ ${#direct_mkv_files[@]} -gt 0 ]]; then
-			# Files are directly in the source directory (single-disc series)
-			echo -e "${CYAN}Processing ${#direct_mkv_files[@]} file(s) directly from source directory${RESET}"
-			disc_dirs=("$SOURCE_DIR")
-		else
-			echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (S${SEASON_NUM}D*) and no .mkv files in source directory${RESET}"
-			echo ""
-			continue
-		fi
-	else
-		echo -e "${CYAN}Processing ${#disc_dirs[@]} disc(s)/directory(ies) for season $SEASON_NUM${RESET}"
-	fi
-
-      # Collect episodes
-      for disc_dir in "${disc_dirs[@]}"; do
-	      echo "Scanning: $disc_dir"
-
-	      shopt -s nullglob
-	      mkv_files=("$disc_dir"/*.mkv)
-	      shopt -u nullglob
-
-	      if [[ ${#mkv_files[@]} -eq 0 ]]; then
-		      echo -e "${YELLOW}  Warning: No .mkv files found${RESET}"
-		      continue
-	      fi
-
-	      echo "  Found ${#mkv_files[@]} file(s)"
-
-	      for source_file in "${mkv_files[@]}"; do
-		      # Check if this file should be split by chapters
-		      should_split=$(should_split_by_chapters "$source_file" "$CONTENT_TYPE")
-
-		      if [[ "$should_split" == "true" ]]; then
-			      # Determine chapters per episode
-			      chapters_per_ep=""
-			      if [[ "$CHAPTERS_PER_EPISODE" == "auto" ]]; then
-				      chapters_per_ep=$(detect_chapters_per_episode "$source_file")
-				      echo "  Auto-detected $chapters_per_ep chapter(s) per episode"
-			      else
-				      chapters_per_ep="$CHAPTERS_PER_EPISODE"
-				      echo "  Using $chapters_per_ep chapter(s) per episode (manual override)"
-			      fi
-
-	    # Get chapter count
-	    chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]")
-	    episode_count=$((chapter_count / chapters_per_ep))
-	    echo "  File has $chapter_count chapters - will split into $episode_count episodes"
-
-	    # Add each episode (group of chapters)
-	    for ((ep=0; ep<episode_count; ep++)); do
-		    start_chapter=$((ep * chapters_per_ep))
-		    end_chapter=$((start_chapter + chapters_per_ep - 1))
-		    ep_num=$((ep + 1))
-		    # Store: disc_dir|episode_num|source_file|start_chapter|end_chapter
-		    episode_files+=("$disc_dir|$ep_num|$source_file|$start_chapter|$end_chapter")
-	    done
-    else
-	    # Regular file - parse episode number from filename
-	    ep_num=$(get_episode_num "$(basename "$source_file")")
-	    if [[ "$ep_num" != "UNKNOWN" ]]; then
-		    # Store with chapter markers as -1 to indicate whole file
-		    episode_files+=("$disc_dir|$ep_num|$source_file|-1|-1")
-	    else
-		    echo -e "${YELLOW}    Warning: Could not parse episode number from $(basename "$source_file")${RESET}"
-	    fi
-		      fi
-	      done
-      done
-	  fi
-
-	  if [[ ${#episode_files[@]} -eq 0 ]]; then
-		  echo -e "${YELLOW}Warning: No valid episode files found for season $SEASON_NUM${RESET}"
-		  echo ""
-		  continue
-	  fi
-
-    # Sort episodes: first by disc directory, then by episode number within disc
-    readarray -t sorted_files < <(
-    for line in "${episode_files[@]}"; do
-	    echo "$line"
-    done | sort -t'|' -k1,1 -k2,2n
-)
-
-    # Now display with sequential episode numbers
-    echo ""
-    echo -e "${CYAN}Episode mapping:${RESET}"
-    ep_index=1
-    for sorted_line in "${sorted_files[@]}"; do
-	    IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
-	    if [[ "$start_ch" == "-1" ]]; then
-		    echo "    $(basename "$source_file") -> Episode $ep_index"
-	    else
-		    if [[ "$start_ch" == "$end_ch" ]]; then
-			    echo "    $(basename "$source_file") [Chapter $((start_ch + 1))] -> Episode $ep_index"
-		    else
-			    echo "    $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))] -> Episode $ep_index"
-		    fi
-	    fi
-	    ((ep_index++))
-    done
-
-    echo ""
-    echo -e "${CYAN}Processing ${#sorted_files[@]} episode(s) for season $SEASON_NUM${RESET}"
-    echo ""
-
-    if [[ "$DRY_RUN" == true ]]; then
-	    ep_index=1
-	    for sorted_line in "${sorted_files[@]}"; do
-		    IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
-		    episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
-		    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
-		    if [[ "$start_ch" == "-1" ]]; then
-			    echo -e "${YELLOW}[DRY RUN] Would transcode: $(basename "$source_file") -> $(basename "$output_file")${RESET}"
-		    else
-			    if [[ "$start_ch" == "$end_ch" ]]; then
-				    echo -e "${YELLOW}[DRY RUN] Would transcode: $(basename "$source_file") [Chapter $((start_ch + 1))] -> $(basename "$output_file")${RESET}"
-			    else
-				    echo -e "${YELLOW}[DRY RUN] Would transcode: $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))] -> $(basename "$output_file")${RESET}"
-			    fi
-		    fi
-		    ((ep_index++))
-	    done
-	    echo ""
-
-	    # Show command for first episode as an example
-	    echo -e "${CYAN}Example command for first episode:${RESET}"
-	    IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "${sorted_files[0]}"
-	    episode_num="S$(printf "%02d" $SEASON_NUM)E01"
-	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
-
-	    # Build input options for chapter extraction if needed
-	    input_opts=""
-	    if [[ "$start_ch" != "-1" ]]; then
-		    readarray -t chapter_times < <(get_chapter_times "$source_file")
-		    local start_time="${chapter_times[$start_ch]}"
-		    start_time=$(echo "$start_time" | tr -d '[:space:]')
-
-		    if [[ "$start_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-			    local end_time=""
-			    if [[ $((end_ch + 1)) -lt ${#chapter_times[@]} ]]; then
-				    end_time="${chapter_times[$((end_ch + 1))]}"
-				    end_time=$(echo "$end_time" | tr -d '[:space:]')
-			    fi
-
-			    input_opts="-ss $start_time"
-			    if [[ -n "$end_time" ]] && [[ "$end_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-				    local duration=$(echo "$end_time - $start_time" | bc)
-				    input_opts="$input_opts -t $duration"
-			    fi
-		    fi
-	    fi
-
-	    show_ffmpeg_command "$source_file" "$output_file" "$input_opts"
-
-	    continue
-    fi
-
-    # Process episodes
-    ep_index=1
-    for sorted_line in "${sorted_files[@]}"; do
-	    IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
-
-	    # Skip if user specified a specific episode and this isn't it
-	    if [[ -n "$EPISODE_NUM" ]] && [[ "$ep_index" -ne "$EPISODE_NUM" ]]; then
-		    ((ep_index++))
-		    continue
-	    fi
-
-	    episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
-	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
-
-	    if [[ -f "$output_file" && "$OVERWRITE" != "true" ]]; then
-		    echo -e "${YELLOW}[$ep_index/${#sorted_files[@]}] Skipping: $(basename "$output_file") (already exists)${RESET}"
-		    ((ep_index++))
-		    continue
-	    fi
-
-	    if [[ "$start_ch" == "-1" ]]; then
-		    echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file")${RESET}"
-	    else
-		    if [[ "$start_ch" == "$end_ch" ]]; then
-			    echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file") [Chapter $((start_ch + 1))]${RESET}"
-		    else
-			    echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))]${RESET}"
-		    fi
-	    fi
-	    echo "    Output: $(basename "$output_file")"
-
-      # Build input options for chapter extraction
-      input_opts=""
-      if [[ "$start_ch" != "-1" ]]; then
-	      # Get all chapter times as an array
-	      readarray -t chapter_times < <(get_chapter_times "$source_file")
-	      start_time="${chapter_times[$start_ch]}"
-	      end_time=""
-
-	# Clean the start time (remove any whitespace)
-	start_time=$(echo "$start_time" | tr -d '[:space:]')
-
-	# Validate start_time is a number
-	if ! [[ "$start_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-		echo "    ERROR: Invalid chapter start time: $start_time"
-		((ep_index++))
-		continue
-	fi
-
-	# End time is the start of the chapter after our range
-	if [[ $((end_ch + 1)) -lt ${#chapter_times[@]} ]]; then
-		end_time="${chapter_times[$((end_ch + 1))]}"
-		end_time=$(echo "$end_time" | tr -d '[:space:]')
-	fi
-
-	input_opts="-ss $start_time"
-	if [[ -n "$end_time" ]] && [[ "$end_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-		duration=$(echo "$end_time - $start_time" | bc)
-		input_opts="$input_opts -t $duration"
-		echo "    Extracting chapters: start=${start_time}s, duration=${duration}s"
-	else
-		echo "    Extracting chapters: start=${start_time}s, duration=remainder"
-	fi
-      fi
-
-      # Detect bit depth and height
-      bit_depth=$(detect_bit_depth "$source_file")
-      height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
-      height=${height//,/}
-
-      # Choose encoder based on resolution
-      actual_codec=""
-      encoder_type=""
-      if [[ "$VIDEO_CODEC" == "auto" ]]; then
-	      if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
-		      actual_codec="libx265"
-		      encoder_type="software"
-	      else
-		      actual_codec="hevc_vaapi"
-		      encoder_type="vaapi"
-	      fi
-      else
-	      actual_codec="$VIDEO_CODEC"
-	      if [[ "$actual_codec" == "hevc_vaapi" ]]; then
-		      encoder_type="vaapi"
-	      else
-		      encoder_type="software"
-	      fi
-      fi
-
-      # Determine profile based on bit depth
-      if [[ "$bit_depth" == "10" ]]; then
-	      detected_profile="main10"
-      else
-	      detected_profile="main"
-      fi
-
-      echo "    Bit depth: ${bit_depth}-bit, Encoder: $actual_codec, Profile: $detected_profile"
-
-      # Build filter chain
-      vf=$(build_vf "$source_file" "$encoder_type" "$bit_depth")
-      if [[ -n "$vf" ]]; then
-	      echo -e "${CYAN}    Filters: $vf${RESET}"
-      fi
-
-      # Count audio tracks
-      num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
-
-      # Determine preferred audio track
-      preferred_audio_lang=""
-      if [[ "$PREFER_ORIGINAL" == "true" && -n "$ORIGINAL_LANGUAGE" ]]; then
-	      preferred_audio_lang="$ORIGINAL_LANGUAGE"
-      fi
-
-      IFS='|' read -r default_audio_idx default_audio_lang <<< "$(get_audio_track_info "$source_file" "$preferred_audio_lang")"
-
-      echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default${RESET}"
-
-      # Build audio options - encode all tracks with fixed bitrate
-      audio_opts=""
-
-      # Map the preferred audio track first
-      if [[ "$AUDIO_COPY_FIRST" == "true" && $num_audio -gt 0 ]]; then
-	      audio_opts="-map 0:a:$default_audio_idx -c:a:0 copy"
-      else
-	      bitrate=$(get_audio_bitrate "$source_file" $default_audio_idx)
-	      audio_opts="-map 0:a:$default_audio_idx -c:a:0 $AUDIO_CODEC -profile:a:0 $AUDIO_PROFILE -b:a:0 $bitrate"
-      fi
-
-      # Map remaining audio tracks and encode with appropriate bitrate
-      if [[ $num_audio -gt 1 ]]; then
-	      track_idx=1
-	      for ((i=0; i<num_audio; i++)); do
-		      # Skip the track we already mapped
-		      if [[ $i -eq $default_audio_idx ]]; then
-			      continue
-		      fi
-
-		      bitrate=$(get_audio_bitrate "$source_file" $i)
-		      audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx $AUDIO_CODEC -profile:a:$track_idx $AUDIO_PROFILE -b:a:$track_idx $bitrate"
-		      ((track_idx++))
-	      done
-      fi
-
-      # Set first audio track as default
-      audio_opts="$audio_opts -disposition:a:0 default"
-
-      # Smart subtitle handling
-      sub_default_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
-      sub_opts="-c:s copy -map 0:s?"
-
-      if [[ "$sub_default_idx" != "-1" ]]; then
-	      # Set specific subtitle as default, clear all others
-	      sub_opts="$sub_opts -disposition:s 0 -disposition:s:$sub_default_idx default"
-	      echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) default${RESET}"
-      else
-	      # No default subtitle - explicitly clear all subtitle dispositions
-	      sub_opts="$sub_opts -disposition:s 0"
-      fi
-
-      # Encode with appropriate encoder
-      if [[ "$encoder_type" == "vaapi" ]]; then
-	      # VAAPI encoding
-	      vaapi_profile=$(get_vaapi_profile "$bit_depth")
-
-	# Build priority prefix (beneficial even for VAAPI when CPU-decoding)
-	priority_prefix=$(build_priority_prefix)
-
-	# NO color metadata for VAAPI - modern content doesn't need it and it forces CPU processing
-	eval $priority_prefix ffmpeg $input_opts -i \"$source_file\" \
-		-map 0:v:0 \
-		$audio_opts \
-		$sub_opts \
-		-c:v \"$actual_codec\" -vaapi_device \"$VAAPI_DEVICE\" -rc_mode CQP -qp \"$QUALITY\" \
-		-g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf \"$BFRAMES\" -low_power false \
-		-refs \"$REFS\" -profile:v \"$vaapi_profile\" \
-		-vf \"$vf\" \
-		-map_chapters 0 \
-		-f \"$CONTAINER\" \"$output_file\" -y
-		else
-			# Software encoding (libx265)
-			IFS='|' read -r x265_profile pix_fmt x265_params <<< "$(build_x265_params "$bit_depth" "$height")"
-
-			video_opts="-c:v $actual_codec -preset $PRESET -crf $QUALITY -pix_fmt $pix_fmt"
-			if [[ -n "$vf" ]]; then
-				video_opts="$video_opts -vf \"$vf\""
-			fi
-			video_opts="$video_opts -x265-params \"$x265_params\""
-
-	# Build priority prefix for background processing
-	priority_prefix=$(build_priority_prefix)
-
-	eval $priority_prefix ffmpeg $input_opts -i \"$source_file\" \
-		-map 0:v:0 \
-		$audio_opts \
-		$sub_opts \
-		$video_opts \
-		-map_chapters 0 \
-		-f \"$CONTAINER\" \"$output_file\" -y
-      fi
-
-      echo "    Complete!"
-      echo ""
-      ((ep_index++))
-done
-
-echo -e "${GREEN}Season $SEASON_NUM complete!${RESET}"
-echo ""
-done
-
-echo -e "${GREEN}All seasons complete!${RESET}"
+	echo "Series mode not included in this truncated version - see full script"
 fi
 
 echo ""
