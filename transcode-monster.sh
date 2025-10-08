@@ -238,7 +238,7 @@ OPTIONS:
   --preset PRESET        x265 encoding preset for software encoding (default: ${DEFAULT_PRESET})
 			 Options: ultrafast, superfast, veryfast, faster, fast,
 				  medium, slow, slower, veryslow, placebo
-  --bframes NUM          Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
+  -b, --bframes NUM      Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
 			 0 = max compatibility, 1-2 = balanced, 3-4 = best compression
 
   --no-crop              Disable automatic crop detection
@@ -1476,7 +1476,7 @@ while [[ $# -gt 0 ]]; do
 			PRESET="$2"
 			shift 2
 			;;
-		--bframes)
+		-b|--bframes)
 			BFRAMES="$2"
 			shift 2
 			;;
