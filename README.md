@@ -35,6 +35,7 @@ sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/transcode-mo
 
 On Batocera:
 ```bash
+mkdir /userdata/system/services/
 wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/network_tune_batocera -O /userdata/system/services/network_tune && chmod 755 /userdata/system/services/network_tune
 wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/nfs_mount_batocera -O /userdata/system/services/nfs_mount && chmod 755 /userdata/system/services/nfs_mount
 ```
