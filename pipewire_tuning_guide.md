@@ -1,6 +1,6 @@
 # Tuning PipeWire
 
-This is a quick and dirty guide to low-latency, high-fidelity audio via PipeWire in Linux. It's really just notes based on my recent research into how to get the most out of PipeWire (v1.4.7) for my use case, but it's working fantastically for me and it may help you get pointed in the right direction.
+This is a quick and dirty guide to low-latency, high-fidelity audio via PipeWire in Linux. It's really just notes based on my recent research into how to get the most out of PipeWire (v1.4.9) for my use case, but it's working fantastically for me and it may help you get pointed in the right direction.
 
 ## Basic Linux Tuning
 
@@ -142,7 +142,7 @@ alsa_monitor.rules = {
     },
     apply_properties = {
       ["audio.allowed-rates"] = { 44100, 48000, 88200, 96000, 176400, 192000 },
-      ["api.alsa.period-size"] = 128,
+      ["api.alsa.period-size"] = 256,
       ["api.alsa.headroom"] = 0,
       ["resample.quality"] = 10,
     },
@@ -170,7 +170,7 @@ monitor.alsa.rules = [
     actions = {
       update-props = {
         audio.allowed-rates = [ 44100, 48000, 88200, 96000, 176400, 192000 ]
-        api.alsa.period-size = 128
+        api.alsa.period-size = 256
         api.alsa.headroom = 0
         resample.quality = 10
       }
@@ -241,7 +241,7 @@ About **5.3ms**.
 
 **Note:** The quantum scales based on sample rate. For example, with a `default.clock.rate` of `48000` and a `default.clock.quantum` of `256`, the quantum will scale to `1024` if the sample rate is `192000`&mdash;4x the sample rate = 4x the quantum. The latency remains consistent.
 
-A `default.clock.quantum` of 256 works well for my particular system:
+A `default.clock.quantum` of 256 worked very well for this particular system:
 
  - Ryzen 7 3700X @4.63GHz (-48mV)
  - 32GB DDR4 3200 (XMP)
@@ -348,22 +348,24 @@ And for deep inspection of your WirePlumber instance for fine-tuning or troubles
 
 ```
 $ wpctl status
-PipeWire 'pipewire-0' [1.4.7, chris@crow, cookie:2686875995]
+PipeWire 'pipewire-0' [1.4.9, chris@crow, cookie:1744712042]
  └─ Clients:
-        33. pipewire                            [1.4.7, chris@crow, pid:1924]
-        34. WirePlumber                         [1.4.7, chris@crow, pid:1923]
-        43. kwin_wayland                        [1.4.7, chris@crow, pid:1975]
-        47. WirePlumber [export]                [1.4.7, chris@crow, pid:1923]
-        57. libcanberra                         [1.4.7, chris@crow, pid:2122]
-        58. xdg-desktop-portal                  [1.4.7, chris@crow, pid:1981]
-        59.                                     [1.4.7, chris@crow, pid:2122]
-        60. libcanberra                         [1.4.7, chris@crow, pid:2172]
-        61. plasmashell                         [1.4.7, chris@crow, pid:2172]
-        62.                                     [1.4.7, chris@crow, pid:2172]
-        63. Steam Voice Settings                [1.4.7, chris@crow, pid:2938]
-        65. Brave input                         [1.4.7, chris@crow, pid:6495]
-        67. Steam                               [1.4.7, chris@crow, pid:2938]
-        76. wpctl                               [1.4.7, chris@crow, pid:8363]
+        33. pipewire                            [1.4.9, chris@crow, pid:1775]
+        35. WirePlumber                         [1.4.9, chris@crow, pid:1774]
+        43. kwin_wayland                        [1.4.9, chris@crow, pid:1822]
+        47. WirePlumber [export]                [1.4.9, chris@crow, pid:1774]
+        57. libcanberra                         [1.4.9, chris@crow, pid:1989]
+        58.                                     [1.4.9, chris@crow, pid:1989]
+        59. xdg-desktop-portal                  [1.4.9, chris@crow, pid:1837]
+        60. libcanberra                         [1.4.9, chris@crow, pid:2041]
+        61. plasmashell                         [1.4.9, chris@crow, pid:2041]
+        62.                                     [1.4.9, chris@crow, pid:2041]
+        71. wpctl                               [1.4.9, chris@crow, pid:191194]
+        73. Steam                               [1.4.9, chris@crow, pid:26639]
+        75. Steam Voice Settings                [1.4.9, chris@crow, pid:26639]
+        76.                                     [1.4.9, chris@crow, pid:1989]
+        78. Brave input                         [1.4.9, chris@crow, pid:181381]
+        80. Chromium input                      [1.4.9, chris@crow, pid:67991]
 
 Audio
  ├─ Devices:
@@ -413,12 +415,10 @@ id 56, type PipeWire:Interface:Node
     alsa.sync.id = "00000000:00000000:00000000:00000000"
     api.alsa.card.longname = "Asus Virtuoso 100 at 0xf000, irq 33"
     api.alsa.card.name = "Xonar DX"
-    api.alsa.headroom = "0"
     api.alsa.path = "front:0"
     api.alsa.pcm.card = "0"
     api.alsa.pcm.stream = "playback"
-    api.alsa.period-num = "256"
-    api.alsa.period-size = "128"
+    api.alsa.period-size = "256"
     audio.allowed-rates = "[ 44100, 48000, 88200, 96000, 176400, 192000 ]"
     audio.channels = "2"
     audio.position = "FL,FR"
@@ -426,6 +426,7 @@ id 56, type PipeWire:Interface:Node
   * client.id = "47"
     clock.quantum-limit = "8192"
     device.api = "alsa"
+    device.bus = "pci"
     device.class = "sound"
     device.icon-name = "audio-card-analog"
   * device.id = "48"
@@ -439,7 +440,6 @@ id 56, type PipeWire:Interface:Node
   * node.description = "CMI8788 [Oxygen HD Audio] (Virtuoso 100 (Xonar DX)) Analog Stereo"
     node.driver = "true"
     node.loop.name = "data-loop.0"
-    node.max-latency = "16384/192000"
   * node.name = "alsa_output.pci-0000_08_04.0.analog-stereo"
   * node.nick = "Multichannel"
     node.pause-on-idle = "false"
@@ -469,23 +469,21 @@ Personally I prefer `qsynth` anyway, launching it if and when I need it rather t
 
 ### Usage-Specific Tuning
 
-You may have noticed that `api.alsa.period-size = 128` in my example config for WirePlumber and `default.clock.quantum = 256` don't align. You may have also noticed that some other guides will advise you to make these equal, e.g. `api.alsa.period-size = 256` for efficiency. They're not wrong; that *is* more efficient. If your primary focus in tuning your Linux audio system is for pro audio, video editing, etc. you'll probably want to do exactly that. Matching the ALSA period size and the default clock quantum will reduce CPU interrupts, and give you more consistent timings for steady loads. But if your loads are *dynamic*, like multitasking on your desktop, listening to music and watching video tutorials at the same time, playing games with crazy amounts of polyphony like *Cyberpunk 2077*, *Red Dead Redemption 2*, *Mount & Blade II: Bannerlord*, etc. this is no longer ideal. Having an `api.alsa.period-size` that's lower than your `default.clock.quantum` generates more interrupts, but also handles bursts better and provides better protection against underruns. The same goes for the `default.clock.min-quantum`; raising it slightly can help provide more predictable latency for more constant workloads, but it also reduces the granularity, which is worse for dynamic workloads like games.
-
-So, in general:
+Specific use cases may call for slightly different tunings. Experimentation will help you achieve the best possible results for your own needs, but these guidelines may help focus those attentions.
 
 #### If your system is going to be a professional audio / video workstation
 
- - Setting your `api.alsa.period-size` and `default.clock.quantum` to a matching value, e.g. `256`, will give you more efficiency and more predictable timings.
+ - Setting your `api.alsa.period-size` and `default.clock.quantum` to a slightly higher matching value, e.g. `512`, will give you more efficiency and more predictable timings.
  - Adjusting your `default.clock.min-quantum` higher, e.g. `64` or `128` may further smooth out average latencies, depending on your rig and your workloads.
 
 #### If your system is going to be a general purpose, gaming, or multimedia system
 
- - The `api.alsa.period-size` should be smaller than the `default.clock.quantum` to force finer-grained interrupt polling.
+ - The `api.alsa.period-size` should be equal to or perhaps even smaller than the `default.clock.quantum` to force finer-grained interrupt polling. More interrupts are more CPU overhead, but also allow for more precise poll windows.
  - `default.clock.min-quantum` should be really low to absorb more sudden or bursty workloads. If your system hiccups with a low min-quantum, try raising it, but it could also be that your kernel is tuned to be too coarse-grained. Make sure you're running one with `PREEMPT` or `RT` tuning, e.g.:
 
 ```
 $ uname -a
-Linux crow 6.16.9-x64v3-xanmod1 #0~20250925.g836ee36 SMP PREEMPT_DYNAMIC Thu Sep 25 15:19:46 UTC x86_64 GNU/Linux
+Linux crow 6.17.3-x64v3-xanmod1 #0~20251016.g8be7ecd SMP PREEMPT_DYNAMIC Thu Oct 16 05:15:01 UTC x86_64 GNU/Linux
 ```
 If you've already checked all the obvious things and you're having issues, try running a dynamic workload (like a heavy video game benchmark with lots of polyphony) while batch-logging from `pw-top`:
 
@@ -511,7 +509,7 @@ monitor.alsa.rules = [
       update-props = {
         audio.rate = 192000
         audio.allowed-rates = [ 44100, 48000, 88200, 96000, 176400, 192000 ]
-        api.alsa.period-size = 128
+        api.alsa.period-size = 256
         api.alsa.headroom = 0
         resample.quality = 10
       }
