@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.3"
+SCRIPT_VERSION="1.5.5"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -309,7 +309,11 @@ CONTENT DETECTION:
   - Movie: Single file or directory without series markers
 
   Series naming patterns detected:
-    /path/to/Show/S1D1/, /path/to/Show Season 1/, /path/Show S01/
+    /path/to/Show/S1D1/, /path/to/Show_S1_D1/, /path/to/Show/Season 1/
+
+  Disc continuation detection:
+    If discs are numbered SHOW_S1_D1, SHOW_S1_D2, SHOW_S1_D3, SHOW_D4, SHOW_D5...
+    the script will automatically detect D4, D5, etc. as continuations of Season 1
 
   Output examples:
     Series: "Firefly - S01E01.mkv"
@@ -1102,14 +1106,14 @@ infer_type() {
 	local source="$1"
 
     # Check for season/disc patterns (case-insensitive)
-    if [[ "$source" =~ [Ss][0-9]+[Dd][0-9]+ ]] || [[ "$source" =~ [Ss]eason.*[0-9]+ ]]; then
+    if [[ "$source" =~ [Ss][0-9]+[^0-9]*[Dd][0-9]+ ]] || [[ "$source" =~ [Ss]eason.*[0-9]+ ]]; then
 	    echo "series"
 	    return
     fi
 
     # Check if directory contains S#D# subdirectories (multi-season series, case-insensitive)
     shopt -s nullglob nocaseglob
-    local season_dirs=("$source"/[Ss][0-9]*[Dd][0-9]*)
+    local season_dirs=("$source"/*[Ss][0-9]*[Dd][0-9]*)
     shopt -u nullglob nocaseglob
     if [[ ${#season_dirs[@]} -gt 0 ]]; then
 	    echo "series"
@@ -1133,12 +1137,12 @@ get_all_seasons() {
 	local seasons=()
 
 	shopt -s nullglob nocaseglob
-	local season_dirs=("$source"/[Ss][0-9]*[Dd][0-9]*)
+	local season_dirs=("$source"/*[Ss][0-9]*[Dd][0-9]*)
 	shopt -u nullglob nocaseglob
 
 	for dir in "${season_dirs[@]}"; do
 		local basename=$(basename "$dir")
-		if [[ "$basename" =~ [Ss]([0-9]+)[Dd][0-9]+ ]]; then
+		if [[ "$basename" =~ [Ss]([0-9]+)[^0-9]*[Dd][0-9]+ ]]; then
 			local season_num="${BASH_REMATCH[1]}"
 			# Remove leading zeros
 			season_num=$((10#$season_num))
@@ -1156,8 +1160,8 @@ get_all_seasons() {
 extract_season() {
 	local source="$1"
 
-    # Try S#D# pattern (case-insensitive)
-    if [[ "$source" =~ [Ss]([0-9]+)[Dd][0-9]+ ]]; then
+    # Try S#D# pattern (case-insensitive, allow separator between S# and D#)
+    if [[ "$source" =~ [Ss]([0-9]+)[^0-9]*[Dd][0-9]+ ]]; then
 	    echo "${BASH_REMATCH[1]}"
 	    return
     fi
@@ -1215,7 +1219,7 @@ extract_name() {
     local dirname=""
 
     # If source itself is a disc directory (S#D# pattern), go up one level (case-insensitive)
-    if [[ "$(basename "$source")" =~ ^[Ss][0-9]+[Dd][0-9]+$ ]]; then
+    if [[ "$(basename "$source")" =~ ^.*[Ss][0-9]+[^0-9]*[Dd][0-9]+$ ]]; then
 	    dirname=$(basename "$(dirname "$source")")
     else
 	    # Get the parent directory name
@@ -1892,10 +1896,47 @@ else
 	done
 else
 	# Directory mode: use existing disc directory logic
-	# Find all disc directories for this season
+	# Find all S#D# directories for this season
 	shopt -s nullglob nocaseglob
-	disc_dirs=("$SOURCE_DIR"/[Ss]${SEASON_NUM}[Dd]*)
+	disc_dirs=("$SOURCE_DIR"/*[Ss]${SEASON_NUM}*[Dd]*)
 	shopt -u nullglob nocaseglob
+
+	# Find the highest disc number from explicit S#D# directories for this season
+	max_explicit_disc=0
+	for dir in "${disc_dirs[@]}"; do
+		dir_basename=$(basename "$dir")
+		if [[ "$dir_basename" =~ [Ss]${SEASON_NUM}[^0-9]*[Dd]([0-9]+) ]]; then
+			disc_num=$((10#${BASH_REMATCH[1]}))
+			if [[ $disc_num -gt $max_explicit_disc ]]; then
+				max_explicit_disc=$disc_num
+			fi
+		fi
+	done
+
+	# If we found explicit discs, look for implicit continuation (_D# without S# prefix)
+	if [[ $max_explicit_disc -gt 0 ]]; then
+		shopt -s nullglob nocaseglob
+		all_dirs=("$SOURCE_DIR"/*[Dd][0-9]*)
+		shopt -u nullglob nocaseglob
+
+		for dir in "${all_dirs[@]}"; do
+			dir_basename=$(basename "$dir")
+			# Match _D# pattern but NOT S#D# pattern
+			if [[ "$dir_basename" =~ _[Dd]([0-9]+)$ ]]; then
+				# Capture the disc number before the next regex check overwrites BASH_REMATCH
+				captured_disc_num="${BASH_REMATCH[1]}"
+				# Check that it's NOT an explicit S#D# directory
+				if [[ ! "$dir_basename" =~ [Ss][0-9]+[^0-9]*[Dd][0-9]+ ]]; then
+					disc_num=$((10#$captured_disc_num))
+					# Include if disc number continues from explicit discs
+					if [[ $disc_num -gt $max_explicit_disc ]]; then
+						disc_dirs+=("$dir")
+						echo -e "${CYAN}  Detected continuation disc: $(basename "$dir") (part of season $SEASON_NUM)${RESET}"
+					fi
+				fi
+			fi
+		done
+	fi
 
 	if [[ ${#disc_dirs[@]} -eq 0 ]]; then
 		# No S#D# subdirectories found - check if files are directly in the source directory
@@ -1908,7 +1949,7 @@ else
 			echo -e "${CYAN}Processing ${#direct_mkv_files[@]} file(s) directly from source directory${RESET}"
 			disc_dirs=("$SOURCE_DIR")
 		else
-			echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (S${SEASON_NUM}D*) and no .mkv files in source directory${RESET}"
+			echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (e.g., *S${SEASON_NUM}*D* or S${SEASON_NUM}D*) and no .mkv files in source directory${RESET}"
 			echo ""
 			continue
 		fi
