@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.6"
+SCRIPT_VERSION="1.5.7"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -485,48 +485,78 @@ detect_interlacing() {
 detect_crop() {
 	local input="$1"
 
-    # Get total duration and seek to ~10% in to avoid title cards
+    # Get total duration
     local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
     duration=${duration//,/}
 
-    local seek_time="0"
-    if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-	    seek_time=$(echo "scale=2; $duration * 0.1" | bc 2>/dev/null || echo "0")
-    fi
-
-    # Don't use -v quiet here - we need the cropdetect output!
-    local crop_line=$(ffmpeg -ss "$seek_time" -i "$input" -vf cropdetect=0.1:16:100 -frames:v 1000 -f null - 2>&1 | grep 'crop=' | tail -20 | sort | uniq -c | sort -nr | head -1 | grep -o 'crop=[0-9:]*' | cut -d'=' -f2)
-
-    if [[ -z "$crop_line" ]]; then
+    if ! [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
 	    echo ""
 	    return
     fi
 
-    local w=$(echo "$crop_line" | cut -d: -f1)
-    local h=$(echo "$crop_line" | cut -d: -f2)
-    local x=$(echo "$crop_line" | cut -d: -f3)
-    local y=$(echo "$crop_line" | cut -d: -f4)
+    # Sample at 25%, 50%, and 75% to avoid title cards and get representative content
+    local sample_points=("0.25" "0.50" "0.75")
+    declare -A crop_results
 
-    if [[ -z "$w" || -z "$h" || -z "$x" || -z "$y" ]]; then
+    for pct in "${sample_points[@]}"; do
+	    local seek_time=$(echo "scale=2; $duration * $pct" | bc 2>/dev/null || echo "0")
+
+	    if ! [[ "$seek_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+		    continue
+	    fi
+
+	# Don't use -v quiet here - we need the cropdetect output!
+	local crop_line=$(ffmpeg -ss "$seek_time" -i "$input" -vf cropdetect=0.1:16:100 -frames:v 500 -f null - 2>&1 | grep 'crop=' | tail -20 | sort | uniq -c | sort -nr | head -1 | grep -o 'crop=[0-9:]*' | cut -d'=' -f2)
+
+	if [[ -n "$crop_line" ]]; then
+		local w=$(echo "$crop_line" | cut -d: -f1)
+		local h=$(echo "$crop_line" | cut -d: -f2)
+		local x=$(echo "$crop_line" | cut -d: -f3)
+		local y=$(echo "$crop_line" | cut -d: -f4)
+
+	    # Validate
+	    if [[ -n "$w" && -n "$h" && -n "$x" && -n "$y" ]]; then
+		    w=${w//,/}
+		    h=${h//,/}
+		    x=${x//,/}
+		    y=${y//,/}
+
+		    if [[ "$w" =~ ^[0-9]+$ ]] && [[ "$h" =~ ^[0-9]+$ ]] && [[ "$x" =~ ^[0-9]+$ ]] && [[ "$y" =~ ^[0-9]+$ ]]; then
+			    # Store crop with its area (use as key to deduplicate)
+			    local area=$((w * h))
+			    crop_results[$area]="$w:$h:$x:$y"
+		    fi
+	    fi
+	fi
+done
+
+    # Find the crop with the largest area (least aggressive crop)
+    local max_area=0
+    local best_crop=""
+
+    for area in "${!crop_results[@]}"; do
+	    if [[ $area -gt $max_area ]]; then
+		    max_area=$area
+		    best_crop="${crop_results[$area]}"
+	    fi
+    done
+
+    if [[ -z "$best_crop" ]]; then
 	    echo ""
 	    return
     fi
 
-    # Remove any commas from locale-formatted numbers
-    w=${w//,/}
-    h=${h//,/}
-    x=${x//,/}
-    y=${y//,/}
+    # Parse the best crop
+    local w=$(echo "$best_crop" | cut -d: -f1)
+    local h=$(echo "$best_crop" | cut -d: -f2)
+    local x=$(echo "$best_crop" | cut -d: -f3)
+    local y=$(echo "$best_crop" | cut -d: -f4)
 
-    # Validate they're actually numbers
-    if ! [[ "$w" =~ ^[0-9]+$ ]] || ! [[ "$h" =~ ^[0-9]+$ ]] || ! [[ "$x" =~ ^[0-9]+$ ]] || ! [[ "$y" =~ ^[0-9]+$ ]]; then
-	    echo ""
-	    return
-    fi
-
+    # Round to nearest 16 pixels for encoder efficiency
     w=$((w - (w % 16)))
     h=$((h - (h % 16)))
 
+    # Get original dimensions
     local orig_w=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=width -of csv=p=0 "$input")
     local orig_h=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input")
 
@@ -540,6 +570,7 @@ detect_crop() {
 	    return
     fi
 
+    # If crop matches original dimensions, no crop needed
     if [[ "$w" -eq "$orig_w" && "$h" -eq "$orig_h" ]]; then
 	    echo ""
 	    return
