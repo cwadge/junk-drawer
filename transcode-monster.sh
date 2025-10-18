@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.5"
+SCRIPT_VERSION="1.5.6"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -1874,23 +1874,40 @@ else
 		    episode_count=$((chapter_count / chapters_per_ep))
 		    echo "  File has $chapter_count chapters - will split into $episode_count episodes"
 
+		    # Extract disc number from directory name
+		    file_dir=$(dirname "$source_file")
+		    file_dir_base=$(basename "$file_dir")
+		    file_disc_num=0
+		    if [[ "$file_dir_base" =~ [Dd]([0-9]+) ]]; then
+			    file_disc_num=$((10#${BASH_REMATCH[1]}))
+		    fi
+
 		    # Add each episode (group of chapters)
 		    for ((ep=0; ep<episode_count; ep=ep+1)); do
 			    start_chapter=$((ep * chapters_per_ep))
 			    end_chapter=$((start_chapter + chapters_per_ep - 1))
 			    ep_num=$((ep + 1))
-			    # Store: disc_dir|episode_num|source_file|start_chapter|end_chapter
-			    episode_files+=("$(dirname "$source_file")|$ep_num|$source_file|$start_chapter|$end_chapter")
+			    # Store: disc_num|disc_dir|episode_num|source_file|start_chapter|end_chapter
+			    episode_files+=("$file_disc_num|$file_dir|$ep_num|$source_file|$start_chapter|$end_chapter")
 		    done
 	    else
 		    # Regular file - parse episode number from filename
 		    ep_num=$(get_episode_num "$(basename "$source_file")")
+
+		    # Extract disc number from directory name
+		    file_dir=$(dirname "$source_file")
+		    file_dir_base=$(basename "$file_dir")
+		    file_disc_num=0
+		    if [[ "$file_dir_base" =~ [Dd]([0-9]+) ]]; then
+			    file_disc_num=$((10#${BASH_REMATCH[1]}))
+		    fi
+
 		    if [[ "$ep_num" != "UNKNOWN" ]]; then
 			    # Store with chapter markers as -1 to indicate whole file
-			    episode_files+=("$(dirname "$source_file")|$ep_num|$source_file|-1|-1")
+			    episode_files+=("$file_disc_num|$file_dir|$ep_num|$source_file|-1|-1")
 		    else
 			    # No episode number, use sequential numbering
-			    episode_files+=("$(dirname "$source_file")|${#episode_files[@]}|$source_file|-1|-1")
+			    episode_files+=("$file_disc_num|$file_dir|${#episode_files[@]}|$source_file|-1|-1")
 		    fi
 		fi
 	done
@@ -1961,6 +1978,13 @@ else
 	    for disc_dir in "${disc_dirs[@]}"; do
 		    echo "Scanning: $disc_dir"
 
+		    # Extract disc number from directory name
+		    disc_dir_base=$(basename "$disc_dir")
+		    disc_number=0
+		    if [[ "$disc_dir_base" =~ [Dd]([0-9]+) ]]; then
+			    disc_number=$((10#${BASH_REMATCH[1]}))
+		    fi
+
 		    shopt -s nullglob
 		    mkv_files=("$disc_dir"/*.mkv)
 		    shopt -u nullglob
@@ -1997,15 +2021,16 @@ else
 				start_chapter=$((ep * chapters_per_ep))
 				end_chapter=$((start_chapter + chapters_per_ep - 1))
 				ep_num=$((ep + 1))
-				# Store: disc_dir|episode_num|source_file|start_chapter|end_chapter
-				episode_files+=("$disc_dir|$ep_num|$source_file|$start_chapter|$end_chapter")
+				# Store: disc_num|disc_dir|episode_num|source_file|start_chapter|end_chapter
+				episode_files+=("$disc_number|$disc_dir|$ep_num|$source_file|$start_chapter|$end_chapter")
 			done
 		else
 			# Regular file - parse episode number from filename
 			ep_num=$(get_episode_num "$(basename "$source_file")")
 			if [[ "$ep_num" != "UNKNOWN" ]]; then
 				# Store with chapter markers as -1 to indicate whole file
-				episode_files+=("$disc_dir|$ep_num|$source_file|-1|-1")
+				# Store: disc_num|disc_dir|episode_num|source_file|start_chapter|end_chapter
+				episode_files+=("$disc_number|$disc_dir|$ep_num|$source_file|-1|-1")
 			else
 				echo -e "${YELLOW}    Warning: Could not parse episode number from $(basename "$source_file")${RESET}"
 			fi
@@ -2020,11 +2045,11 @@ else
 		    continue
 	    fi
 
-	# Sort episodes: first by disc directory, then by episode number within disc
+	# Sort episodes: first by disc number, then by episode number within disc
 	readarray -t sorted_files < <(
 	for line in "${episode_files[@]}"; do
 		echo "$line"
-	done | sort -t'|' -k1,1 -k2,2n
+	done | sort -t'|' -k1,1n -k3,3n
 )
 
 	# Now display with sequential episode numbers
@@ -2032,7 +2057,7 @@ else
 	echo -e "${CYAN}Episode mapping:${RESET}"
 	ep_index=1
 	for sorted_line in "${sorted_files[@]}"; do
-		IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
+		IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
 		if [[ "$start_ch" == "-1" ]]; then
 			echo "    $(basename "$source_file") -> Episode $ep_index"
 		else
@@ -2052,7 +2077,7 @@ else
 	if [[ "$DRY_RUN" == true ]]; then
 		ep_index=1
 		for sorted_line in "${sorted_files[@]}"; do
-			IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
+			IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
 			episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
 			output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 			if [[ "$start_ch" == "-1" ]]; then
@@ -2070,7 +2095,7 @@ else
 
 	    # Show command for first episode as an example
 	    echo -e "${CYAN}Example command for first episode:${RESET}"
-	    IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "${sorted_files[0]}"
+	    IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "${sorted_files[0]}"
 	    episode_num="S$(printf "%02d" $SEASON_NUM)E01"
 	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 
@@ -2107,7 +2132,7 @@ else
 	# Process episodes
 	ep_index=1
 	for sorted_line in "${sorted_files[@]}"; do
-		IFS='|' read -r disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
+		IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
 
 	    # Skip if user specified a specific episode and this isn't it
 	    if [[ -n "$EPISODE_NUM" ]] && [[ "$ep_index" -ne "$EPISODE_NUM" ]]; then
