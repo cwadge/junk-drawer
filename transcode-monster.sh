@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.7"
+SCRIPT_VERSION="1.7.0"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -57,6 +57,7 @@ DEFAULT_IONICE_LEVEL="4"  # 0-7, higher = lower priority
 
 # Output options
 DEFAULT_OVERWRITE="false"  # Overwrite existing output files
+DEFAULT_FORCE_10BIT="false"  # Force 10-bit encoding even from 8-bit sources
 
 # Audio encoding settings
 DEFAULT_AUDIO_COPY_FIRST="true"  # Copy first audio track
@@ -183,6 +184,7 @@ IONICE_CLASS="${IONICE_CLASS:-$DEFAULT_IONICE_CLASS}"
 IONICE_LEVEL="${IONICE_LEVEL:-$DEFAULT_IONICE_LEVEL}"
 
 OVERWRITE="${OVERWRITE:-$DEFAULT_OVERWRITE}"
+FORCE_10BIT="${FORCE_10BIT:-$DEFAULT_FORCE_10BIT}"
 
 AUDIO_COPY_FIRST="${AUDIO_COPY_FIRST:-$DEFAULT_AUDIO_COPY_FIRST}"
 AUDIO_CODEC="${AUDIO_CODEC:-$DEFAULT_AUDIO_CODEC}"
@@ -263,16 +265,27 @@ OPTIONS:
 
   --device PATH          VAAPI device path (default: ${DEFAULT_VAAPI_DEVICE})
   --overwrite            Overwrite existing output files
+  --force-10bit          Force 10-bit encoding even from 8-bit sources
+			 Useful for heavily processed content to prevent banding
+			 Automatically falls back to software if GPU lacks 10-bit support
 
   -d, --dry-run          Show what would be processed without encoding
 
 ENCODER:
-  The script uses hybrid encoding for optimal speed and quality:
-  - SD content (≤576p): libx265 software encoding with robust image processing
-  - HD content (>576p): hevc_vaapi hardware encoding for a massive speedup
+  The script uses intelligent hybrid encoding for optimal speed and quality:
+  - Automatically detects problematic content characteristics
+  - Uses hardware (hevc_vaapi) when safe for maximum speed
+  - Falls back to software (libx265) when needed for quality
 
-  For software encoding (SD content):
-  - Performs color correction to avoid chroma subsampling errors, etc.
+  Auto-detection considers:
+  - Pixel format compatibility (yuv420p vs yuv422p/yuv444p)
+  - Color space (modern BT.709 vs legacy BT.470BG/SMPTE170M)
+  - Source codec (H.264/HEVC vs MPEG2/DV)
+  - Field order (progressive vs interlaced)
+  - Hardware capabilities (10-bit support)
+
+  For software encoding (problematic content):
+  - Performs color correction to avoid chroma subsampling errors
   - Runs with reduced priority (nice/ionice) to lessen system impact
   - Maximizes CPU utilization with automatic thread pooling
   - You can adjust preset with --preset for speed/quality tradeoff
@@ -807,6 +820,74 @@ get_vaapi_profile() {
 	fi
 }
 
+# Determine optimal encoder based on video characteristics
+# Returns "libx265" for software or "hevc_vaapi" for hardware encoding
+should_use_software_encoder() {
+	local source_file="$1"
+
+	# Get video properties
+	local bit_depth=$(detect_bit_depth "$source_file")
+	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$source_file" 2>/dev/null)
+	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null)
+
+	# === HARD BLOCKERS: Will definitely produce artifacts ===
+
+	# 10-bit encoding when VAAPI doesn't support it
+	# This includes both: native 10-bit sources AND forced 10-bit from 8-bit sources
+	# Check if hardware supports 10-bit HEVC (most modern Intel/AMD do)
+	if [[ "$bit_depth" == "10" || "$FORCE_10BIT" == "true" ]]; then
+		if ! vainfo 2>/dev/null | grep -q "VAProfileHEVCMain10"; then
+			echo "libx265"
+			return
+		fi
+	fi
+
+	# Pixel formats that VAAPI doesn't support properly
+	# VAAPI primarily works with yuv420p; other formats cause artifacts or fail
+	if [[ "$pix_fmt" =~ ^(yuv422p|yuv411p|yuv440p|yuyv422|yuv444p)$ ]]; then
+		echo "libx265"
+		return
+	fi
+
+	# DV codec has known hardware encoding issues
+	if [[ "$source_codec" == "dvvideo" ]]; then
+		echo "libx265"
+		return
+	fi
+
+	# === SOFT INDICATORS: Correlate with problems but not guaranteed ===
+
+	local software_score=0
+	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null)
+	local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$source_file" 2>/dev/null)
+
+	# Old broadcast color spaces (strong indicator of problematic old content)
+	# BT.470BG and SMPTE170M are legacy standards, unknown/empty often indicates old transfers
+	if [[ "$color_space" =~ ^(bt470bg|smpte170m|unknown|)$ ]]; then
+		((software_score+=3))
+	fi
+
+	# Interlaced content (VAAPI can handle it, but software has better deinterlacing options)
+	# Software encoding gives us more control over field processing
+	if [[ "$field_order" != "progressive" && "$field_order" != "unknown" ]]; then
+		((software_score+=3))
+	fi
+
+	# Old codecs (correlation with problematic content)
+	# These codecs often appear with other characteristics that cause issues
+	if [[ "$source_codec" =~ ^(mpeg2video|mpeg1video|mpeg4)$ ]]; then
+		((software_score+=2))
+	fi
+
+	# Use software if multiple indicators present (score >= 4)
+	# This requires either 2 strong indicators or 1 strong + 1 moderate
+	if [[ $software_score -ge 4 ]]; then
+		echo "libx265"
+	else
+		echo "hevc_vaapi"
+	fi
+}
+
 # Get appropriate bitrate for audio track based on channel count
 get_audio_bitrate() {
 	local input="$1"
@@ -1325,15 +1406,19 @@ build_ffmpeg_command() {
     local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
     height=${height//,/}
 
+    # Override bit depth if forced
+    if [[ "$FORCE_10BIT" == "true" ]]; then
+	    bit_depth="10"
+    fi
+
     # Determine encoder
     local actual_codec=""
     local encoder_type=""
     if [[ "$VIDEO_CODEC" == "auto" ]]; then
-	    if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
-		    actual_codec="libx265"
+	    actual_codec=$(should_use_software_encoder "$source_file")
+	    if [[ "$actual_codec" == "libx265" ]]; then
 		    encoder_type="software"
 	    else
-		    actual_codec="hevc_vaapi"
 		    encoder_type="vaapi"
 	    fi
     else
@@ -1568,6 +1653,10 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--overwrite)
 			OVERWRITE="true"
+			shift
+			;;
+		--force-10bit)
+			FORCE_10BIT="true"
 			shift
 			;;
 		-d|--dry-run)
@@ -1837,13 +1926,23 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
     height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$mkv_file")
     height=${height//,/}
 
+    # Override bit depth if forced
+    if [[ "$FORCE_10BIT" == "true" ]]; then
+	    bit_depth="10"
+    fi
+
     # Determine encoder for informational output
+    actual_codec=""
     if [[ "$VIDEO_CODEC" == "auto" ]]; then
-	    if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
-		    echo "Using libx265 (software) for SD content - ensures correct colors"
+	    actual_codec=$(should_use_software_encoder "$mkv_file")
+	    if [[ "$actual_codec" == "libx265" ]]; then
+		    echo "Using libx265 (software) - content characteristics require software encoding"
 	    else
-		    echo "Using hevc_vaapi (hardware) for HD content - fast encoding"
+		    echo "Using hevc_vaapi (hardware) - fast encoding with good quality"
 	    fi
+    else
+	    actual_codec="$VIDEO_CODEC"
+	    echo "Using $actual_codec (manual override)"
     fi
 
     # Determine profile based on bit depth
@@ -2235,14 +2334,15 @@ else
 	    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
 	    height=${height//,/}
 
-	    # Choose encoder based on resolution
+	    # Override bit depth if forced
+	    if [[ "$FORCE_10BIT" == "true" ]]; then
+		    bit_depth="10"
+	    fi
+
+	    # Choose encoder based on video characteristics
 	    actual_codec=""
 	    if [[ "$VIDEO_CODEC" == "auto" ]]; then
-		    if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
-			    actual_codec="libx265"
-		    else
-			    actual_codec="hevc_vaapi"
-		    fi
+		    actual_codec=$(should_use_software_encoder "$source_file")
 	    else
 		    actual_codec="$VIDEO_CODEC"
 	    fi
