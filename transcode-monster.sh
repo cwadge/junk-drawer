@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.7.1"
+SCRIPT_VERSION="1.8.1"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -86,6 +86,7 @@ DEFAULT_CHAPTERS_PER_EPISODE="auto"  # auto = detect optimal grouping, or specif
 # Output settings
 DEFAULT_OUTPUT_DIR="${HOME}/Videos"
 DEFAULT_CONTAINER="matroska"  # mkv
+DEFAULT_VIDEO_EXTENSIONS="mkv mp4 m4v avi mpg mpeg ts m2ts mov webm flv wmv asf vob ogv"  # Supported input formats
 
 # ============================================================================
 # ERROR HANDLING
@@ -208,6 +209,7 @@ CHAPTERS_PER_EPISODE="${CHAPTERS_PER_EPISODE:-$DEFAULT_CHAPTERS_PER_EPISODE}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
 CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
+VIDEO_EXTENSIONS="${VIDEO_EXTENSIONS:-$DEFAULT_VIDEO_EXTENSIONS}"
 
 # ============================================================================
 # FUNCTIONS
@@ -317,6 +319,22 @@ AUDIO ENCODING:
   - Skips foreign overdubs (e.g., French/German/Spanish dubs on English content)
   - Disable filtering with --all-audio to keep all tracks
 
+INPUT FORMATS:
+  Supports multiple video container formats for maximum flexibility:
+  - MKV, MP4, M4V (recommended - best metadata support)
+  - AVI, MPEG, MPG (older formats - may have limited metadata)
+  - TS, M2TS (Blu-ray transport streams)
+  - MOV (QuickTime)
+  - WebM (modern web video - VP9/VP8)
+  - FLV (Flash video)
+  - WMV, ASF (Windows Media)
+  - VOB (DVD video objects)
+  - OGV (Ogg video)
+
+  Note: Output is always MKV for maximum compatibility and metadata support.
+  Some older containers (AVI, FLV, VOB) may have limited language/subtitle
+  metadata, which may result in including extra tracks.
+
 CONTENT DETECTION:
   - Series: Multiple files in S#D# directories or sequential files
   - Movie: Single file or directory without series markers
@@ -343,6 +361,7 @@ CONFIG FILE:
     AUDIO_BITRATE_STEREO="128k"
     AUDIO_BITRATE_SURROUND="192k"
     ADAPTIVE_DEINTERLACE="true"
+    VIDEO_EXTENSIONS="mkv mp4 m4v avi"  # Customize supported input formats
 
   Priority: Built-in defaults < Config file < Command line arguments
 
@@ -1240,8 +1259,8 @@ infer_type() {
     fi
 
     # Check if directory contains multiple video files
-    local mkv_count=$(find "$source" -maxdepth 1 -name "*.mkv" 2>/dev/null | wc -l)
-    if [[ $mkv_count -gt 1 ]]; then
+    local video_count=$(count_video_files "$source")
+    if [[ $video_count -gt 1 ]]; then
 	    echo "series"
 	    return
     fi
@@ -1273,6 +1292,33 @@ get_all_seasons() {
     if [[ ${#seasons[@]} -gt 0 ]]; then
 	    printf '%s\n' "${seasons[@]}" | sort -nu
     fi
+}
+
+# Find video files in directory using configured extensions
+# Usage: find_video_files "/path/to/dir" array_name
+find_video_files() {
+	local dir="$1"
+	local -n result_array=$2
+
+	result_array=()
+	shopt -s nullglob
+	for ext in $VIDEO_EXTENSIONS; do
+		result_array+=("$dir"/*."$ext")
+	done
+	shopt -u nullglob
+}
+
+# Count video files in directory
+count_video_files() {
+	local dir="$1"
+	local count=0
+
+	for ext in $VIDEO_EXTENSIONS; do
+		local ext_count=$(find "$dir" -maxdepth 1 -iname "*.$ext" 2>/dev/null | wc -l)
+		count=$((count + ext_count))
+	done
+
+	echo "$count"
 }
 
 # Extract season number from path
@@ -1859,24 +1905,24 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	CURRENT_OPERATION="Finding movie file"
 
     # Find the file to process
-    mkv_file=""
+    video_file=""
     if [[ "$FILE_MODE" == true ]]; then
 	    # Use the specified file
-	    mkv_file="${SOURCE_FILES[0]}"
+	    video_file="${SOURCE_FILES[0]}"
     else
-	    # Directory mode: find the .mkv file with the longest duration
-	    shopt -s nullglob
-	    mkv_files=("$SOURCE_DIR"/*.mkv)
-	    shopt -u nullglob
+	    # Directory mode: find the video file with the longest duration
+	    video_files=()
+	    find_video_files "$SOURCE_DIR" video_files
 
-	    if [[ ${#mkv_files[@]} -eq 0 ]]; then
-		    echo -e "${RED}Error: No .mkv files found in directory${RESET}"
+	    if [[ ${#video_files[@]} -eq 0 ]]; then
+		    echo -e "${RED}Error: No video files found in directory${RESET}"
+		    echo -e "${RED}Supported formats: $VIDEO_EXTENSIONS${RESET}"
 		    exit 1
 	    fi
 
 	    max_duration=0
 	    max_file=""
-	    for file in "${mkv_files[@]}"; do
+	    for file in "${video_files[@]}"; do
 		    duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null)
 		    duration=${duration//,/}
 		    if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$duration > $max_duration" | bc -l) )); then
@@ -1886,20 +1932,20 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	    done
 
 	    if [[ -z "$max_file" ]]; then
-		    echo -e "${RED}Error: Could not determine longest .mkv file${RESET}"
+		    echo -e "${RED}Error: Could not determine longest video file${RESET}"
 		    exit 1
 	    fi
 
-	    mkv_file="$max_file"
-	    echo -e "${CYAN}Selected longest file: $(basename "$mkv_file") (duration: $max_duration seconds)${RESET}"
+	    video_file="$max_file"
+	    echo -e "${CYAN}Selected longest file: $(basename "$video_file") (duration: $max_duration seconds)${RESET}"
     fi
 
-    if [[ -z "$mkv_file" ]]; then
-	    echo -e "${RED}Error: No .mkv files found${RESET}"
+    if [[ -z "$video_file" ]]; then
+	    echo -e "${RED}Error: No video files found${RESET}"
 	    exit 1
     fi
 
-    CURRENT_FILE="$mkv_file"
+    CURRENT_FILE="$video_file"
     CURRENT_OPERATION="Preparing output"
 
     output_file="${OUTPUT_DIR%/}/${CONTENT_NAME}.mkv"
@@ -1910,11 +1956,11 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	    exit 0
     fi
 
-    echo -e "${BOLD}Processing:${RESET} $mkv_file"
+    echo -e "${BOLD}Processing:${RESET} $video_file"
     echo -e "${BOLD}Output:${RESET} $output_file"
 
     # Build the ffmpeg command
-    ffmpeg_cmd=$(build_ffmpeg_command "$mkv_file" "$output_file")
+    ffmpeg_cmd=$(build_ffmpeg_command "$video_file" "$output_file")
 
     if [[ "$DRY_RUN" == true ]]; then
 	    echo -e "${YELLOW}[DRY RUN] Would transcode to: $output_file${RESET}"
@@ -1929,8 +1975,8 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
     CURRENT_OPERATION="Detecting video properties"
 
     # Detect bit depth and height for informational output
-    bit_depth=$(detect_bit_depth "$mkv_file")
-    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$mkv_file")
+    bit_depth=$(detect_bit_depth "$video_file")
+    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file")
     height=${height//,/}
 
     # Override bit depth if forced
@@ -1941,7 +1987,7 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
     # Determine encoder for informational output
     actual_codec=""
     if [[ "$VIDEO_CODEC" == "auto" ]]; then
-	    actual_codec=$(should_use_software_encoder "$mkv_file")
+	    actual_codec=$(should_use_software_encoder "$video_file")
 	    if [[ "$actual_codec" == "libx265" ]]; then
 		    echo "Using libx265 (software) - content characteristics require software encoding"
 	    else
@@ -2094,16 +2140,16 @@ else
 
 	if [[ ${#disc_dirs[@]} -eq 0 ]]; then
 		# No S#D# subdirectories found - check if files are directly in the source directory
-		shopt -s nullglob
-		direct_mkv_files=("$SOURCE_DIR"/*.mkv)
-		shopt -u nullglob
+		direct_video_files=()
+		find_video_files "$SOURCE_DIR" direct_video_files
 
-		if [[ ${#direct_mkv_files[@]} -gt 0 ]]; then
+		if [[ ${#direct_video_files[@]} -gt 0 ]]; then
 			# Files are directly in the source directory (single-disc series)
-			echo -e "${CYAN}Processing ${#direct_mkv_files[@]} file(s) directly from source directory${RESET}"
+			echo -e "${CYAN}Processing ${#direct_video_files[@]} file(s) directly from source directory${RESET}"
 			disc_dirs=("$SOURCE_DIR")
 		else
-			echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (e.g., *S${SEASON_NUM}*D* or S${SEASON_NUM}D*) and no .mkv files in source directory${RESET}"
+			echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (e.g., *S${SEASON_NUM}*D* or S${SEASON_NUM}D*) and no video files in source directory${RESET}"
+			echo -e "${YELLOW}Supported formats: $VIDEO_EXTENSIONS${RESET}"
 			echo ""
 			continue
 		fi
@@ -2122,18 +2168,17 @@ else
 			    disc_number=$((10#${BASH_REMATCH[1]}))
 		    fi
 
-		    shopt -s nullglob
-		    mkv_files=("$disc_dir"/*.mkv)
-		    shopt -u nullglob
+		    video_files=()
+		    find_video_files "$disc_dir" video_files
 
-		    if [[ ${#mkv_files[@]} -eq 0 ]]; then
-			    echo -e "${YELLOW}  Warning: No .mkv files found${RESET}"
+		    if [[ ${#video_files[@]} -eq 0 ]]; then
+			    echo -e "${YELLOW}  Warning: No video files found${RESET}"
 			    continue
 		    fi
 
-		    echo "  Found ${#mkv_files[@]} file(s)"
+		    echo "  Found ${#video_files[@]} file(s)"
 
-		    for source_file in "${mkv_files[@]}"; do
+		    for source_file in "${video_files[@]}"; do
 			    # Check if this file should be split by chapters
 			    should_split=$(should_split_by_chapters "$source_file" "$CONTENT_TYPE")
 
