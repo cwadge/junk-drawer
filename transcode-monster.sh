@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.7.0"
+SCRIPT_VERSION="1.7.1"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -855,15 +855,22 @@ should_use_software_encoder() {
 		return
 	fi
 
+	# Unknown/missing color space metadata causes VAAPI to make wrong assumptions
+	# This results in pink/magenta artifacts and color shifts
+	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null)
+	if [[ "$color_space" =~ ^(unknown|)$ ]]; then
+		echo "libx265"
+		return
+	fi
+
 	# === SOFT INDICATORS: Correlate with problems but not guaranteed ===
 
 	local software_score=0
-	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null)
 	local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$source_file" 2>/dev/null)
 
-	# Old broadcast color spaces (strong indicator of problematic old content)
-	# BT.470BG and SMPTE170M are legacy standards, unknown/empty often indicates old transfers
-	if [[ "$color_space" =~ ^(bt470bg|smpte170m|unknown|)$ ]]; then
+	# Legacy broadcast color spaces (indicator of old content that may have other issues)
+	# BT.470BG and SMPTE170M are legacy standards
+	if [[ "$color_space" =~ ^(bt470bg|smpte170m)$ ]]; then
 		((software_score+=3))
 	fi
 
