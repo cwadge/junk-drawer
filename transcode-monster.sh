@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.8.1"
+SCRIPT_VERSION="1.8.3"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -846,8 +846,8 @@ should_use_software_encoder() {
 
 	# Get video properties
 	local bit_depth=$(detect_bit_depth "$source_file")
-	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$source_file" 2>/dev/null)
-	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null)
+	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
+	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
 
 	# === HARD BLOCKERS: Will definitely produce artifacts ===
 
@@ -874,10 +874,15 @@ should_use_software_encoder() {
 		return
 	fi
 
-	# Unknown/missing color space metadata causes VAAPI to make wrong assumptions
+	# Unknown/missing color metadata causes VAAPI to make wrong assumptions
 	# This results in pink/magenta artifacts and color shifts
-	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null)
-	if [[ "$color_space" =~ ^(unknown|)$ ]]; then
+	# Check all three color attributes: space, transfer, and primaries
+	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
+	local color_transfer=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_transfer -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
+	local color_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
+
+	# If ANY color metadata is unknown or missing, use software encoding
+	if [[ "$color_space" =~ ^(unknown|)$ ]] || [[ "$color_transfer" =~ ^(unknown|)$ ]] || [[ "$color_primaries" =~ ^(unknown|)$ ]]; then
 		echo "libx265"
 		return
 	fi
@@ -885,7 +890,7 @@ should_use_software_encoder() {
 	# === SOFT INDICATORS: Correlate with problems but not guaranteed ===
 
 	local software_score=0
-	local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$source_file" 2>/dev/null)
+	local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
 
 	# Legacy broadcast color spaces (indicator of old content that may have other issues)
 	# BT.470BG and SMPTE170M are legacy standards
