@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.8.4"
+SCRIPT_VERSION="1.9.0"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -58,6 +58,7 @@ DEFAULT_IONICE_LEVEL="4"  # 0-7, higher = lower priority
 # Output options
 DEFAULT_OVERWRITE="false"  # Overwrite existing output files
 DEFAULT_FORCE_10BIT="false"  # Force 10-bit encoding even from 8-bit sources
+DEFAULT_COLORSPACE="auto"  # Color space: auto, bt709, bt601, or none (disable conversion)
 
 # Audio encoding settings
 DEFAULT_AUDIO_COPY_FIRST="true"  # Copy first audio track
@@ -186,6 +187,7 @@ IONICE_LEVEL="${IONICE_LEVEL:-$DEFAULT_IONICE_LEVEL}"
 
 OVERWRITE="${OVERWRITE:-$DEFAULT_OVERWRITE}"
 FORCE_10BIT="${FORCE_10BIT:-$DEFAULT_FORCE_10BIT}"
+COLORSPACE="${COLORSPACE:-$DEFAULT_COLORSPACE}"
 
 AUDIO_COPY_FIRST="${AUDIO_COPY_FIRST:-$DEFAULT_AUDIO_COPY_FIRST}"
 AUDIO_CODEC="${AUDIO_CODEC:-$DEFAULT_AUDIO_CODEC}"
@@ -270,6 +272,12 @@ OPTIONS:
   --force-10bit          Force 10-bit encoding even from 8-bit sources
 			 Useful for heavily processed content to prevent banding
 			 Automatically falls back to software if GPU lacks 10-bit support
+  --colorspace SPACE     Override color space conversion: auto, bt709, bt601, none
+			 auto = automatic based on source metadata (default)
+			 bt709 = force conversion to BT.709 (HD standard)
+			 bt601 = force conversion to BT.601 (SD standard)
+			 none = disable conversion (use source color space as-is)
+			 Use when source has incorrect color space metadata
 
   -d, --dry-run          Show what would be processed without encoding
 
@@ -279,14 +287,25 @@ ENCODER:
   - Uses hardware (hevc_vaapi) when safe for maximum speed
   - Falls back to software (libx265) when needed for quality
 
+  Intelligent Color Space Conversion:
+  - Automatically converts legacy color spaces (BT.470BG, SMPTE170M) to modern
+    standards when using hardware encoding
+  - Preserves 10-bit color depth during conversion
+  - Converts to BT.709 for HD content (>576p)
+  - Converts to BT.601 for SD content (≤576p)
+  - Only converts when source color space is known (safe conversion)
+  - Falls back to software for unknown/missing color metadata (unsafe)
+  - Significantly increases hardware encoding compatibility with legacy media
+
   Auto-detection considers:
   - Pixel format compatibility (yuv420p vs yuv422p/yuv444p)
-  - Color space (modern BT.709 vs legacy BT.470BG/SMPTE170M)
+  - Color space metadata (known vs unknown/missing)
   - Source codec (H.264/HEVC vs MPEG2/DV)
   - Field order (progressive vs interlaced)
   - Hardware capabilities (10-bit support)
 
   For software encoding (problematic content):
+  - Comprehensive color space handling for maximum accuracy
   - Performs color correction to avoid chroma subsampling errors
   - Runs with reduced priority (nice/ionice) to lessen system impact
   - Maximizes CPU utilization with automatic thread pooling
@@ -676,6 +695,42 @@ build_vf() {
 	    fi
 	fi
 
+	# Check if color space conversion is needed
+	local colorspace_conversion=$(get_colorspace_conversion "$input" "$height")
+	if [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
+		# Check if source has unknown/untagged color metadata
+		local source_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$input" 2>/dev/null | tr -d ',' | xargs)
+
+		if [[ "$source_primaries" =~ ^(unknown|)$ ]]; then
+			# Source has unknown primaries - can't convert, only tag output
+			echo "    WARNING: Source has unknown color primaries - cannot convert, will tag output only" >&2
+			echo "    Consider using --codec libx265 for better color handling" >&2
+		else
+			# Add colorspace filter before format conversion
+			local cs_filter=""
+			if [[ "$colorspace_conversion" == "bt709" ]]; then
+				cs_filter="colorspace=space=bt709:primaries=bt709:trc=bt709:range=tv"
+				echo "    Converting color space to BT.709 (HD standard)" >&2
+			elif [[ "$colorspace_conversion" == "bt601" ]]; then
+				cs_filter="colorspace=space=smpte170m:primaries=smpte170m:trc=smpte170m:range=tv"
+				echo "    Converting color space to BT.601 (SD standard)" >&2
+			fi
+			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
+			vf_cpu="${vf_cpu}${cs_filter}"
+		fi
+	elif [[ "$colorspace_conversion" == "unsafe" ]]; then
+		# Warn if using hardware encoding with unknown color metadata
+		echo "    WARNING: Unknown color space metadata - hardware encoding may produce artifacts" >&2
+		echo "    Consider using --codec libx265 or --colorspace to override" >&2
+	elif [[ "$colorspace_conversion" == "none" ]]; then
+		# Check if source is SMPTE170M (which normally uses software encoding)
+		local source_colorspace=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$input" 2>/dev/null | tr -d ',' | xargs)
+		if [[ "$source_colorspace" == "smpte170m" ]]; then
+			echo "    WARNING: SMPTE170M with hardware encoding may produce color artifacts" >&2
+			echo "    Auto mode would use software encoding - consider --codec libx265" >&2
+		fi
+	fi
+
 	# Build complete filter chain
 	# Format and upload to GPU
 	[[ -n "$vf_cpu" ]] && vf="$vf_cpu,"
@@ -690,7 +745,7 @@ build_vf() {
 
 else
 	# ============================================================
-	# SOFTWARE PATH: Use CPU filters
+	# SOFTWARE PATH: Use CPU filters with comprehensive color handling
 	# ============================================================
 
 	vf="$vf_cpu"
@@ -741,11 +796,26 @@ else
 	    fi
 	fi
 
-	# Add color matrix conversion for SD content
-	if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
+	# Comprehensive color space handling for software encoding
+	local colorspace_conversion=$(get_colorspace_conversion "$input" "$height")
+
+	if [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
+		# Add colorspace filter
+		local cs_filter=""
+		if [[ "$colorspace_conversion" == "bt709" ]]; then
+			cs_filter="colorspace=space=bt709:primaries=bt709:trc=bt709:range=tv"
+			echo "    Converting color space to BT.709 (HD standard)" >&2
+		elif [[ "$colorspace_conversion" == "bt601" ]]; then
+			cs_filter="colorspace=space=smpte170m:primaries=smpte170m:trc=smpte170m:range=tv"
+			echo "    Converting color space to BT.601 (SD standard)" >&2
+		fi
+		[[ -n "$vf" ]] && vf="$vf,"
+		vf="${vf}${cs_filter}"
+	elif [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
+		# Fallback for SD content when no conversion needed but want to ensure proper matrix
 		[[ -n "$vf" ]] && vf="$vf,"
 		vf="${vf}scale=in_color_matrix=bt601:out_color_matrix=bt601:flags=lanczos"
-		echo "    Applied bt601 color matrix conversion" >&2
+		echo "    Applied bt601 color matrix preservation" >&2
 	fi
     fi
 
@@ -839,6 +909,99 @@ get_vaapi_profile() {
 	fi
 }
 
+# Determine color space conversion strategy for hardware encoding
+# Returns: "none" | "bt601" | "bt709" | "unsafe"
+# - none: No conversion needed, color space already compatible
+# - bt601: Convert to BT.601 (for SD content)
+# - bt709: Convert to BT.709 (for HD content)
+# - unsafe: Unknown color space, cannot safely convert
+get_colorspace_conversion() {
+	local source_file="$1"
+	local height="$2"
+
+	# Check for manual override
+	if [[ "$COLORSPACE" != "auto" ]]; then
+		case "$COLORSPACE" in
+			bt709|bt601)
+				# User explicitly requested this color space conversion
+				echo "$COLORSPACE"
+				return
+				;;
+			none)
+				# User explicitly disabled conversion
+				echo "none"
+				return
+				;;
+			*)
+				# Invalid value, fall through to auto detection
+				echo "    Warning: Invalid COLORSPACE value '$COLORSPACE', using auto detection" >&2
+				;;
+		esac
+	fi
+
+	# Get color metadata
+	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
+	local color_transfer=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_transfer -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
+	local color_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
+
+	# If ANY color metadata is completely unknown or missing, it's unsafe to convert
+	if [[ "$color_space" =~ ^(unknown|)$ ]] || [[ "$color_transfer" =~ ^(unknown|)$ ]] || [[ "$color_primaries" =~ ^(unknown|)$ ]]; then
+		echo "unsafe"
+		return
+	fi
+
+	# Determine target color space based on resolution
+	local target_space
+	if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
+		target_space="bt601"
+	else
+		target_space="bt709"
+	fi
+
+	# Check if current color space is already compatible with VAAPI
+	if [[ "$target_space" == "bt709" ]]; then
+		# For HD content, bt709 is ideal
+		if [[ "$color_space" == "bt709" ]]; then
+			echo "none"
+			return
+		fi
+
+		# Legacy spaces that need conversion to bt709
+		if [[ "$color_space" =~ ^(bt470bg|smpte170m|bt601)$ ]]; then
+			echo "bt709"
+			return
+		fi
+	else
+		# For SD content, bt601 is ideal
+		if [[ "$color_space" == "bt601" ]]; then
+			echo "none"
+			return
+		fi
+
+		# SMPTE170M: Hardware encoding automatically falls back to software (see should_use_software_encoder)
+		# No conversion needed - software handles SMPTE170M correctly as-is
+		if [[ "$color_space" == "smpte170m" ]]; then
+			echo "none"
+			return
+		fi
+
+		# bt470bg is close to bt601, but convert for consistency
+		if [[ "$color_space" == "bt470bg" ]]; then
+			echo "bt601"
+			return
+		fi
+
+		# HD content being downscaled or upscaled SD
+		if [[ "$color_space" == "bt709" ]]; then
+			echo "bt601"
+			return
+		fi
+	fi
+
+	# Other color spaces (bt2020, smpte240m, etc.) - convert to appropriate target
+	echo "$target_space"
+}
+
 # Determine optimal encoder based on video characteristics
 # Returns "libx265" for software or "hevc_vaapi" for hardware encoding
 should_use_software_encoder() {
@@ -848,6 +1011,7 @@ should_use_software_encoder() {
 	local bit_depth=$(detect_bit_depth "$source_file")
 	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
 	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
+	local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
 
 	# === HARD BLOCKERS: Will definitely produce artifacts ===
 
@@ -874,29 +1038,30 @@ should_use_software_encoder() {
 		return
 	fi
 
-	# Unknown/missing color metadata causes VAAPI to make wrong assumptions
-	# This results in pink/magenta artifacts and color shifts
-	# Check all three color attributes: space, transfer, and primaries
+	# SMPTE170M color space causes artifacts with VAAPI hardware encoding
+	# Even with conversion attempts, hardware encoders don't handle it reliably
+	# Software encoding handles SMPTE170M correctly
 	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
-	local color_transfer=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_transfer -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
-	local color_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
-
-	# If ANY color metadata is unknown or missing, use software encoding
-	if [[ "$color_space" =~ ^(unknown|)$ ]] || [[ "$color_transfer" =~ ^(unknown|)$ ]] || [[ "$color_primaries" =~ ^(unknown|)$ ]]; then
+	if [[ "$color_space" == "smpte170m" ]]; then
 		echo "libx265"
 		return
 	fi
+
+	# Check color space conversion capability
+	# If "unsafe", we cannot reliably convert, so use software encoding
+	local colorspace_conversion=$(get_colorspace_conversion "$source_file" "$height")
+	if [[ "$colorspace_conversion" == "unsafe" ]]; then
+		echo "libx265"
+		return
+	fi
+
+	# If we reach here and need color space conversion (not "none"), we can safely
+	# convert and still use hardware encoding
 
 	# === SOFT INDICATORS: Correlate with problems but not guaranteed ===
 
 	local software_score=0
 	local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
-
-	# Legacy broadcast color spaces (indicator of old content that may have other issues)
-	# BT.470BG and SMPTE170M are legacy standards
-	if [[ "$color_space" =~ ^(bt470bg|smpte170m)$ ]]; then
-		((software_score+=3))
-	fi
 
 	# Interlaced content (VAAPI can handle it, but software has better deinterlacing options)
 	# Software encoding gives us more control over field processing
@@ -1716,6 +1881,10 @@ while [[ $# -gt 0 ]]; do
 		--force-10bit)
 			FORCE_10BIT="true"
 			shift
+			;;
+		--colorspace)
+			COLORSPACE="$2"
+			shift 2
 			;;
 		-d|--dry-run)
 			DRY_RUN=true
