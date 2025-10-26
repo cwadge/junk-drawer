@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.8.3"
+SCRIPT_VERSION="1.8.4"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -1575,7 +1575,7 @@ build_ffmpeg_command() {
     if [[ "$encoder_type" == "vaapi" ]]; then
 	    local vaapi_profile=$(get_vaapi_profile "$bit_depth")
 
-	    cmd="$priority_prefix ffmpeg${input_opts:+ $input_opts} -i \"$source_file\""
+	    cmd="$priority_prefix ffmpeg -hide_banner${input_opts:+ $input_opts} -i \"$source_file\""
 	    cmd="$cmd -map 0:v:0"
 	    cmd="$cmd $audio_opts"
 	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
@@ -1589,7 +1589,7 @@ build_ffmpeg_command() {
 	    local x265_profile pix_fmt x265_params
 	    IFS='|' read -r x265_profile pix_fmt x265_params <<< "$(build_x265_params "$bit_depth" "$height")"
 
-	    cmd="$priority_prefix ffmpeg${input_opts:+ $input_opts} -i \"$source_file\""
+	    cmd="$priority_prefix ffmpeg -hide_banner${input_opts:+ $input_opts} -i \"$source_file\""
 	    cmd="$cmd -map 0:v:0"
 	    cmd="$cmd $audio_opts"
 	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
