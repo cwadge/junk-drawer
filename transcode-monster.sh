@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.9.0"
+SCRIPT_VERSION="1.10.1"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -494,39 +494,76 @@ detect_telecine() {
 detect_interlacing() {
 	local input="$1"
 
-    # Get total duration and seek to ~10% in to avoid title cards/production logos
+    # Get total duration
     local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
     duration=${duration//,/}
 
-    local seek_time="0"
-    if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-	    seek_time=$(echo "scale=2; $duration * 0.1" | bc 2>/dev/null || echo "0")
+    if ! [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+	    echo "progressive"
+	    return
     fi
 
-    # Run idet analysis - don't trust metadata, analyze actual content
-    local idet_output=$(ffmpeg -ss "$seek_time" -i "$input" -vf idet -frames:v 200 -an -f null - 2>&1)
+    # Sample at multiple points like crop detection to avoid false negatives
+    # Sample at 20%, 50%, and 80% to avoid title cards at beginning and credits at end
+    local sample_points=("0.20" "0.50" "0.80")
+    local total_tff=0
+    local total_bff=0
+    local total_prog=0
+    local samples_taken=0
 
-    # Parse the "Multi frame detection" line
-    local tff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'TFF:\s*\K[0-9]+' || echo "0")
-    local bff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'BFF:\s*\K[0-9]+' || echo "0")
-    local prog_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'Progressive:\s*\K[0-9]+' || echo "0")
+    for pct in "${sample_points[@]}"; do
+	    local seek_time=$(echo "scale=2; $duration * $pct" | bc 2>/dev/null || echo "0")
 
-    # Use threshold-based detection: if >80% of frames are interlaced, treat as interlaced
-    # This avoids false positives from progressive content with bad metadata
-    local total=$((tff_count + bff_count + prog_count))
+	    if ! [[ "$seek_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+		    continue
+	    fi
+
+	# Analyze 300 frames per sample point (increased from 200)
+	local idet_output=$(ffmpeg -ss "$seek_time" -i "$input" -vf idet -frames:v 300 -an -f null - 2>&1)
+
+	# Parse the "Multi frame detection" line
+	local tff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'TFF:\s*\K[0-9]+' || echo "0")
+	local bff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'BFF:\s*\K[0-9]+' || echo "0")
+	local prog_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'Progressive:\s*\K[0-9]+' || echo "0")
+
+	# Clean values
+	tff_count=$(echo "$tff_count" | tr -d '[:space:]')
+	bff_count=$(echo "$bff_count" | tr -d '[:space:]')
+	prog_count=$(echo "$prog_count" | tr -d '[:space:]')
+
+	# Validate and accumulate
+	if [[ "$tff_count" =~ ^[0-9]+$ ]] && [[ "$bff_count" =~ ^[0-9]+$ ]] && [[ "$prog_count" =~ ^[0-9]+$ ]]; then
+		total_tff=$((total_tff + tff_count))
+		total_bff=$((total_bff + bff_count))
+		total_prog=$((total_prog + prog_count))
+		samples_taken=$((samples_taken + 1))
+	fi
+done
+
+    # If we couldn't get any valid samples, assume progressive
+    if [[ $samples_taken -eq 0 ]]; then
+	    echo "progressive"
+	    return
+    fi
+
+    # Analyze aggregated results
+    # Lower threshold to 60% to catch mixed content more reliably
+    local total=$((total_tff + total_bff + total_prog))
     if [[ $total -gt 0 ]]; then
-	    local interlaced_count=$((tff_count + bff_count))
+	    local interlaced_count=$((total_tff + total_bff))
 	    local interlaced_pct=$((interlaced_count * 100 / total))
 
-	    if [[ $interlaced_pct -gt 80 ]]; then
-		    if [[ $tff_count -gt $bff_count ]]; then
-			    echo "tff"
-			    return
-		    else
-			    echo "bff"
-			    return
-		    fi
-	    fi
+	# If >60% of frames across all samples are interlaced, treat as interlaced
+	# This is more conservative than the original 80% threshold
+	if [[ $interlaced_pct -gt 60 ]]; then
+		if [[ $total_tff -gt $total_bff ]]; then
+			echo "tff"
+			return
+		else
+			echo "bff"
+			return
+		fi
+	fi
     fi
 
     echo "progressive"
@@ -672,7 +709,9 @@ build_vf() {
 		if [[ "$telecine" == "telecine" ]]; then
 			# Telecine MUST be done on CPU (no GPU equivalent)
 			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-			vf_cpu="${vf_cpu}fieldmatch=order=tff:mode=pc_n:mchroma=false,yadif=deint=interlaced,decimate"
+			# Use combmatch=full for aggressive combing detection
+			# Use yadif with deint=1 as safety net for orphaned interlaced frames
+			vf_cpu="${vf_cpu}fieldmatch=order=tff:mode=pc_n:combmatch=full,yadif=mode=0:parity=-1:deint=1,decimate"
 			echo "    Telecine detected - using CPU inverse telecine (will be slower)" >&2
 			skip_interlace=true
 		fi
@@ -690,8 +729,9 @@ build_vf() {
 
 	    # Only add deinterlacer if we explicitly detected interlacing
 	    if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
-		    vf_gpu="deinterlace_vaapi=rate=frame"
-		    echo "    Using GPU deinterlacer: deinterlace_vaapi" >&2
+		    # Use motion_adaptive mode to properly handle mixed progressive/interlaced content
+		    vf_gpu="deinterlace_vaapi=mode=motion_adaptive:rate=frame"
+		    echo "    Using adaptive GPU deinterlacer: deinterlace_vaapi (motion adaptive)" >&2
 	    fi
 	fi
 
@@ -765,7 +805,9 @@ else
 		telecine=$(detect_telecine "$input")
 		if [[ "$telecine" == "telecine" ]]; then
 			[[ -n "$vf" ]] && vf="$vf,"
-			vf="${vf}fieldmatch=order=tff:mode=pc_n:mchroma=false,yadif=deint=interlaced,decimate"
+			# Use combmatch=full for aggressive combing detection
+			# Use yadif with deint=1 as safety net for orphaned interlaced frames
+			vf="${vf}fieldmatch=order=tff:mode=pc_n:combmatch=full,yadif=mode=0:parity=-1:deint=1,decimate"
 			echo "    Detected telecine - using fieldmatch+yadif+decimate for inverse telecine" >&2
 			skip_interlace=true
 		fi
@@ -791,8 +833,10 @@ else
 			    parity="1"
 		    fi
 		    [[ -n "$vf" ]] && vf="$vf,"
-		    vf="${vf}bwdif=mode=0:parity=$parity:deint=0"
-		    echo "    Added deinterlacer: bwdif with parity=$parity" >&2
+		    # Use deint=1 (interlaced frames only) instead of deint=0 (all frames)
+		    # This properly handles mixed progressive/interlaced content
+		    vf="${vf}bwdif=mode=0:parity=$parity:deint=1"
+		    echo "    Added adaptive deinterlacer: bwdif with parity=$parity (deint=interlaced)" >&2
 	    fi
 	fi
 
