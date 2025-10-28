@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.10.1"
+SCRIPT_VERSION="1.11.0"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -40,9 +40,10 @@ DEFAULT_VAAPI_DEVICE="/dev/dri/renderD128"
 
 # Video encoding settings
 DEFAULT_VIDEO_CODEC="auto"  # Will choose hevc_vaapi or libx265 based on resolution
-DEFAULT_QUALITY="20"  # CQP/CRF value
+DEFAULT_QUALITY="20.6"  # CQP/CRF value - optimized for 10-bit encoding (use 18-20 for 8-bit)
 DEFAULT_PRESET="medium"  # For libx265 (software encoding only) - balanced speed/quality
-DEFAULT_X265_POOLS="+"  # Thread pools for libx265 (software encoding only) - auto-detect optimal
+DEFAULT_X265_POOLS="+"  # Thread pools for libx265: "+" = auto-detect optimal, or specify count (e.g., "4")
+DEFAULT_X265_TUNE=""  # x265 tuning: "" (none), "fastdecode", "grain", "psnr", "ssim", "zerolatency"
 DEFAULT_GOP_SIZE="120"
 DEFAULT_MIN_KEYINT="12"
 DEFAULT_BFRAMES="0"  # B-frames: 0=max compatibility (older AMD), 1-2=balanced, 3-4=best compression
@@ -57,7 +58,8 @@ DEFAULT_IONICE_LEVEL="4"  # 0-7, higher = lower priority
 
 # Output options
 DEFAULT_OVERWRITE="false"  # Overwrite existing output files
-DEFAULT_FORCE_10BIT="false"  # Force 10-bit encoding even from 8-bit sources
+DEFAULT_UPGRADE_8BIT_TO_10BIT="true"  # Upgrade 8-bit sources to 10-bit for better quality/compression
+DEFAULT_DOWNGRADE_12BIT_TO_10BIT="false"  # Downgrade 12-bit sources to 10-bit for compatibility/speed
 DEFAULT_COLORSPACE="auto"  # Color space: auto, bt709, bt601, or none (disable conversion)
 
 # Audio encoding settings
@@ -87,7 +89,7 @@ DEFAULT_CHAPTERS_PER_EPISODE="auto"  # auto = detect optimal grouping, or specif
 # Output settings
 DEFAULT_OUTPUT_DIR="${HOME}/Videos"
 DEFAULT_CONTAINER="matroska"  # mkv
-DEFAULT_VIDEO_EXTENSIONS="mkv mp4 m4v avi mpg mpeg ts m2ts mov webm flv wmv asf vob ogv"  # Supported input formats
+DEFAULT_INPUT_VIDEO_EXTENSIONS="mkv mp4 m4v avi mpg mpeg ts m2ts mov webm flv wmv asf vob ogv"  # Supported input formats
 
 # ============================================================================
 # ERROR HANDLING
@@ -174,6 +176,7 @@ VIDEO_CODEC="${VIDEO_CODEC:-$DEFAULT_VIDEO_CODEC}"
 QUALITY="${QUALITY:-$DEFAULT_QUALITY}"
 PRESET="${PRESET:-$DEFAULT_PRESET}"
 X265_POOLS="${X265_POOLS:-$DEFAULT_X265_POOLS}"
+X265_TUNE="${X265_TUNE:-$DEFAULT_X265_TUNE}"
 GOP_SIZE="${GOP_SIZE:-$DEFAULT_GOP_SIZE}"
 MIN_KEYINT="${MIN_KEYINT:-$DEFAULT_MIN_KEYINT}"
 BFRAMES="${BFRAMES:-$DEFAULT_BFRAMES}"
@@ -186,7 +189,14 @@ IONICE_CLASS="${IONICE_CLASS:-$DEFAULT_IONICE_CLASS}"
 IONICE_LEVEL="${IONICE_LEVEL:-$DEFAULT_IONICE_LEVEL}"
 
 OVERWRITE="${OVERWRITE:-$DEFAULT_OVERWRITE}"
-FORCE_10BIT="${FORCE_10BIT:-$DEFAULT_FORCE_10BIT}"
+
+# Backward compatibility: Check for old FORCE_10BIT variable name
+if [[ -n "${FORCE_10BIT:-}" ]]; then
+	echo "Warning: FORCE_10BIT is deprecated. Please use UPGRADE_8BIT_TO_10BIT instead." >&2
+	UPGRADE_8BIT_TO_10BIT="${FORCE_10BIT}"
+fi
+UPGRADE_8BIT_TO_10BIT="${UPGRADE_8BIT_TO_10BIT:-$DEFAULT_UPGRADE_8BIT_TO_10BIT}"
+DOWNGRADE_12BIT_TO_10BIT="${DOWNGRADE_12BIT_TO_10BIT:-$DEFAULT_DOWNGRADE_12BIT_TO_10BIT}"
 COLORSPACE="${COLORSPACE:-$DEFAULT_COLORSPACE}"
 
 AUDIO_COPY_FIRST="${AUDIO_COPY_FIRST:-$DEFAULT_AUDIO_COPY_FIRST}"
@@ -211,7 +221,13 @@ CHAPTERS_PER_EPISODE="${CHAPTERS_PER_EPISODE:-$DEFAULT_CHAPTERS_PER_EPISODE}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
 CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
-VIDEO_EXTENSIONS="${VIDEO_EXTENSIONS:-$DEFAULT_VIDEO_EXTENSIONS}"
+
+# Backward compatibility: Check for old VIDEO_EXTENSIONS variable name
+if [[ -n "${VIDEO_EXTENSIONS:-}" ]]; then
+	echo "Warning: VIDEO_EXTENSIONS is deprecated. Please use INPUT_VIDEO_EXTENSIONS instead." >&2
+	INPUT_VIDEO_EXTENSIONS="${VIDEO_EXTENSIONS}"
+fi
+INPUT_VIDEO_EXTENSIONS="${INPUT_VIDEO_EXTENSIONS:-$DEFAULT_INPUT_VIDEO_EXTENSIONS}"
 
 # ============================================================================
 # FUNCTIONS
@@ -240,10 +256,18 @@ OPTIONS:
   -y, --year YEAR        Add year to movie title (e.g., 1984)
 
   -q, --quality NUM      Video quality CQP/CRF value (default: ${DEFAULT_QUALITY})
+			 Lower = better quality, higher = smaller files
+			 Recommended: 18-20 (8-bit), 20-22 (10-bit), 22-24 (12-bit)
+			 Default optimized for 10-bit encoding
   -c, --codec CODEC      Video codec: 'auto', 'hevc_vaapi', 'libx265' (default: ${DEFAULT_VIDEO_CODEC})
   --preset PRESET        x265 encoding preset for software encoding (default: ${DEFAULT_PRESET})
 			 Options: ultrafast, superfast, veryfast, faster, fast,
 				  medium, slow, slower, veryslow, placebo
+  --tune TUNE            x265 tuning for software encoding (default: none)
+			 Options: fastdecode (optimize for low-power playback devices),
+				  grain (preserve film grain), psnr, ssim, zerolatency
+			 Use 'fastdecode' for content played on Raspberry Pi, smart TVs,
+			 or older devices where decode speed matters
   -b, --bframes NUM      Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
 			 0 = max compatibility, 1-2 = balanced, 3-4 = best compression
 
@@ -269,9 +293,25 @@ OPTIONS:
 
   --device PATH          VAAPI device path (default: ${DEFAULT_VAAPI_DEVICE})
   --overwrite            Overwrite existing output files
-  --force-10bit          Force 10-bit encoding even from 8-bit sources
-			 Useful for heavily processed content to prevent banding
-			 Automatically falls back to software if GPU lacks 10-bit support
+
+  Bit Depth Options (default: upgrade 8-bit to 10-bit, preserve 10/12-bit):
+  --force-10bit          (Deprecated: use --upgrade-8bit) Upgrade 8-bit to 10-bit
+  --upgrade-8bit         Upgrade 8-bit sources to 10-bit (enabled by default)
+  --no-upgrade-8bit      Disable 8-bit to 10-bit upgrade (encode at source bit depth)
+  --downgrade-12bit      Downgrade 12-bit sources to 10-bit for compatibility/speed
+  --no-downgrade-12bit   Preserve 12-bit sources at native depth (default)
+
+			 Why upgrade 8-bit to 10-bit?
+			 - Better quality with less banding
+			 - Smaller files (~10-15% reduction)
+			 - No visible quality loss
+
+			 Why downgrade 12-bit to 10-bit?
+			 - Enable hardware encoding (most GPUs don't support 12-bit)
+			 - Reduce file size (~20% smaller)
+			 - Better device compatibility (few players support 12-bit)
+			 - Minimal visible quality difference on consumer displays
+
   --colorspace SPACE     Override color space conversion: auto, bt709, bt601, none
 			 auto = automatic based on source metadata (default)
 			 bt709 = force conversion to BT.709 (HD standard)
@@ -373,14 +413,15 @@ CONFIG FILE:
   ${CONFIG_FILE}
 
   All settings can be configured in this file using bash variable syntax:
-    QUALITY="20"
+    QUALITY="20.6"  # Default optimized for 10-bit encoding
     VIDEO_CODEC="hevc_vaapi"
     PRESET="medium"
+    X265_TUNE="fastdecode"  # For low-power playback devices
     OUTPUT_DIR="/path/to/videos"
     AUDIO_BITRATE_STEREO="128k"
     AUDIO_BITRATE_SURROUND="192k"
     ADAPTIVE_DEINTERLACE="true"
-    VIDEO_EXTENSIONS="mkv mp4 m4v avi"  # Customize supported input formats
+    INPUT_VIDEO_EXTENSIONS="mkv mp4 m4v avi"  # Customize supported input formats
 
   Priority: Built-in defaults < Config file < Command line arguments
 
@@ -774,7 +815,9 @@ build_vf() {
 	# Build complete filter chain
 	# Format and upload to GPU
 	[[ -n "$vf_cpu" ]] && vf="$vf_cpu,"
-	if [[ "$bit_depth" == "10" ]]; then
+	if [[ "$bit_depth" == "12" ]]; then
+		vf="${vf}format=p012le,hwupload"
+	elif [[ "$bit_depth" == "10" ]]; then
 		vf="${vf}format=p010le,hwupload"
 	else
 		vf="${vf}format=nv12,hwupload"
@@ -878,9 +921,17 @@ build_x265_params() {
     # "+" means auto-detect optimal thread count and distribution
     params="${params}:pools=${X265_POOLS}"
 
+    # Add tuning if specified (e.g., fastdecode for low-power playback devices)
+    if [[ -n "$X265_TUNE" ]]; then
+	    params="${params}:tune=${X265_TUNE}"
+    fi
+
     # Set appropriate profile and pixel format based on bit depth
     local profile pix_fmt
-    if [[ "$bit_depth" == "10" ]]; then
+    if [[ "$bit_depth" == "12" ]]; then
+	    profile="main12"
+	    pix_fmt="yuv420p12le"
+    elif [[ "$bit_depth" == "10" ]]; then
 	    profile="main10"
 	    pix_fmt="yuv420p10le"
     else
@@ -932,6 +983,12 @@ detect_bit_depth() {
 	local input="$1"
 	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
 
+    # 12-bit formats
+    if [[ "$pix_fmt" =~ (yuv420p12|yuv422p12|yuv444p12|p012|p016) ]]; then
+	    echo "12"
+	    return
+    fi
+
     # 10-bit formats
     if [[ "$pix_fmt" =~ (yuv420p10|yuv422p10|yuv444p10|p010) ]]; then
 	    echo "10"
@@ -946,7 +1003,9 @@ detect_bit_depth() {
 get_vaapi_profile() {
 	local bit_depth="$1"
 
-	if [[ "$bit_depth" == "10" ]]; then
+	if [[ "$bit_depth" == "12" ]]; then
+		echo "main12"
+	elif [[ "$bit_depth" == "10" ]]; then
 		echo "main10"
 	else
 		echo "main"
@@ -1059,10 +1118,19 @@ should_use_software_encoder() {
 
 	# === HARD BLOCKERS: Will definitely produce artifacts ===
 
+	# 12-bit encoding when VAAPI doesn't support it
+	# Very few GPUs support 12-bit HEVC encoding
+	if [[ "$bit_depth" == "12" ]]; then
+		if ! vainfo 2>/dev/null | grep -q "VAProfileHEVCMain12"; then
+			echo "libx265"
+			return
+		fi
+	fi
+
 	# 10-bit encoding when VAAPI doesn't support it
-	# This includes both: native 10-bit sources AND forced 10-bit from 8-bit sources
+	# This includes both: native 10-bit sources AND upgraded 8-bit sources
 	# Check if hardware supports 10-bit HEVC (most modern Intel/AMD do)
-	if [[ "$bit_depth" == "10" || "$FORCE_10BIT" == "true" ]]; then
+	if [[ "$bit_depth" == "10" || "$UPGRADE_8BIT_TO_10BIT" == "true" ]]; then
 		if ! vainfo 2>/dev/null | grep -q "VAProfileHEVCMain10"; then
 			echo "libx265"
 			return
@@ -1516,7 +1584,7 @@ find_video_files() {
 
 	result_array=()
 	shopt -s nullglob
-	for ext in $VIDEO_EXTENSIONS; do
+	for ext in $INPUT_VIDEO_EXTENSIONS; do
 		result_array+=("$dir"/*."$ext")
 	done
 	shopt -u nullglob
@@ -1527,7 +1595,7 @@ count_video_files() {
 	local dir="$1"
 	local count=0
 
-	for ext in $VIDEO_EXTENSIONS; do
+	for ext in $INPUT_VIDEO_EXTENSIONS; do
 		local ext_count=$(find "$dir" -maxdepth 1 -iname "*.$ext" 2>/dev/null | wc -l)
 		count=$((count + ext_count))
 	done
@@ -1673,8 +1741,11 @@ build_ffmpeg_command() {
     local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
     height=${height//,/}
 
-    # Override bit depth if forced
-    if [[ "$FORCE_10BIT" == "true" ]]; then
+    # Adjust bit depth based on user preferences
+    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
+	    bit_depth="10"
+    fi
+    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
 	    bit_depth="10"
     fi
 
@@ -1865,6 +1936,10 @@ while [[ $# -gt 0 ]]; do
 			PRESET="$2"
 			shift 2
 			;;
+		--tune)
+			X265_TUNE="$2"
+			shift 2
+			;;
 		-b|--bframes)
 			BFRAMES="$2"
 			shift 2
@@ -1922,8 +1997,21 @@ while [[ $# -gt 0 ]]; do
 			OVERWRITE="true"
 			shift
 			;;
-		--force-10bit)
-			FORCE_10BIT="true"
+		--force-10bit|--upgrade-8bit)
+			# --force-10bit kept for backward compatibility
+			UPGRADE_8BIT_TO_10BIT="true"
+			shift
+			;;
+		--no-upgrade-8bit)
+			UPGRADE_8BIT_TO_10BIT="false"
+			shift
+			;;
+		--downgrade-12bit)
+			DOWNGRADE_12BIT_TO_10BIT="true"
+			shift
+			;;
+		--no-downgrade-12bit)
+			DOWNGRADE_12BIT_TO_10BIT="false"
 			shift
 			;;
 		--colorspace)
@@ -2134,7 +2222,7 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 
 	    if [[ ${#video_files[@]} -eq 0 ]]; then
 		    echo -e "${RED}Error: No video files found in directory${RESET}"
-		    echo -e "${RED}Supported formats: $VIDEO_EXTENSIONS${RESET}"
+		    echo -e "${RED}Supported formats: $INPUT_VIDEO_EXTENSIONS${RESET}"
 		    exit 1
 	    fi
 
@@ -2197,8 +2285,11 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
     height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file")
     height=${height//,/}
 
-    # Override bit depth if forced
-    if [[ "$FORCE_10BIT" == "true" ]]; then
+    # Adjust bit depth based on user preferences
+    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
+	    bit_depth="10"
+    fi
+    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
 	    bit_depth="10"
     fi
 
@@ -2217,7 +2308,9 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
     fi
 
     # Determine profile based on bit depth
-    if [[ "$bit_depth" == "10" ]]; then
+    if [[ "$bit_depth" == "12" ]]; then
+	    detected_profile="main12"
+    elif [[ "$bit_depth" == "10" ]]; then
 	    detected_profile="main10"
     else
 	    detected_profile="main"
@@ -2367,7 +2460,7 @@ else
 			disc_dirs=("$SOURCE_DIR")
 		else
 			echo -e "${YELLOW}Warning: No disc directories found for season $SEASON_NUM (e.g., *S${SEASON_NUM}*D* or S${SEASON_NUM}D*) and no video files in source directory${RESET}"
-			echo -e "${YELLOW}Supported formats: $VIDEO_EXTENSIONS${RESET}"
+			echo -e "${YELLOW}Supported formats: $INPUT_VIDEO_EXTENSIONS${RESET}"
 			echo ""
 			continue
 		fi
@@ -2604,8 +2697,11 @@ else
 	    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
 	    height=${height//,/}
 
-	    # Override bit depth if forced
-	    if [[ "$FORCE_10BIT" == "true" ]]; then
+	    # Adjust bit depth based on user preferences
+	    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
+		    bit_depth="10"
+	    fi
+	    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
 		    bit_depth="10"
 	    fi
 
@@ -2618,7 +2714,9 @@ else
 	    fi
 
 	    # Determine profile based on bit depth
-	    if [[ "$bit_depth" == "10" ]]; then
+	    if [[ "$bit_depth" == "12" ]]; then
+		    detected_profile="main12"
+	    elif [[ "$bit_depth" == "10" ]]; then
 		    detected_profile="main10"
 	    else
 		    detected_profile="main"
