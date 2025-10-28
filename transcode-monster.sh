@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.11.0"
+SCRIPT_VERSION="1.11.1"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -90,6 +90,9 @@ DEFAULT_CHAPTERS_PER_EPISODE="auto"  # auto = detect optimal grouping, or specif
 DEFAULT_OUTPUT_DIR="${HOME}/Videos"
 DEFAULT_CONTAINER="matroska"  # mkv
 DEFAULT_INPUT_VIDEO_EXTENSIONS="mkv mp4 m4v avi mpg mpeg ts m2ts mov webm flv wmv asf vob ogv"  # Supported input formats
+DEFAULT_FFMPEG_LOGLEVEL="warning"  # FFmpeg verbosity: quiet, panic, fatal, error, warning, info, verbose, debug
+DEFAULT_FFMPEG_ANALYZEDURATION="120000000"  # Microseconds (2 minutes) - analyze input to determine codec params
+DEFAULT_FFMPEG_PROBESIZE="128000000"  # Bytes (128MB) - amount of data to probe for stream info
 
 # ============================================================================
 # ERROR HANDLING
@@ -228,6 +231,9 @@ if [[ -n "${VIDEO_EXTENSIONS:-}" ]]; then
 	INPUT_VIDEO_EXTENSIONS="${VIDEO_EXTENSIONS}"
 fi
 INPUT_VIDEO_EXTENSIONS="${INPUT_VIDEO_EXTENSIONS:-$DEFAULT_INPUT_VIDEO_EXTENSIONS}"
+FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-$DEFAULT_FFMPEG_LOGLEVEL}"
+FFMPEG_ANALYZEDURATION="${FFMPEG_ANALYZEDURATION:-$DEFAULT_FFMPEG_ANALYZEDURATION}"
+FFMPEG_PROBESIZE="${FFMPEG_PROBESIZE:-$DEFAULT_FFMPEG_PROBESIZE}"
 
 # ============================================================================
 # FUNCTIONS
@@ -268,8 +274,11 @@ OPTIONS:
 				  grain (preserve film grain), psnr, ssim, zerolatency
 			 Use 'fastdecode' for content played on Raspberry Pi, smart TVs,
 			 or older devices where decode speed matters
+			 NOTE: fastdecode automatically limits B-frames to 1 for best results
   -b, --bframes NUM      Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
 			 0 = max compatibility, 1-2 = balanced, 3-4 = best compression
+			 Higher values increase decode complexity (slower on weak devices)
+			 Automatically adjusted to 1 when using --tune fastdecode
 
   --no-crop              Disable automatic crop detection
   --no-deinterlace       Disable automatic deinterlacing
@@ -320,6 +329,28 @@ OPTIONS:
 			 Use when source has incorrect color space metadata
 
   -d, --dry-run          Show what would be processed without encoding
+
+OUTPUT VERBOSITY:
+  The script uses reduced FFmpeg output by default to minimize clutter while
+  preserving essential information (warnings, errors, and encoding progress).
+  These can be configured in ~/.config/transcode-monster.conf:
+
+  FFMPEG_LOGLEVEL        FFmpeg output verbosity (default: warning)
+			 Options: quiet, panic, fatal, error, warning, info, verbose, debug
+			 - warning (default): Shows warnings, errors, and progress bar
+			 - error: Only shows errors and progress bar
+			 - info: Shows detailed stream information (verbose)
+			 The progress indicator (-stats) is always enabled to monitor encoding
+
+  FFMPEG_ANALYZEDURATION Microseconds to analyze input (default: 100000000 = 100 seconds)
+			 Increase if you see "Could not find codec parameters" warnings
+			 for subtitle streams (common with PGS/Blu-ray subtitles)
+			 Larger Blu-ray rips may need 200000000 (200 seconds) or more
+
+  FFMPEG_PROBESIZE       Bytes to probe for stream info (default: 100000000 = 100MB)
+			 Increase along with analyzeduration if input analysis warnings persist
+			 Larger Blu-ray rips may need 200000000 (200MB) or more
+			 Note: Higher values add 3-5 seconds to startup but eliminate warnings
 
 ENCODER:
   The script uses intelligent hybrid encoding for optimal speed and quality:
@@ -913,18 +944,21 @@ else
 build_x265_params() {
 	local bit_depth="$1"
 	local height="$2"
+	local bframes_to_use="$BFRAMES"
+
+    # Adjust B-frames for fastdecode tuning to avoid conflicts
+    # fastdecode optimizes for decode speed, which means limiting B-frames
+    if [[ "$X265_TUNE" == "fastdecode" ]] && [[ "$BFRAMES" -gt 1 ]]; then
+	    echo "    NOTE: Adjusting B-frames from $BFRAMES to 1 for fastdecode compatibility" >&2
+	    bframes_to_use="1"
+    fi
 
     # Optimize for maximum CPU utilization
-    local params="keyint=${GOP_SIZE}:min-keyint=${MIN_KEYINT}:bframes=${BFRAMES}:ref=${REFS}"
+    local params="keyint=${GOP_SIZE}:min-keyint=${MIN_KEYINT}:bframes=${bframes_to_use}:ref=${REFS}"
 
     # Add thread pooling for better multi-core utilization
     # "+" means auto-detect optimal thread count and distribution
     params="${params}:pools=${X265_POOLS}"
-
-    # Add tuning if specified (e.g., fastdecode for low-power playback devices)
-    if [[ -n "$X265_TUNE" ]]; then
-	    params="${params}:tune=${X265_TUNE}"
-    fi
 
     # Set appropriate profile and pixel format based on bit depth
     local profile pix_fmt
@@ -1842,9 +1876,19 @@ build_ffmpeg_command() {
 	if [[ "$sub_default_input_idx" != "-1" ]] && [[ -v input_to_output_sub_map[$sub_default_input_idx] ]]; then
 		# Map input index to output index
 		local sub_default_output_idx="${input_to_output_sub_map[$sub_default_input_idx]}"
-		sub_opts="$sub_opts -disposition:s 0 -disposition:s:$sub_default_output_idx default"
+		# Set dispositions: default for one stream, 0 for all others
+		for ((i=0; i<sub_track_idx; i=i+1)); do
+			if [[ $i -eq $sub_default_output_idx ]]; then
+				sub_opts="$sub_opts -disposition:s:$i default"
+			else
+				sub_opts="$sub_opts -disposition:s:$i 0"
+			fi
+		done
 	else
-		sub_opts="$sub_opts -disposition:s 0"
+		# No default subtitle, set all to 0
+		for ((i=0; i<sub_track_idx; i=i+1)); do
+			sub_opts="$sub_opts -disposition:s:$i 0"
+		done
 	fi
     fi
 
@@ -1855,7 +1899,9 @@ build_ffmpeg_command() {
     if [[ "$encoder_type" == "vaapi" ]]; then
 	    local vaapi_profile=$(get_vaapi_profile "$bit_depth")
 
-	    cmd="$priority_prefix ffmpeg -hide_banner${input_opts:+ $input_opts} -i \"$source_file\""
+	    cmd="$priority_prefix ffmpeg -hide_banner -loglevel \"$FFMPEG_LOGLEVEL\" -stats"
+	    cmd="$cmd -analyzeduration \"$FFMPEG_ANALYZEDURATION\" -probesize \"$FFMPEG_PROBESIZE\""
+	    cmd="$cmd${input_opts:+ $input_opts} -i \"$source_file\""
 	    cmd="$cmd -map 0:v:0"
 	    cmd="$cmd $audio_opts"
 	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
@@ -1869,11 +1915,15 @@ build_ffmpeg_command() {
 	    local x265_profile pix_fmt x265_params
 	    IFS='|' read -r x265_profile pix_fmt x265_params <<< "$(build_x265_params "$bit_depth" "$height")"
 
-	    cmd="$priority_prefix ffmpeg -hide_banner${input_opts:+ $input_opts} -i \"$source_file\""
+	    cmd="$priority_prefix ffmpeg -hide_banner -loglevel \"$FFMPEG_LOGLEVEL\" -stats"
+	    cmd="$cmd -analyzeduration \"$FFMPEG_ANALYZEDURATION\" -probesize \"$FFMPEG_PROBESIZE\""
+	    cmd="$cmd${input_opts:+ $input_opts} -i \"$source_file\""
 	    cmd="$cmd -map 0:v:0"
 	    cmd="$cmd $audio_opts"
 	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
-	    cmd="$cmd -c:v $actual_codec -preset $PRESET -crf $QUALITY -pix_fmt $pix_fmt"
+	    cmd="$cmd -c:v $actual_codec -preset $PRESET"
+	    [[ -n "$X265_TUNE" ]] && cmd="$cmd -tune $X265_TUNE"
+	    cmd="$cmd -crf $QUALITY -pix_fmt $pix_fmt"
 	    [[ -n "$vf" ]] && cmd="$cmd -vf \"$vf\""
 	    cmd="$cmd -x265-params \"$x265_params\""
 	    cmd="$cmd -map_chapters 0"
