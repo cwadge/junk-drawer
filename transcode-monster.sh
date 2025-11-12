@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.12.0"
+SCRIPT_VERSION="1.13.0"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
 
 # ============================================================================
@@ -88,6 +88,9 @@ DEFAULT_DETECT_CROP="true"
 DEFAULT_DETECT_PULLDOWN="auto"  # auto = SD only, true = force on, false = force off
 DEFAULT_SPLIT_CHAPTERS="auto"  # auto = series files >60min, true = force on, false = force off
 DEFAULT_CHAPTERS_PER_EPISODE="auto"  # auto = detect optimal grouping, or specify number
+
+# Blu-ray disc processing
+DEFAULT_BD_MIN_DURATION="900"  # Minimum duration in seconds (15 minutes) for m2ts files
 
 # Output settings
 DEFAULT_OUTPUT_DIR="${HOME}/Videos"
@@ -226,6 +229,8 @@ DETECT_PULLDOWN="${DETECT_PULLDOWN:-$DEFAULT_DETECT_PULLDOWN}"
 SPLIT_CHAPTERS="${SPLIT_CHAPTERS:-$DEFAULT_SPLIT_CHAPTERS}"
 CHAPTERS_PER_EPISODE="${CHAPTERS_PER_EPISODE:-$DEFAULT_CHAPTERS_PER_EPISODE}"
 
+BD_MIN_DURATION="${BD_MIN_DURATION:-$DEFAULT_BD_MIN_DURATION}"
+
 OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
 CONTAINER="${CONTAINER:-$DEFAULT_CONTAINER}"
 
@@ -275,7 +280,8 @@ OPTIONS:
 				  medium, slow, slower, veryslow, placebo
   --tune TUNE            x265 tuning for software encoding (default: none)
 			 Options: fastdecode (optimize for low-power playback devices),
-				  grain (preserve film grain), psnr, ssim, zerolatency
+				  grain (preserve film grain), psnr, ssim, zerolatency,
+				  animation (optimize for sharp edges and flat colors)
 			 Use 'fastdecode' for content played on Raspberry Pi, smart TVs,
 			 or older devices where decode speed matters
 			 NOTE: fastdecode automatically limits B-frames to 1 for best results
@@ -740,8 +746,8 @@ done
     h=$((h - (h % 16)))
 
     # Get original dimensions
-    local orig_w=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=width -of csv=p=0 "$input")
-    local orig_h=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input")
+    local orig_w=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=width -of csv=p=0 "$input" | head -1)
+    local orig_h=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input" | head -1)
 
     # Remove any commas from locale-formatted numbers
     orig_w=${orig_w//,/}
@@ -772,7 +778,7 @@ build_vf() {
 	local vf_gpu=""  # GPU-side filters (after hwupload)
 
     # Get height for later use
-    local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input")
+    local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input" | head -1)
     height=${height//,/}
 
     # Crop detection (always done on CPU first)
@@ -780,6 +786,33 @@ build_vf() {
 	    local crop=$(detect_crop "$input")
 	    if [[ -n "$crop" ]]; then
 		    vf_cpu="crop=$crop"
+	    fi
+    fi
+
+    # For VAAPI, ensure dimensions are aligned to 16 pixels (HEVC requirement)
+    # This prevents green bar artifacts at edges
+    if [[ "$encoder_type" == "vaapi" ]]; then
+	    # Get current dimensions after crop
+	    local current_width current_height
+	    if [[ -n "$vf_cpu" && "$vf_cpu" =~ crop=([0-9]+):([0-9]+) ]]; then
+		    current_width="${BASH_REMATCH[1]}"
+		    current_height="${BASH_REMATCH[2]}"
+	    else
+		    current_width=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=width -of csv=p=0 "$input" | head -1)
+		    current_height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input" | head -1)
+		    current_width=${current_width//,/}
+		    current_height=${current_height//,/}
+	    fi
+
+	    # Round down to nearest multiple of 16
+	    local aligned_width=$(( (current_width / 16) * 16 ))
+	    local aligned_height=$(( (current_height / 16) * 16 ))
+
+	    # Add scale filter if alignment is needed
+	    if [[ "$aligned_width" -ne "$current_width" || "$aligned_height" -ne "$current_height" ]]; then
+		    [[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
+		    vf_cpu="${vf_cpu}scale=${aligned_width}:${aligned_height}"
+		    echo "    Aligning dimensions for VAAPI: ${current_width}x${current_height} → ${aligned_width}x${aligned_height}" >&2
 	    fi
     fi
 
@@ -834,7 +867,7 @@ build_vf() {
 	local colorspace_conversion=$(get_colorspace_conversion "$input" "$height")
 	if [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
 		# Check if source has unknown/untagged color metadata
-		local source_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$input" 2>/dev/null | tr -d ',' | xargs)
+		local source_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d ',' | xargs)
 
 		if [[ "$source_primaries" =~ ^(unknown|)$ ]]; then
 			# Source has unknown primaries - can't convert, only tag output
@@ -859,7 +892,7 @@ build_vf() {
 		echo "    Consider using --codec libx265 or --colorspace to override" >&2
 	elif [[ "$colorspace_conversion" == "none" ]]; then
 		# Check if source is SMPTE170M (which normally uses software encoding)
-		local source_colorspace=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$input" 2>/dev/null | tr -d ',' | xargs)
+		local source_colorspace=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d ',' | xargs)
 		if [[ "$source_colorspace" == "smpte170m" ]]; then
 			echo "    WARNING: SMPTE170M with hardware encoding may produce color artifacts" >&2
 			echo "    Auto mode would use software encoding - consider --codec libx265" >&2
@@ -1038,7 +1071,7 @@ build_priority_prefix() {
 # Detect bit depth from source
 detect_bit_depth() {
 	local input="$1"
-	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1)
 
     # 12-bit formats
     if [[ "$pix_fmt" =~ (yuv420p12|yuv422p12|yuv444p12|p012|p016) ]]; then
@@ -1067,6 +1100,53 @@ get_vaapi_profile() {
 	else
 		echo "main"
 	fi
+}
+
+# Check if a specific audio track is pcm_bluray (incompatible with MKV)
+has_pcm_bluray_audio() {
+	local input="$1"
+	local track_idx="$2"
+	local audio_codec=$(ffprobe -v quiet -select_streams "a:${track_idx}" -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]')
+
+	if [[ "$audio_codec" == "pcm_bluray" ]]; then
+		return 0
+	fi
+	return 1
+}
+
+# Get duration of a video file in seconds
+get_video_duration() {
+	local input="$1"
+	local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+
+	# Handle empty or invalid durations
+	if [[ -z "$duration" ]] || [[ "$duration" == "N/A" ]]; then
+		echo "0"
+		return
+	fi
+
+	# Convert to integer (round down)
+	printf "%.0f" "$duration"
+}
+
+# Find m2ts files in Blu-ray disc structure, filtering by duration
+# Recursively searches for BDMV/STREAM directories
+find_bd_m2ts_files() {
+	local search_path="$1"
+	local min_duration="$2"
+
+	# Find all STREAM directories in the BD structure
+	while IFS= read -r -d '' stream_dir; do
+		# Find all m2ts files in this STREAM directory
+		while IFS= read -r -d '' m2ts_file; do
+			local duration=$(get_video_duration "$m2ts_file")
+
+			# Only include files meeting minimum duration
+			if [[ "$duration" -ge "$min_duration" ]]; then
+				echo "$m2ts_file"
+			fi
+		done < <(find "$stream_dir" -maxdepth 1 -type f -iname "*.m2ts" -print0 2>/dev/null | sort -z)
+	done < <(find "$search_path" -type d -iname "STREAM" -path "*/BDMV/STREAM" -print0 2>/dev/null | sort -z)
 }
 
 # Determine color space conversion strategy for hardware encoding
@@ -1100,9 +1180,9 @@ get_colorspace_conversion() {
 	fi
 
 	# Get color metadata
-	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
-	local color_transfer=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_transfer -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
-	local color_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
+	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
+	local color_transfer=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_transfer -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
+	local color_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
 
 	# If ANY color metadata is completely unknown or missing, it's unsafe to convert
 	if [[ "$color_space" =~ ^(unknown|)$ ]] || [[ "$color_transfer" =~ ^(unknown|)$ ]] || [[ "$color_primaries" =~ ^(unknown|)$ ]]; then
@@ -1169,9 +1249,9 @@ should_use_software_encoder() {
 
 	# Get video properties
 	local bit_depth=$(detect_bit_depth "$source_file")
-	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
-	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
-	local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
+	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
+	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
+	local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
 
 	# === HARD BLOCKERS: Will definitely produce artifacts ===
 
@@ -1780,6 +1860,26 @@ normalize_source() {
     # Check if source is a directory
     if [[ -d "$source" ]]; then
 	    SOURCE_DIR="$source"
+
+	    # Check if this is a BD dump by looking for BDMV/STREAM directories
+	    local has_bd_structure=false
+	    if find "$source" -type d -iname "STREAM" -path "*/BDMV/STREAM" -print -quit 2>/dev/null | grep -q .; then
+		    has_bd_structure=true
+	    fi
+
+	    # If BD structure found, collect m2ts files with duration filtering
+	    if [[ "$has_bd_structure" == "true" ]]; then
+		    echo -e "${CYAN}Detected Blu-ray disc structure - scanning for m2ts files (minimum duration: ${BD_MIN_DURATION}s)${RESET}"
+		    readarray -t SOURCE_FILES < <(find_bd_m2ts_files "$source" "$BD_MIN_DURATION")
+
+		    if [[ ${#SOURCE_FILES[@]} -eq 0 ]]; then
+			    echo -e "${RED}Error: No m2ts files found matching minimum duration${RESET}"
+			    return 1
+		    fi
+
+		    echo -e "${CYAN}Found ${#SOURCE_FILES[@]} m2ts file(s) meeting duration criteria${RESET}"
+	    fi
+
 	    return 0
     fi
 
@@ -1795,7 +1895,7 @@ build_ffmpeg_command() {
 
     # Detect bit depth and height
     local bit_depth=$(detect_bit_depth "$source_file")
-    local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
+    local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" | head -1)
     height=${height//,/}
 
     # Adjust bit depth based on user preferences
@@ -1843,8 +1943,17 @@ build_ffmpeg_command() {
     # Build audio options
     local audio_opts=""
 
+    # Check if default audio track is pcm_bluray (incompatible with MKV)
+    local has_pcm_bluray=false
+    if has_pcm_bluray_audio "$source_file" "$default_audio_idx"; then
+	    has_pcm_bluray=true
+    fi
+
     # Map the preferred audio track first
-    if [[ "$AUDIO_COPY_FIRST" == "true" && $num_audio -gt 0 ]]; then
+    if [[ "$has_pcm_bluray" == "true" ]]; then
+	    # pcm_bluray must be converted - use FLAC for lossless preservation
+	    audio_opts="-map 0:a:$default_audio_idx -c:a:0 flac"
+    elif [[ "$AUDIO_COPY_FIRST" == "true" && $num_audio -gt 0 ]]; then
 	    audio_opts="-map 0:a:$default_audio_idx -c:a:0 copy"
     else
 	    local bitrate=$(get_audio_bitrate "$source_file" $default_audio_idx)
@@ -2810,7 +2919,13 @@ else
 	    fi
 
 	    IFS='|' read -r default_audio_idx default_audio_lang <<< "$(get_audio_track_info "$source_file" "$preferred_audio_lang")"
-	    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default${RESET}"
+
+	    # Check if default audio needs pcm_bluray conversion
+	    if has_pcm_bluray_audio "$source_file" "$default_audio_idx"; then
+		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default [pcm_bluray → FLAC]${RESET}"
+	    else
+		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default${RESET}"
+	    fi
 
 	    # Check subtitle disposition
 	    sub_default_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
