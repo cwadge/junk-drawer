@@ -28,8 +28,11 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.13.0"
+SCRIPT_VERSION="1.14.1"
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
+NNEDI_WEIGHTS_DIR="${HOME}/.local/share/transcode-monster"
+NNEDI_WEIGHTS_FILE="${NNEDI_WEIGHTS_DIR}/nnedi3_weights.bin"
+NNEDI_WEIGHTS_SHA256="27f382430435bb7613deb1c52f3c79c300c9869812cfe29079432a9c82251d42"
 
 # ============================================================================
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -84,6 +87,8 @@ DEFAULT_ORIGINAL_LANGUAGE=""  # Set this for original language mode (e.g., "jpn"
 # Processing options
 DEFAULT_DETECT_INTERLACING="true"
 DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Force adaptive deinterlacing for mixed content
+DEFAULT_FORCE_DEINTERLACE="false"  # Force deinterlacing even on progressive content
+DEFAULT_DEINTERLACER="bwdif"  # bwdif = default (good for anime/clean content), nnedi (best for noisy sources), yadif, auto
 DEFAULT_DETECT_CROP="true"
 DEFAULT_DETECT_PULLDOWN="auto"  # auto = SD only, true = force on, false = force off
 DEFAULT_SPLIT_CHAPTERS="auto"  # auto = series files >60min, true = force on, false = force off
@@ -224,6 +229,8 @@ ORIGINAL_LANGUAGE="${ORIGINAL_LANGUAGE:-$DEFAULT_ORIGINAL_LANGUAGE}"
 
 DETECT_INTERLACING="${DETECT_INTERLACING:-$DEFAULT_DETECT_INTERLACING}"
 ADAPTIVE_DEINTERLACE="${ADAPTIVE_DEINTERLACE:-$DEFAULT_ADAPTIVE_DEINTERLACE}"
+FORCE_DEINTERLACE="${FORCE_DEINTERLACE:-$DEFAULT_FORCE_DEINTERLACE}"
+DEINTERLACER="${DEINTERLACER:-$DEFAULT_DEINTERLACER}"
 DETECT_CROP="${DETECT_CROP:-$DEFAULT_DETECT_CROP}"
 DETECT_PULLDOWN="${DETECT_PULLDOWN:-$DEFAULT_DETECT_PULLDOWN}"
 SPLIT_CHAPTERS="${SPLIT_CHAPTERS:-$DEFAULT_SPLIT_CHAPTERS}"
@@ -296,6 +303,13 @@ OPTIONS:
 			 Only processes frames detected as interlaced, leaving progressive
 			 frames untouched. Useful for content like film transfers with
 			 interlaced title cards or mixed-source compilations
+  --force-deinterlace    Force deinterlacing even on content detected as progressive
+			 Useful for content misdetected as progressive
+  --deinterlacer FILTER  Set deinterlacing filter: bwdif, nnedi, yadif, auto (default: bwdif)
+			 bwdif = bob weaver deinterlacer (default - good for anime/clean content)
+			 nnedi = neural network deinterlacer (best for noisy/broadcast sources)
+			 yadif = yet another deinterlacer (fast, adaptive)
+			 auto = same as bwdif (maintained for compatibility)
   --no-pulldown          Disable 3:2 pulldown detection (inverse telecine)
   --force-ivtc           Force inverse telecine detection even on HD content
 			 (by default, only runs on SD content ≤576p)
@@ -511,6 +525,9 @@ EXAMPLES:
   # Mixed progressive/interlaced content (film with interlaced titles)
   transcode-monster.sh --adaptive-deinterlace "/path/to/rips/ctd.mkv"
 
+  # Noisy broadcast source - use nnedi for best quality
+  transcode-monster.sh --deinterlacer nnedi "/path/to/The Maxx/"
+
   # "Anime mode": prefer foreign audio with subs in our default language
   transcode-monster.sh --original-lang jpn "/path/to/anime/Cowboy Bebop/"
 
@@ -541,8 +558,10 @@ get_episode_num() {
 detect_telecine() {
 	local input="$1"
 
+	echo "    → Analyzing 2000 frames for telecine patterns (3:2 pulldown)..." >&2
+
     # Analyze field statistics - need more frames for accurate detection
-    local idet_output=$(ffmpeg -i "$input" -vf idet -frames:v 500 -an -f null - 2>&1)
+    local idet_output=$(ffmpeg -i "$input" -vf idet -frames:v 2000 -an -f null - 2>&1)
 
     # Get repeated field counts (key indicator of telecine)
     local rep_top=$(echo "$idet_output" | grep "Repeated Fields:" | tail -1 | grep -oP 'Top:\s*\K[0-9]+' || echo "0")
@@ -581,11 +600,26 @@ detect_telecine() {
     local total_repeated=$((rep_top + rep_bot))
     if [[ $total_repeated -gt 0 ]]; then
 	    local repeated_pct=$((total_repeated * 100 / total))
-	    # If we see significant repeated fields (>10%), it's likely telecine
+	    echo "    → Repeated fields: ${repeated_pct}% (telecine threshold: >10%)" >&2
+
+	    # Calculate interlacing percentage
+	    local interlaced_count=$((tff + bff))
+	    local interlaced_pct=$((interlaced_count * 100 / total))
+
+	    # True telecine should have:
+	    # 1. Significant repeated fields (>10%)
+	    # 2. Mostly progressive content (interlaced <50%)
+	    # If heavily interlaced (>50%), it's probably just noisy interlaced content
 	    if [[ $repeated_pct -gt 10 ]]; then
-		    echo "telecine"
-		    return
+		    if [[ $interlaced_pct -lt 50 ]]; then
+			    echo "telecine"
+			    return
+		    else
+			    echo "    → High interlacing ($interlaced_pct%) suggests noisy interlaced source, not telecine" >&2
+		    fi
 	    fi
+    else
+	    echo "    → No repeated fields detected" >&2
     fi
 
     echo "none"
@@ -594,6 +628,8 @@ detect_telecine() {
 # Detect interlacing
 detect_interlacing() {
 	local input="$1"
+
+	echo "    → Analyzing interlacing at 20%, 40%, 60%, and 80% through file..." >&2
 
     # Get total duration
     local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
@@ -604,12 +640,13 @@ detect_interlacing() {
 	    return
     fi
 
-    # Sample at multiple points like crop detection to avoid false negatives
-    # Sample at 20%, 50%, and 80% to avoid title cards at beginning and credits at end
-    local sample_points=("0.20" "0.50" "0.80")
+    # Sample at multiple points to catch localized noise/quality issues
+    # Sample at 20%, 40%, 60%, and 80% to avoid title cards and capture quality variations
+    local sample_points=("0.20" "0.40" "0.60" "0.80")
     local total_tff=0
     local total_bff=0
     local total_prog=0
+    local total_undetermined=0
     local samples_taken=0
 
     for pct in "${sample_points[@]}"; do
@@ -619,24 +656,27 @@ detect_interlacing() {
 		    continue
 	    fi
 
-	# Analyze 300 frames per sample point (increased from 200)
+	# Analyze 300 frames per sample point
 	local idet_output=$(ffmpeg -ss "$seek_time" -i "$input" -vf idet -frames:v 300 -an -f null - 2>&1)
 
 	# Parse the "Multi frame detection" line
 	local tff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'TFF:\s*\K[0-9]+' || echo "0")
 	local bff_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'BFF:\s*\K[0-9]+' || echo "0")
 	local prog_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'Progressive:\s*\K[0-9]+' || echo "0")
+	local undet_count=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'Undetermined:\s*\K[0-9]+' || echo "0")
 
 	# Clean values
 	tff_count=$(echo "$tff_count" | tr -d '[:space:]')
 	bff_count=$(echo "$bff_count" | tr -d '[:space:]')
 	prog_count=$(echo "$prog_count" | tr -d '[:space:]')
+	undet_count=$(echo "$undet_count" | tr -d '[:space:]')
 
 	# Validate and accumulate
-	if [[ "$tff_count" =~ ^[0-9]+$ ]] && [[ "$bff_count" =~ ^[0-9]+$ ]] && [[ "$prog_count" =~ ^[0-9]+$ ]]; then
+	if [[ "$tff_count" =~ ^[0-9]+$ ]] && [[ "$bff_count" =~ ^[0-9]+$ ]] && [[ "$prog_count" =~ ^[0-9]+$ ]] && [[ "$undet_count" =~ ^[0-9]+$ ]]; then
 		total_tff=$((total_tff + tff_count))
 		total_bff=$((total_bff + bff_count))
 		total_prog=$((total_prog + prog_count))
+		total_undetermined=$((total_undetermined + undet_count))
 		samples_taken=$((samples_taken + 1))
 	fi
 done
@@ -648,15 +688,19 @@ done
     fi
 
     # Analyze aggregated results
-    # Lower threshold to 60% to catch mixed content more reliably
-    local total=$((total_tff + total_bff + total_prog))
+    local total=$((total_tff + total_bff + total_prog + total_undetermined))
     if [[ $total -gt 0 ]]; then
 	    local interlaced_count=$((total_tff + total_bff))
 	    local interlaced_pct=$((interlaced_count * 100 / total))
+	    local undetermined_pct=$((total_undetermined * 100 / total))
 
-	# If >60% of frames across all samples are interlaced, treat as interlaced
-	# This is more conservative than the original 80% threshold
-	if [[ $interlaced_pct -gt 60 ]]; then
+	    # Display detection statistics
+	    echo "    → Interlaced: ${interlaced_pct}%, Progressive: $((total_prog * 100 / total))%, Undetermined: ${undetermined_pct}%" >&2
+
+	# If >5% of frames across all samples are interlaced, treat as interlaced
+	# True progressive content shows 0-1% interlaced (detection noise)
+	# Any significant interlacing (>5%) needs to be addressed
+	if [[ $interlaced_pct -gt 5 ]]; then
 		if [[ $total_tff -gt $total_bff ]]; then
 			echo "tff"
 			return
@@ -670,9 +714,70 @@ done
     echo "progressive"
 }
 
+# Apply deinterlacer based on DEINTERLACER setting and field order
+# Returns the filter string to add to vf chain
+apply_deinterlacer() {
+	local field_order="$1"  # "tff", "bff", or "auto"
+	local filter=""
+
+	# Determine field parity
+	local field=""
+	local parity=""
+	if [[ "$field_order" == "tff" ]]; then
+		field="t"  # top field first for nnedi
+		parity="0"  # for bwdif/yadif
+	elif [[ "$field_order" == "bff" ]]; then
+		field="b"  # bottom field first for nnedi
+		parity="1"  # for bwdif/yadif
+	else
+		field="a"  # auto for nnedi
+		parity="-1"  # auto for bwdif/yadif
+	fi
+
+	case "$DEINTERLACER" in
+		nnedi)
+			# Use nnedi only (error if unavailable)
+			if ! check_nnedi_available; then
+				echo "    ERROR: nnedi filter not available in your ffmpeg build" >&2
+				echo "    Install ffmpeg with nnedi support or use --deinterlacer bwdif" >&2
+				return 1
+			fi
+			# Download weights file if needed
+			if ! ensure_nnedi_weights; then
+				echo "    ERROR: Failed to download nnedi3_weights.bin" >&2
+				echo "    Download manually from: https://github.com/dubhater/vapoursynth-nnedi3/raw/master/src/nnedi3_weights.bin" >&2
+				echo "    Place in: $NNEDI_WEIGHTS_FILE" >&2
+				return 1
+			fi
+			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${field}"
+			echo "    Using nnedi deinterlacer (high quality, neural network)" >&2
+			;;
+		bwdif)
+			# Use bwdif - mode=1 deinterlaces all frames (not adaptive)
+			filter="bwdif=mode=1:parity=$parity"
+			echo "    Using bwdif deinterlacer (bob weaver)" >&2
+			;;
+		yadif)
+			# Use yadif - mode=1 deinterlaces all frames (not adaptive)
+			filter="yadif=mode=1:parity=$parity"
+			echo "    Using yadif deinterlacer" >&2
+			;;
+		auto|*)
+			# Default to bwdif (better for anime/clean content)
+			# User can explicitly choose nnedi for noisy sources
+			filter="bwdif=mode=1:parity=$parity"
+			echo "    Using bwdif deinterlacer (default)" >&2
+			;;
+	esac
+
+	echo "$filter"
+}
+
 # Detect crop
 detect_crop() {
 	local input="$1"
+
+	echo "    → Analyzing crop at 25%, 50%, and 75% through file..." >&2
 
     # Get total duration
     local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
@@ -695,7 +800,7 @@ detect_crop() {
 	    fi
 
 	# Don't use -v quiet here - we need the cropdetect output!
-	local crop_line=$(ffmpeg -ss "$seek_time" -i "$input" -vf cropdetect=0.1:16:100 -frames:v 500 -f null - 2>&1 | grep 'crop=' | tail -20 | sort | uniq -c | sort -nr | head -1 | grep -o 'crop=[0-9:]*' | cut -d'=' -f2)
+	local crop_line=$(ffmpeg -ss "$seek_time" -i "$input" -vf cropdetect=0.1:16:100 -frames:v 200 -f null - 2>&1 | grep 'crop=' | tail -20 | sort | uniq -c | sort -nr | head -1 | grep -o 'crop=[0-9:]*' | cut -d'=' -f2)
 
 	if [[ -n "$crop_line" ]]; then
 		local w=$(echo "$crop_line" | cut -d: -f1)
@@ -768,6 +873,56 @@ done
     echo "$w:$h:$x:$y"
 }
 
+# Check and download nnedi3 weights file if needed
+ensure_nnedi_weights() {
+	# Check if file exists and is valid
+	if [[ -f "$NNEDI_WEIGHTS_FILE" ]]; then
+		local current_sha256=$(sha256sum "$NNEDI_WEIGHTS_FILE" 2>/dev/null | cut -d' ' -f1)
+		if [[ "$current_sha256" == "$NNEDI_WEIGHTS_SHA256" ]]; then
+			return 0  # File exists and is valid
+		fi
+		echo "    → Existing nnedi3_weights.bin failed verification, redownloading..." >&2
+	fi
+
+    # Create directory if needed
+    mkdir -p "$NNEDI_WEIGHTS_DIR" 2>/dev/null || {
+	    echo "    → Cannot create directory $NNEDI_WEIGHTS_DIR" >&2
+		return 1
+	}
+
+	echo "    → Downloading nnedi3_weights.bin..." >&2
+
+    # Try primary source (dubhater's repository)
+    if curl -f -L -o "$NNEDI_WEIGHTS_FILE.tmp" \
+	    "https://github.com/dubhater/vapoursynth-nnedi3/raw/master/src/nnedi3_weights.bin" 2>/dev/null; then
+
+	# Verify download
+	local downloaded_sha256=$(sha256sum "$NNEDI_WEIGHTS_FILE.tmp" 2>/dev/null | cut -d' ' -f1)
+	if [[ "$downloaded_sha256" == "$NNEDI_WEIGHTS_SHA256" ]]; then
+		mv "$NNEDI_WEIGHTS_FILE.tmp" "$NNEDI_WEIGHTS_FILE"
+		echo "    → Successfully downloaded and verified nnedi3_weights.bin" >&2
+		return 0
+	fi
+	rm -f "$NNEDI_WEIGHTS_FILE.tmp"
+	echo "    → Downloaded file failed verification" >&2
+    fi
+
+    echo "    → Failed to download nnedi3_weights.bin" >&2
+    return 1
+}
+
+# Check if nnedi deinterlacer is available
+check_nnedi_available() {
+	# Only check if nnedi filter exists in ffmpeg
+	# Don't check weights file here - we'll download it when needed
+	# Capture output first to avoid pipeline issues with set -euo pipefail
+	local ffmpeg_output=$(ffmpeg -hide_banner -filters 2>&1)
+	if echo "$ffmpeg_output" | grep -q "nnedi"; then
+		return 0  # Filter found
+	fi
+	return 1  # Filter not found
+}
+
 # Build video filter chain - works for both VAAPI and software encoding
 build_vf() {
 	local input="$1"
@@ -780,6 +935,9 @@ build_vf() {
     # Get height for later use
     local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input" | head -1)
     height=${height//,/}
+
+    # Display analysis phase message
+    echo "  → Analyzing source content (crop, interlacing, telecine)..." >&2
 
     # Crop detection (always done on CPU first)
     if [[ "$DETECT_CROP" == "true" ]]; then
@@ -850,14 +1008,12 @@ build_vf() {
 		# Force adaptive deinterlacing regardless of detection
 		vf_gpu="deinterlace_vaapi=mode=motion_adaptive:rate=frame"
 		echo "    Added adaptive GPU deinterlacer: deinterlace_vaapi (motion adaptive)" >&2
-		# Interlacing detection - use VAAPI deinterlacer for speed
 	elif [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
 		local interlacing=$(detect_interlacing "$input")
 		echo "    Interlacing detected: $interlacing" >&2
 
-	    # Only add deinterlacer if we explicitly detected interlacing
+	    # Add deinterlacer if interlacing detected
 	    if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
-		    # Use motion_adaptive mode to properly handle mixed progressive/interlaced content
 		    vf_gpu="deinterlace_vaapi=mode=motion_adaptive:rate=frame"
 		    echo "    Using adaptive GPU deinterlacer: deinterlace_vaapi (motion adaptive)" >&2
 	    fi
@@ -949,24 +1105,24 @@ else
 		[[ -n "$vf" ]] && vf="$vf,"
 		vf="${vf}yadif=mode=0:parity=-1:deint=1"
 		echo "    Added adaptive deinterlacer: yadif (deint=interlaced only)" >&2
-		# Normal interlacing detection (use CPU bwdif for software encoding)
+	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
+		# Force deinterlacing without detection
+		[[ -n "$vf" ]] && vf="$vf,"
+		local deint_filter=$(apply_deinterlacer "auto")
+		if [[ -n "$deint_filter" ]]; then
+			vf="${vf}${deint_filter}"
+		fi
 	elif [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
 		local interlacing=$(detect_interlacing "$input")
 		echo "    Interlacing detected: $interlacing" >&2
 
-	    # Only add deinterlacer if we explicitly detected interlacing
+	    # Add deinterlacer if interlacing detected
 	    if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
-		    local parity
-		    if [[ "$interlacing" == "tff" ]]; then
-			    parity="0"
-		    else
-			    parity="1"
-		    fi
 		    [[ -n "$vf" ]] && vf="$vf,"
-		    # Use deint=1 (interlaced frames only) instead of deint=0 (all frames)
-		    # This properly handles mixed progressive/interlaced content
-		    vf="${vf}bwdif=mode=0:parity=$parity:deint=1"
-		    echo "    Added adaptive deinterlacer: bwdif with parity=$parity (deint=interlaced)" >&2
+		    local deint_filter=$(apply_deinterlacer "$interlacing")
+		    if [[ -n "$deint_filter" ]]; then
+			    vf="${vf}${deint_filter}"
+		    fi
 	    fi
 	fi
 
@@ -2138,6 +2294,14 @@ while [[ $# -gt 0 ]]; do
 		--adaptive-deinterlace)
 			ADAPTIVE_DEINTERLACE="true"
 			shift
+			;;
+		--force-deinterlace)
+			FORCE_DEINTERLACE="true"
+			shift
+			;;
+		--deinterlacer)
+			DEINTERLACER="$2"
+			shift 2
 			;;
 		--no-pulldown)
 			DETECT_PULLDOWN="false"
