@@ -28,15 +28,17 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.14.1"
-CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
-NNEDI_WEIGHTS_DIR="${HOME}/.local/share/transcode-monster"
-NNEDI_WEIGHTS_FILE="${NNEDI_WEIGHTS_DIR}/nnedi3_weights.bin"
-NNEDI_WEIGHTS_SHA256="27f382430435bb7613deb1c52f3c79c300c9869812cfe29079432a9c82251d42"
+SCRIPT_VERSION="1.14.2"
 
 # ============================================================================
 # DEFAULT SETTINGS (Priority 1: Built-ins)
 # ============================================================================
+
+# Script assets
+CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
+NNEDI_WEIGHTS_DIR="${HOME}/.local/share/transcode-monster"
+NNEDI_WEIGHTS_FILE="${NNEDI_WEIGHTS_DIR}/nnedi3_weights.bin"
+NNEDI_WEIGHTS_SHA256="27f382430435bb7613deb1c52f3c79c300c9869812cfe29079432a9c82251d42"
 
 # Hardware acceleration
 DEFAULT_VAAPI_DEVICE="/dev/dri/renderD128"
@@ -88,7 +90,7 @@ DEFAULT_ORIGINAL_LANGUAGE=""  # Set this for original language mode (e.g., "jpn"
 DEFAULT_DETECT_INTERLACING="true"
 DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Force adaptive deinterlacing for mixed content
 DEFAULT_FORCE_DEINTERLACE="false"  # Force deinterlacing even on progressive content
-DEFAULT_DEINTERLACER="bwdif"  # bwdif = default (good for anime/clean content), nnedi (best for noisy sources), yadif, auto
+DEFAULT_DEINTERLACER="bwdif"  # bwdif (default - best for most content), nnedi (best for noisy/difficult sources), yadif
 DEFAULT_DETECT_CROP="true"
 DEFAULT_DETECT_PULLDOWN="auto"  # auto = SD only, true = force on, false = force off
 DEFAULT_SPLIT_CHAPTERS="auto"  # auto = series files >60min, true = force on, false = force off
@@ -275,7 +277,7 @@ OPTIONS:
   -n, --name NAME        Set title name (e.g., "Firefly" or "Dune")
   -s, --season NUM       Process only specific season (default: all seasons)
   -e, --episode NUM      Process only specific episode in series mode
-  -y, --year YEAR        Add year to movie title (e.g., 1984)
+  -y, --year YEAR        Add year to title (e.g., 1984 for movies, 1959 for series reboots)
 
   -q, --quality NUM      Video quality CQP/CRF value (default: ${DEFAULT_QUALITY})
 			 Lower = better quality, higher = smaller files
@@ -304,12 +306,11 @@ OPTIONS:
 			 frames untouched. Useful for content like film transfers with
 			 interlaced title cards or mixed-source compilations
   --force-deinterlace    Force deinterlacing even on content detected as progressive
-			 Useful for content misdetected as progressive
-  --deinterlacer FILTER  Set deinterlacing filter: bwdif, nnedi, yadif, auto (default: bwdif)
-			 bwdif = bob weaver deinterlacer (default - good for anime/clean content)
-			 nnedi = neural network deinterlacer (best for noisy/broadcast sources)
-			 yadif = yet another deinterlacer (fast, adaptive)
-			 auto = same as bwdif (maintained for compatibility)
+  --deinterlacer FILTER  Set deinterlacing filter: bwdif, nnedi, yadif (default: bwdif)
+			 bwdif = bob weaver deinterlacer (default - best for most content)
+			 nnedi = neural network deinterlacer (best for difficult sources
+				 with heavy noise or artifacts that standard filters struggle with)
+			 yadif = yet another deinterlacer (fast, widely compatible)
   --no-pulldown          Disable 3:2 pulldown detection (inverse telecine)
   --force-ivtc           Force inverse telecine detection even on HD content
 			 (by default, only runs on SD content ≤576p)
@@ -512,6 +513,9 @@ EXAMPLES:
 
   # Transcode a movie with year
   transcode-monster.sh -t movie -n "Dune" -y 1984 "/path/to/rips/dune"
+
+  # Transcode a series with year (for reboots/disambiguation)
+  transcode-monster.sh -n "The Twilight Zone" -y 1959 "/path/to/rips/twilight/"
 
   # Override season detection to only process a particular season
   transcode-monster.sh -s 2 "/path/to/rips/disc1" "/path/to/tv/House"
@@ -763,8 +767,7 @@ apply_deinterlacer() {
 			echo "    Using yadif deinterlacer" >&2
 			;;
 		auto|*)
-			# Default to bwdif (better for anime/clean content)
-			# User can explicitly choose nnedi for noisy sources
+			# Use default deinterlacer (bwdif)
 			filter="bwdif=mode=1:parity=$parity"
 			echo "    Using bwdif deinterlacer (default)" >&2
 			;;
@@ -2511,8 +2514,8 @@ if [[ "$CONTENT_TYPE" == "series" ]]; then
 	fi
 fi
 
-# Add year to movie name if specified
-if [[ "$CONTENT_TYPE" == "movie" && -n "$YEAR" ]]; then
+# Add year to content name if specified (works for both movies and series)
+if [[ -n "$YEAR" ]]; then
 	CONTENT_NAME="$CONTENT_NAME ($YEAR)"
 fi
 
