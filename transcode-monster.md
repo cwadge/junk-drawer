@@ -2,6 +2,14 @@
 
 A universal video transcoding script with intelligent automatic detection for series and movies. Designed for archiving DVD and Blu-ray collections with optimal quality and minimal manual intervention.
 
+## Design Goals
+- "Do the right thing" 90% of the time
+    * The majority of use cases, the user should be able to simply point the script at a directory containing source media
+- Simple workflow
+    * Transcoding entire multi-disc series so you can stream them on your home media devices shouldn't involve hand tailoring your encoder for each of 100+ files
+- High-quality results
+    * The default product should be compressed but otherwise archival-grade, with transparent video, pass-through of primary audio for use with home theater / audio receivers, and transparent secondary & tertiary audio tracks
+
 ## Features
 
 - **Automatic detection**: Series vs movies, interlacing, telecine (3:2 pulldown), crop borders
@@ -11,6 +19,12 @@ A universal video transcoding script with intelligent automatic detection for se
 - **Multi-episode files**: Automatically splits by chapters for disc rips with multiple episodes
 - **Audio/subtitle management**: Language filtering, format conversion, disposition handling
 - **Configurable**: Config file + CLI arguments for full control
+
+## Dependencies
+- `bash` - The script is written in bash for simplicity, and we use its built-in error handling
+- `bc` - For doing advanced things like automatically calculating whether or not a series is broken up by chapter or by file
+- `ffmpeg` - The latest version available to you, e.g. with a rolling distro like `arch` or utilizing the [deb-multimedia](https://www.deb-multimedia.org/) repository for Debian.
+- `VA-API`_(optional)_ -  Use your GPU to give you a massive encoding speedup (usually available through packages like `mesa-va-drivers` or `va-driver-all`)
 
 ## Quick Start
 
@@ -569,8 +583,9 @@ transcode-monster.sh -e 1 -d "/mnt/rips/New Show/" "/tmp/preview/"
 7. **Use config file** for persistent preferences
 8. **Check output quality** on first few episodes before batch processing
 
-## Requirements
+## Detailed Requirements
 
+- **bash** for advanced error handling
 - **ffmpeg** with libx265, libfdk_aac
 - **ffprobe** (included with ffmpeg)
 - **bc** (for calculations)
