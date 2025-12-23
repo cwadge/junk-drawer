@@ -28,6 +28,7 @@ wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.s
 You could also download & install with a one-liner:
 ```bash
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.sh -O /usr/local/sbin/set-rdna-oc-fan.sh && sudo chmod 755 /usr/local/sbin/set-rdna-oc-fan.sh
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/disc-squasher.sh -O /usr/local/bin/disc-squasher.sh && sudo chmod 755 /usr/local/bin/disc-squasher.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/psp-shrink-ray.sh -O /usr/local/bin/psp-shrink-ray.sh && sudo chmod 755 /usr/local/bin/psp-shrink-ray.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/midi2wav.sh -O /usr/local/bin/midi2wav.sh && sudo chmod 755 /usr/local/bin/midi2wav.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/sonicsqueezer.sh -O /usr/local/bin/sonicsqueezer.sh && sudo chmod 755 /usr/local/bin/sonicsqueezer.sh
