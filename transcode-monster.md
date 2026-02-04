@@ -13,9 +13,11 @@ A universal video transcoding script with intelligent automatic detection for se
 ## Features
 
 - **Automatic detection**: Series vs movies, interlacing, telecine (3:2 pulldown), crop borders
+- **HDR support**: Detects and preserves HDR10, HLG, and BT.2020 content automatically
+- **Bulk movie processing**: Process multiple movies in one directory without manual intervention
 - **Hybrid encoding**: Intelligently chooses hardware (VAAPI) or software (x265) encoding
 - **Smart deinterlacing**: Automatically detects and removes interlacing with multiple filter options
-- **Color space handling**: Preserves proper color matrices (BT.601 for SD, BT.709 for HD)
+- **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD)
 - **Multi-episode files**: Automatically splits by chapters for disc rips with multiple episodes
 - **Audio/subtitle management**: Language filtering, format conversion, disposition handling
 - **Configurable**: Config file + CLI arguments for full control
@@ -40,6 +42,16 @@ Transcode a movie:
 transcode-monster.sh -t movie -n "Dune" -y 1984 "/path/to/rips/dune/" "/path/to/output/"
 ```
 
+Process multiple movies:
+```bash
+transcode-monster.sh --bulk-movies "/path/to/movies/rips/" "/path/to/output/"
+```
+
+Overwrite existing files:
+```bash
+transcode-monster.sh -o "/path/to/source/" "/path/to/output/"
+```
+
 ### Installation
 
 ```bash
@@ -59,6 +71,9 @@ Create `~/.config/transcode-monster.conf` for persistent settings:
 # Video quality (CRF/CQP value - lower = better quality)
 QUALITY="20.6"
 
+# Force hardware encoding, manually downgrade to software if needed
+VIDEO_CODEC="hevc_vaapi"
+
 # Deinterlacer preference (bwdif, nnedi, yadif)
 DEINTERLACER="bwdif"
 
@@ -70,6 +85,31 @@ UPGRADE_8BIT_TO_10BIT="true"
 ```
 
 ## Common Use Cases
+
+### UHD / HDR Content
+
+HDR content is automatically detected and preserved:
+
+```bash
+# HDR10, HLG, and BT.2020 are automatically detected
+transcode-monster.sh "/path/to/UHD/Ghost in the Shell/" "/output/"
+
+# Force HDR preservation if needed
+transcode-monster.sh --colorspace hdr "/path/to/source/" "/output/"
+```
+
+### Bulk Movie Processing
+
+Process multiple movies in one directory:
+
+```bash
+# Process all movies in a directory
+transcode-monster.sh --bulk-movies "/path/to/movies/rips/" "/output/"
+
+# Example: Star Wars collection
+transcode-monster.sh --bulk-movies "/path/to/Star Wars/Laserdisc/" "/output/Movies/"
+# Outputs: Star Wars Episode 1 - The Phantom Menace.mkv, etc.
+```
 
 ### Anime / Foreign Content
 
@@ -169,7 +209,7 @@ transcode-monster.sh --no-crop "/path/to/source/"
 - Best for noisy broadcast sources
 - Heavily compressed video with artifacts
 - Sources where bwdif leaves residual combing
-- Slower, but handles difficult content better
+- May be slower, but handles difficult content better
 
 **yadif**:
 - Fast, widely compatible
@@ -377,7 +417,7 @@ transcode-monster.sh -s 1 -e 3 "/path/to/source/" "/output/"
 Control B-frame count (0-4+):
 
 ```bash
-# Maximum compatibility (older AMD GPUs, Raspberry Pi)
+# Maximum compatibility (older AMD GPUs, older Raspberry Pi models, etc.)
 transcode-monster.sh -b 0 "/path/to/source/"
 
 # Best compression
@@ -402,6 +442,9 @@ transcode-monster.sh --tune animation "/path/to/source/"
 Override automatic color space detection:
 
 ```bash
+# Preserve HDR metadata (HDR10, HLG, BT.2020)
+transcode-monster.sh --colorspace hdr "/path/to/uhd/"
+
 # Force BT.709 (HD)
 transcode-monster.sh --colorspace bt709 "/path/to/source/"
 
@@ -411,6 +454,8 @@ transcode-monster.sh --colorspace bt601 "/path/to/source/"
 # Disable conversion (use source as-is)
 transcode-monster.sh --colorspace none "/path/to/source/"
 ```
+
+**Note**: HDR content is automatically detected and preserved - manual override is rarely needed.
 
 ## Troubleshooting
 
@@ -502,7 +547,8 @@ SPLIT_CHAPTERS="auto"          # auto, true, false
 # Output
 OUTPUT_DIR="${HOME}/Videos"
 OVERWRITE="false"
-COLORSPACE="auto"              # auto, bt709, bt601, none
+COLORSPACE="auto"              # auto, bt709, bt601, hdr, none
+BULK_MOVIES="false"            # Process all movies in directory
 
 # Process priority
 USE_NICE="true"
@@ -520,12 +566,23 @@ IONICE_LEVEL="4"
 transcode-monster.sh "/mnt/rips/Firefly/" "/mnt/media/TV/Firefly/"
 ```
 
+### UHD / HDR Movie
+
+```bash
+transcode-monster.sh -t movie "/mnt/rips/Ghost in the Shell/" "/mnt/media/Movies/"
+# HDR10/HLG automatically detected and preserved
+```
+
+### Bulk Movie Processing
+
+```bash
+transcode-monster.sh --bulk-movies "/mnt/rips/Star Wars/Laserdisc/" "/mnt/media/Movies/"
+# Processes all 6 Star Wars movies automatically
+```
+
 ### Series with Year (for Reboots/Disambiguation)
 
 ```bash
-transcode-monster.sh -n "Mystery Science Theater 3000" -y 1988 "/mnt/rips/MST3K/" "/mnt/media/TV/"
-# Output: Mystery Science Theater 3000 (1988) - S01E01.mkv
-
 transcode-monster.sh -n "The Twilight Zone" -y 1959 "/mnt/rips/TZ/" "/mnt/media/TV/"
 # Output: The Twilight Zone (1959) - S01E01.mkv
 ```
@@ -548,16 +605,10 @@ transcode-monster.sh --deinterlacer nnedi "/mnt/rips/The Maxx/" "/mnt/media/TV/"
 transcode-monster.sh -t movie -n "Blade Runner" -y 1982 -q 18 "/mnt/rips/blade_runner/" "/mnt/media/Movies/"
 ```
 
-### Multi-Season Series (Process Season 2 Only)
+### Process Specific Season
 
 ```bash
 transcode-monster.sh -s 2 "/mnt/rips/Breaking Bad/" "/mnt/media/TV/Breaking Bad/"
-```
-
-### Mixed Progressive/Interlaced Film
-
-```bash
-transcode-monster.sh --adaptive-deinterlace -t movie -n "The Matrix" "/mnt/rips/matrix/" "/mnt/media/Movies/"
 ```
 
 ### High Quality Archival
@@ -566,7 +617,7 @@ transcode-monster.sh --adaptive-deinterlace -t movie -n "The Matrix" "/mnt/rips/
 transcode-monster.sh -q 18 --codec libx265 --tune grain "/mnt/rips/Lawrence of Arabia/" "/mnt/archive/"
 ```
 
-### Quick Preview
+### Quick Preview (Dry Run)
 
 ```bash
 transcode-monster.sh -e 1 -d "/mnt/rips/New Show/" "/tmp/preview/"

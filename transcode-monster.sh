@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.14.2"
+SCRIPT_VERSION="1.15.0"
 
 # ============================================================================
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -68,7 +68,8 @@ DEFAULT_IONICE_LEVEL="4"  # 0-7, higher = lower priority
 DEFAULT_OVERWRITE="false"  # Overwrite existing output files
 DEFAULT_UPGRADE_8BIT_TO_10BIT="true"  # Upgrade 8-bit sources to 10-bit for better quality/compression
 DEFAULT_DOWNGRADE_12BIT_TO_10BIT="false"  # Downgrade 12-bit sources to 10-bit for compatibility/speed
-DEFAULT_COLORSPACE="auto"  # Color space: auto, bt709, bt601, or none (disable conversion)
+DEFAULT_COLORSPACE="auto"  # Color space: auto, bt709, bt601, hdr, or none (disable conversion)
+DEFAULT_BULK_MOVIES="false"  # Process multiple movies in a directory instead of selecting longest
 
 # Audio encoding settings
 DEFAULT_AUDIO_COPY_FIRST="true"  # Copy first audio track
@@ -215,6 +216,7 @@ fi
 UPGRADE_8BIT_TO_10BIT="${UPGRADE_8BIT_TO_10BIT:-$DEFAULT_UPGRADE_8BIT_TO_10BIT}"
 DOWNGRADE_12BIT_TO_10BIT="${DOWNGRADE_12BIT_TO_10BIT:-$DEFAULT_DOWNGRADE_12BIT_TO_10BIT}"
 COLORSPACE="${COLORSPACE:-$DEFAULT_COLORSPACE}"
+BULK_MOVIES="${BULK_MOVIES:-$DEFAULT_BULK_MOVIES}"
 
 AUDIO_COPY_FIRST="${AUDIO_COPY_FIRST:-$DEFAULT_AUDIO_COPY_FIRST}"
 AUDIO_CODEC="${AUDIO_CODEC:-$DEFAULT_AUDIO_CODEC}"
@@ -333,7 +335,7 @@ OPTIONS:
 			 Level 4 (default) provides excellent balance - 5x faster than software
 			 Safely ignored on AMD/older Intel GPUs (no error)
 
-  --overwrite            Overwrite existing output files
+  -o, --overwrite        Overwrite existing output files
 
   Bit Depth Options (default: upgrade 8-bit to 10-bit, preserve 10/12-bit):
   --upgrade-8bit         Upgrade 8-bit sources to 10-bit (enabled by default)
@@ -352,12 +354,16 @@ OPTIONS:
 			 - Better device compatibility (few players support 12-bit)
 			 - Minimal visible quality difference on consumer displays
 
-  --colorspace SPACE     Override color space conversion: auto, bt709, bt601, none
+  --colorspace SPACE     Override color space conversion: auto, bt709, bt601, hdr, none
 			 auto = automatic based on source metadata (default)
 			 bt709 = force conversion to BT.709 (HD standard)
 			 bt601 = force conversion to BT.601 (SD standard)
+			 hdr = preserve HDR metadata (HDR10, HLG, BT.2020)
 			 none = disable conversion (use source color space as-is)
-			 Use when source has incorrect color space metadata
+			 Auto mode detects and preserves HDR content automatically
+  --bulk-movies          Process all video files in directory as separate movies
+			 By default, movie mode selects the longest file
+			 Use this to transcode multiple movies in one directory
 
   -d, --dry-run          Show what would be processed without encoding
 
@@ -403,6 +409,7 @@ ENCODER:
   via config file or command line depending on whether you prioritize speed or file size.
 
   Intelligent Color Space Conversion:
+  - Detects and preserves HDR content (HDR10, HLG, BT.2020) automatically
   - Automatically converts legacy color spaces (BT.470BG, SMPTE170M) to modern
     standards when using hardware encoding
   - Preserves 10-bit color depth during conversion
@@ -537,6 +544,12 @@ EXAMPLES:
 
   # Default language override: Spanish audio for native speakers
   transcode-monster.sh --language spa "/path/to/series/La Casa de Papel/"
+
+  # Process multiple movies in a directory (bulk mode)
+  transcode-monster.sh --bulk-movies "/path/to/movies/rips/" "/path/to/output/"
+
+  # UHD/HDR content (automatically detected and preserved)
+  transcode-monster.sh "/path/to/uhd/Ghost in the Shell/" "/path/to/movies/"
 
 EOF
 }
@@ -1024,7 +1037,10 @@ build_vf() {
 
 	# Check if color space conversion is needed
 	local colorspace_conversion=$(get_colorspace_conversion "$input" "$height")
-	if [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
+	if [[ "$colorspace_conversion" == "hdr" ]]; then
+		# HDR content detected - preserve metadata without conversion
+		echo "    HDR content detected - preserving color space metadata" >&2
+	elif [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
 		# Check if source has unknown/untagged color metadata
 		local source_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d ',' | xargs)
 
@@ -1132,7 +1148,10 @@ else
 	# Comprehensive color space handling for software encoding
 	local colorspace_conversion=$(get_colorspace_conversion "$input" "$height")
 
-	if [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
+	if [[ "$colorspace_conversion" == "hdr" ]]; then
+		# HDR content detected - preserve metadata without conversion
+		echo "    HDR content detected - preserving color space metadata" >&2
+	elif [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
 		# Add colorspace filter
 		local cs_filter=""
 		if [[ "$colorspace_conversion" == "bt709" ]]; then
@@ -1326,8 +1345,8 @@ get_colorspace_conversion() {
 				echo "$COLORSPACE"
 				return
 				;;
-			none)
-				# User explicitly disabled conversion
+			hdr|none)
+				# User explicitly disabled conversion or wants HDR preserved
 				echo "none"
 				return
 				;;
@@ -1342,6 +1361,19 @@ get_colorspace_conversion() {
 	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
 	local color_transfer=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_transfer -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
 	local color_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
+
+	# Detect HDR content and preserve it
+	# HDR10: smpte2084 (PQ), HDR10+: same as HDR10, HLG: arib-std-b67
+	if [[ "$color_transfer" =~ ^(smpte2084|arib-std-b67)$ ]]; then
+		echo "hdr"
+		return
+	fi
+
+	# BT.2020 color space typically indicates HDR or wide color gamut content
+	if [[ "$color_space" == "bt2020nc" || "$color_primaries" == "bt2020" ]]; then
+		echo "hdr"
+		return
+	fi
 
 	# If ANY color metadata is completely unknown or missing, it's unsafe to convert
 	if [[ "$color_space" =~ ^(unknown|)$ ]] || [[ "$color_transfer" =~ ^(unknown|)$ ]] || [[ "$color_primaries" =~ ^(unknown|)$ ]]; then
@@ -2347,7 +2379,7 @@ while [[ $# -gt 0 ]]; do
 			VAAPI_COMPRESSION_LEVEL="$2"
 			shift 2
 			;;
-		--overwrite)
+		-o|--overwrite)
 			OVERWRITE="true"
 			shift
 			;;
@@ -2370,6 +2402,10 @@ while [[ $# -gt 0 ]]; do
 		--colorspace)
 			COLORSPACE="$2"
 			shift 2
+			;;
+		--bulk-movies)
+			BULK_MOVIES="true"
+			shift
 			;;
 		-d|--dry-run)
 			DRY_RUN=true
@@ -2464,7 +2500,10 @@ fi
 
 # Auto-detect if not specified
 if [[ -z "$CONTENT_TYPE" ]]; then
-	if [[ "$FILE_MODE" == true ]]; then
+	if [[ "$BULK_MOVIES" == "true" ]]; then
+		# Bulk movies mode always processes as movies
+		CONTENT_TYPE="movie"
+	elif [[ "$FILE_MODE" == true ]]; then
 		# File mode: detect based on number of files
 		if [[ ${#SOURCE_FILES[@]} -eq 1 ]]; then
 			CONTENT_TYPE="movie"
@@ -2478,8 +2517,13 @@ if [[ -z "$CONTENT_TYPE" ]]; then
 	echo -e "${CYAN}Auto-detected content type: $CONTENT_TYPE${RESET}"
 fi
 
-if [[ "$CONTENT_TYPE" == "movie" && ${#SOURCE_FILES[@]} -gt 1 ]]; then
-	echo -e "${RED}Error: Multiple files specified for movie mode. Movie mode supports only a single file or directory.${RESET}"
+if [[ "$BULK_MOVIES" == "true" && "$CONTENT_TYPE" == "series" ]]; then
+	echo -e "${RED}Error: --bulk-movies flag conflicts with series type. Did you mean to use -t movie?${RESET}"
+	exit 1
+fi
+
+if [[ "$CONTENT_TYPE" == "movie" && ${#SOURCE_FILES[@]} -gt 1 && "$BULK_MOVIES" != "true" ]]; then
+	echo -e "${RED}Error: Multiple files specified for movie mode. Use --bulk-movies flag or specify a single file/directory.${RESET}"
 	exit 1
 fi
 
@@ -2541,6 +2585,7 @@ echo -e "${BOLD}Type:${RESET}         $CONTENT_TYPE"
 echo -e "${BOLD}Name:${RESET}         $CONTENT_NAME"
 [[ "$CONTENT_TYPE" == "series" ]] && echo -e "${BOLD}Seasons:${RESET}      ${SEASONS_TO_PROCESS[*]}"
 [[ "$CONTENT_TYPE" == "series" && -n "$EPISODE_NUM" ]] && echo -e "${BOLD}Episode:${RESET}      $EPISODE_NUM"
+[[ "$CONTENT_TYPE" == "movie" && "$BULK_MOVIES" == "true" ]] && echo -e "${BOLD}Bulk Mode:${RESET}    enabled"
 echo -e "${BOLD}Quality:${RESET}      $QUALITY (CQP)"
 echo -e "${BOLD}Codec:${RESET}        $VIDEO_CODEC"
 echo -e "${BOLD}Crop:${RESET}         $DETECT_CROP"
@@ -2561,125 +2606,149 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	# MOVIE MODE
 	# ========================================
 
-	CURRENT_OPERATION="Finding movie file"
+	CURRENT_OPERATION="Finding movie file(s)"
 
-    # Find the file to process
-    video_file=""
-    if [[ "$FILE_MODE" == true ]]; then
-	    # Use the specified file
-	    video_file="${SOURCE_FILES[0]}"
-    else
-	    # Directory mode: find the video file with the longest duration
-	    video_files=()
-	    find_video_files "$SOURCE_DIR" video_files
+	# Determine which files to process
+	movies_to_process=()
+	if [[ "$FILE_MODE" == true ]]; then
+		# Use the specified file
+		movies_to_process+=("${SOURCE_FILES[0]}")
+	elif [[ "$BULK_MOVIES" == "true" ]]; then
+		# Bulk mode: process all video files in directory
+		find_video_files "$SOURCE_DIR" movies_to_process
 
-	    if [[ ${#video_files[@]} -eq 0 ]]; then
-		    echo -e "${RED}Error: No video files found in directory${RESET}"
-		    echo -e "${RED}Supported formats: $INPUT_VIDEO_EXTENSIONS${RESET}"
-		    exit 1
-	    fi
+		if [[ ${#movies_to_process[@]} -eq 0 ]]; then
+			echo -e "${RED}Error: No video files found in directory${RESET}"
+			echo -e "${RED}Supported formats: $INPUT_VIDEO_EXTENSIONS${RESET}"
+			exit 1
+		fi
 
-	    max_duration=0
-	    max_file=""
-	    for file in "${video_files[@]}"; do
-		    duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null)
-		    duration=${duration//,/}
-		    if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$duration > $max_duration" | bc -l) )); then
-			    max_duration="$duration"
-			    max_file="$file"
-		    fi
-	    done
+		echo -e "${CYAN}Found ${#movies_to_process[@]} movie(s) to process${RESET}"
+	else
+		# Standard mode: find the video file with the longest duration
+		video_files=()
+		find_video_files "$SOURCE_DIR" video_files
 
-	    if [[ -z "$max_file" ]]; then
-		    echo -e "${RED}Error: Could not determine longest video file${RESET}"
-		    exit 1
-	    fi
+		if [[ ${#video_files[@]} -eq 0 ]]; then
+			echo -e "${RED}Error: No video files found in directory${RESET}"
+			echo -e "${RED}Supported formats: $INPUT_VIDEO_EXTENSIONS${RESET}"
+			exit 1
+		fi
 
-	    video_file="$max_file"
-	    echo -e "${CYAN}Selected longest file: $(basename "$video_file") (duration: $max_duration seconds)${RESET}"
-    fi
+		max_duration=0
+		max_file=""
+		for file in "${video_files[@]}"; do
+			duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null)
+			duration=${duration//,/}
+			if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$duration > $max_duration" | bc -l) )); then
+				max_duration="$duration"
+				max_file="$file"
+			fi
+		done
 
-    if [[ -z "$video_file" ]]; then
-	    echo -e "${RED}Error: No video files found${RESET}"
-	    exit 1
-    fi
+		if [[ -z "$max_file" ]]; then
+			echo -e "${RED}Error: Could not determine longest video file${RESET}"
+			exit 1
+		fi
 
-    CURRENT_FILE="$video_file"
-    CURRENT_OPERATION="Preparing output"
+		movies_to_process+=("$max_file")
+		echo -e "${CYAN}Selected longest file: $(basename "$max_file") (duration: $max_duration seconds)${RESET}"
+	fi
 
-    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME}.mkv"
+	if [[ ${#movies_to_process[@]} -eq 0 ]]; then
+		echo -e "${RED}Error: No video files found${RESET}"
+		exit 1
+	fi
 
-    if [[ -f "$output_file" && "$OVERWRITE" != "true" ]]; then
-	    echo -e "${YELLOW}Output file already exists: $output_file${RESET}"
-	    echo "Use --overwrite to replace existing files"
-	    exit 0
-    fi
+	# Process each movie
+	for video_file in "${movies_to_process[@]}"; do
+		CURRENT_FILE="$video_file"
+		CURRENT_OPERATION="Preparing output"
 
-    echo -e "${BOLD}Processing:${RESET} $video_file"
-    echo -e "${BOLD}Output:${RESET} $output_file"
+		# Extract movie name from file if in bulk mode
+		movie_name="$CONTENT_NAME"
+		if [[ "$BULK_MOVIES" == "true" ]]; then
+			movie_name=$(extract_name "$video_file" "movie")
+		fi
 
-    # Build the ffmpeg command
-    ffmpeg_cmd=$(build_ffmpeg_command "$video_file" "$output_file")
+		output_file="${OUTPUT_DIR%/}/${movie_name}.mkv"
 
-    if [[ "$DRY_RUN" == true ]]; then
-	    echo -e "${YELLOW}[DRY RUN] Would transcode to: $output_file${RESET}"
-	    echo ""
-	    echo -e "${CYAN}Command that would be executed:${RESET}"
-	    echo ""
-	    echo "$ffmpeg_cmd"
-	    echo ""
-	    exit 0
-    fi
+		if [[ -f "$output_file" && "$OVERWRITE" != "true" ]]; then
+			echo -e "${YELLOW}Output file already exists: $output_file${RESET}"
+			echo "Skipping: $(basename "$video_file")"
+			echo ""
+			continue
+		fi
 
-    CURRENT_OPERATION="Detecting video properties"
+		echo -e "${BOLD}Processing:${RESET} $video_file"
+		echo -e "${BOLD}Output:${RESET} $output_file"
 
-    # Detect bit depth and height for informational output
-    bit_depth=$(detect_bit_depth "$video_file")
-    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file")
-    height=${height//,/}
+		# Build the ffmpeg command
+		ffmpeg_cmd=$(build_ffmpeg_command "$video_file" "$output_file")
 
-    # Adjust bit depth based on user preferences
-    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
-	    bit_depth="10"
-    fi
-    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
-	    bit_depth="10"
-    fi
+		if [[ "$DRY_RUN" == true ]]; then
+			echo -e "${YELLOW}[DRY RUN] Would transcode to: $output_file${RESET}"
+			echo ""
+			echo -e "${CYAN}Command that would be executed:${RESET}"
+			echo ""
+			echo "$ffmpeg_cmd"
+			echo ""
+			continue
+		fi
 
-    # Determine encoder for informational output
-    actual_codec=""
-    if [[ "$VIDEO_CODEC" == "auto" ]]; then
-	    actual_codec=$(should_use_software_encoder "$video_file")
-	    if [[ "$actual_codec" == "libx265" ]]; then
-		    echo "Using libx265 (software) - content characteristics require software encoding"
-	    else
-		    echo "Using hevc_vaapi (hardware) - fast encoding with good quality"
-	    fi
-    else
-	    actual_codec="$VIDEO_CODEC"
-	    echo "Using $actual_codec (manual override)"
-    fi
+		CURRENT_OPERATION="Detecting video properties"
 
-    # Determine profile based on bit depth
-    if [[ "$bit_depth" == "12" ]]; then
-	    detected_profile="main12"
-    elif [[ "$bit_depth" == "10" ]]; then
-	    detected_profile="main10"
-    else
-	    detected_profile="main"
-    fi
+		# Detect bit depth and height for informational output
+		bit_depth=$(detect_bit_depth "$video_file")
+		height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file")
+		height=${height//,/}
 
-    echo -e "${CYAN}Bit depth: ${bit_depth}-bit, Height: ${height}p, Profile: $detected_profile${RESET}"
+		# Adjust bit depth based on user preferences
+		if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
+			bit_depth="10"
+		fi
+		if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
+			bit_depth="10"
+		fi
 
-    CURRENT_OPERATION="Encoding"
+		# Determine encoder for informational output
+		actual_codec=""
+		if [[ "$VIDEO_CODEC" == "auto" ]]; then
+			actual_codec=$(should_use_software_encoder "$video_file")
+			if [[ "$actual_codec" == "libx265" ]]; then
+				echo "Using libx265 (software) - content characteristics require software encoding"
+			else
+				echo "Using hevc_vaapi (hardware) - fast encoding with good quality"
+			fi
+		else
+			actual_codec="$VIDEO_CODEC"
+			echo "Using $actual_codec (manual override)"
+		fi
 
-    # Execute the ffmpeg command
-    eval $ffmpeg_cmd
+		# Determine profile based on bit depth
+		if [[ "$bit_depth" == "12" ]]; then
+			detected_profile="main12"
+		elif [[ "$bit_depth" == "10" ]]; then
+			detected_profile="main10"
+		else
+			detected_profile="main"
+		fi
 
-    CURRENT_OPERATION=""
-    CURRENT_FILE=""
+		echo -e "${CYAN}Bit depth: ${bit_depth}-bit, Height: ${height}p, Profile: $detected_profile${RESET}"
 
-    echo -e "${BOLDGREEN}Complete: $output_file${RESET}"
+		CURRENT_OPERATION="Encoding"
+
+		# Execute the ffmpeg command
+		eval $ffmpeg_cmd
+
+		CURRENT_OPERATION=""
+		CURRENT_FILE=""
+
+		echo -e "${BOLDGREEN}Complete: $output_file${RESET}"
+		echo ""
+	done
+
+	[[ "$DRY_RUN" == true ]] && exit 0
 
 else
 	# ========================================
