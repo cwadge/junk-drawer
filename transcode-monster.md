@@ -71,9 +71,6 @@ Create `~/.config/transcode-monster.conf` for persistent settings:
 # Video quality (CRF/CQP value - lower = better quality)
 QUALITY="20.6"
 
-# Force hardware encoding, manually downgrade to software if needed
-VIDEO_CODEC="hevc_vaapi"
-
 # Deinterlacer preference (bwdif, nnedi, yadif)
 DEINTERLACER="bwdif"
 
@@ -97,6 +94,16 @@ transcode-monster.sh "/path/to/UHD/Ghost in the Shell/" "/output/"
 # Force HDR preservation if needed
 transcode-monster.sh --colorspace hdr "/path/to/source/" "/output/"
 ```
+
+**Important: Dolby Vision Limitation**
+
+Dolby Vision **cannot be preserved** during transcoding. When re-encoding DV content:
+- The script will warn you that DV will be stripped
+- Only the HDR10 base layer is preserved
+- Colors may appear washed out compared to the original
+- **Recommendation**: Keep original files for DV playback on compatible devices
+
+If you have Dolby Vision-capable playback (Apple TV 4K, LG OLED, etc.), consider keeping the original file rather than transcoding.
 
 ### Bulk Movie Processing
 
@@ -209,7 +216,7 @@ transcode-monster.sh --no-crop "/path/to/source/"
 - Best for noisy broadcast sources
 - Heavily compressed video with artifacts
 - Sources where bwdif leaves residual combing
-- May be slower, but handles difficult content better
+- Slower, but handles difficult content better
 
 **yadif**:
 - Fast, widely compatible
@@ -417,7 +424,7 @@ transcode-monster.sh -s 1 -e 3 "/path/to/source/" "/output/"
 Control B-frame count (0-4+):
 
 ```bash
-# Maximum compatibility (older AMD GPUs, older Raspberry Pi models, etc.)
+# Maximum compatibility (older AMD GPUs, Raspberry Pi)
 transcode-monster.sh -b 0 "/path/to/source/"
 
 # Best compression
@@ -493,6 +500,21 @@ Force software encoding:
 ```bash
 transcode-monster.sh --codec libx265 "/path/to/source/"
 ```
+
+### Washed Out Colors on UHD/HDR Content
+
+This typically indicates Dolby Vision content being transcoded:
+
+**Problem**: Dolby Vision uses enhancement layers and metadata that cannot be preserved during re-encoding. Only the HDR10 base layer remains, which may look washed out.
+
+**Detection**: The script will warn "Dolby Vision detected - will be stripped during transcoding"
+
+**Solutions**:
+1. **Keep the original** - Best option if you have DV-capable playback
+2. **Accept the HDR10 output** - Still HDR, but not as vibrant as DV
+3. **Use specialized tools** - Advanced users can use `dovi_tool` to extract/inject RPU metadata (complex)
+
+**Note**: Neither VAAPI nor x265 can preserve Dolby Vision during transcoding. This is a limitation of the encoding process, not the script.
 
 ### Episode Numbering Issues
 

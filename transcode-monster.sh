@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.15.0"
+SCRIPT_VERSION="1.15.1"
 
 # ============================================================================
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -410,6 +410,7 @@ ENCODER:
 
   Intelligent Color Space Conversion:
   - Detects and preserves HDR content (HDR10, HLG, BT.2020) automatically
+  - Warns when Dolby Vision is detected (DV cannot be preserved during transcoding)
   - Automatically converts legacy color spaces (BT.470BG, SMPTE170M) to modern
     standards when using hardware encoding
   - Preserves 10-bit color depth during conversion
@@ -418,6 +419,10 @@ ENCODER:
   - Only converts when source color space is known (safe conversion)
   - Falls back to software for unknown/missing color metadata (unsafe)
   - Significantly increases hardware encoding compatibility with legacy media
+
+  Note: Dolby Vision enhancement layers and metadata are stripped during any
+  re-encoding process. Only the HDR10 base layer is preserved. Consider keeping
+  original files if you have DV-capable playback devices.
 
   Auto-detection considers:
   - Pixel format compatibility (yuv420p vs yuv422p/yuv444p)
@@ -1046,8 +1051,8 @@ build_vf() {
 
 		if [[ "$source_primaries" =~ ^(unknown|)$ ]]; then
 			# Source has unknown primaries - can't convert, only tag output
-			echo "    WARNING: Source has unknown color primaries - cannot convert, will tag output only" >&2
-			echo "    Consider using --codec libx265 for better color handling" >&2
+			echo -e "${YELLOW}    WARNING: Source has unknown color primaries - cannot convert, will tag output only${RESET}" >&2
+			echo -e "${YELLOW}    Consider using --codec libx265 for better color handling${RESET}" >&2
 		else
 			# Add colorspace filter before format conversion
 			local cs_filter=""
@@ -1063,14 +1068,14 @@ build_vf() {
 		fi
 	elif [[ "$colorspace_conversion" == "unsafe" ]]; then
 		# Warn if using hardware encoding with unknown color metadata
-		echo "    WARNING: Unknown color space metadata - hardware encoding may produce artifacts" >&2
-		echo "    Consider using --codec libx265 or --colorspace to override" >&2
+		echo -e "${YELLOW}    WARNING: Unknown color space metadata - hardware encoding may produce artifacts${RESET}" >&2
+		echo -e "${YELLOW}    Consider using --codec libx265 or --colorspace to override${RESET}" >&2
 	elif [[ "$colorspace_conversion" == "none" ]]; then
 		# Check if source is SMPTE170M (which normally uses software encoding)
 		local source_colorspace=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d ',' | xargs)
 		if [[ "$source_colorspace" == "smpte170m" ]]; then
-			echo "    WARNING: SMPTE170M with hardware encoding may produce color artifacts" >&2
-			echo "    Auto mode would use software encoding - consider --codec libx265" >&2
+			echo -e "${YELLOW}    WARNING: SMPTE170M with hardware encoding may produce color artifacts${RESET}" >&2
+			echo -e "${YELLOW}    Auto mode would use software encoding - consider --codec libx265${RESET}" >&2
 		fi
 	fi
 
@@ -1361,6 +1366,14 @@ get_colorspace_conversion() {
 	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
 	local color_transfer=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_transfer -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
 	local color_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',' | xargs)
+
+	# Check for Dolby Vision - cannot be preserved during transcoding
+	local has_dolby_vision=$(ffprobe -v quiet -select_streams v:0 -show_entries stream_side_data=side_data_type -of csv=p=0 "$source_file" 2>/dev/null | grep -i "DOVI configuration record" || true)
+	if [[ -n "$has_dolby_vision" ]]; then
+		echo -e "${YELLOW}    WARNING: Dolby Vision detected - will be stripped during transcoding${RESET}" >&2
+		echo -e "${YELLOW}    Only HDR10 base layer will be preserved (colors may appear washed out)${RESET}" >&2
+		echo -e "${YELLOW}    Consider keeping the original file for Dolby Vision playback${RESET}" >&2
+	fi
 
 	# Detect HDR content and preserve it
 	# HDR10: smpte2084 (PQ), HDR10+: same as HDR10, HLG: arib-std-b67

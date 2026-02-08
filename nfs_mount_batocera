@@ -11,7 +11,7 @@
 NFS_SERVER="" # Server hostname or IP
 NFS_MOUNTS="" # Mount point(s) for NFS export(s), space separated
 NFS_TARGET="/mnt/nfs" # The directory where we mount each export
-NFS_OPTIONS="vers=4,ro,timeo=10,rsize=1048576,wsize=1048576,async,proto=tcp,intr,noatime,nodev,nosuid"
+NFS_OPTIONS="vers=4,ro,timeo=10,rsize=1048576,wsize=1048576,async,proto=tcp,soft,timeo=10,retrans=3,noatime,nodev,nosuid"
 LOGFILE="/var/log/nfs_mount.log" # By default, /var is mounted on tmpfs
 PING_ATTEMPTS=120  # ~10 minutes with 5s sleep for server ping
 MOUNT_RETRIES=5    # Number of times we should try to mount each export
