@@ -2,6 +2,7 @@
 
 # A Batocera service to set custom network interface parameters (e.g., MTU, speed) at startup.
 # Create as /userdata/system/services/network_tune
+# (Note the `_` underscore; `-` hyphens are not allowed)
 # Make it executable: chmod 755 /userdata/system/services/network_tune
 # Enable it: batocera-services enable network_tune
 # It will run automatically at boot

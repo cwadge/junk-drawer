@@ -2,6 +2,7 @@
 
 # NFS Mount Service Script for Batocera
 # Place in /userdata/system/services/nfs_mount
+# (Note the `_` underscore; `-` hyphens are not allowed)
 # Make executable: chmod 755 /userdata/system/services/nfs_mount
 # Enable it: batocera-services enable nfs_mount
 # Runs automatically at boot (start) and shutdown (stop)
