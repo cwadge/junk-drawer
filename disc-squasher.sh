@@ -23,6 +23,9 @@ total_space_saved=0
 # Arrays to track converted games for M3U generation
 declare -A game_discs
 
+# Track files referenced by .cue files to avoid duplicate processing
+declare -A cue_referenced_files
+
 # Command line options
 OVERWRITE=false
 
@@ -120,9 +123,13 @@ get_base_game_name() {
 	# Remove extension first
 	local base="${filename%.*}"
 
-	# Remove disc number patterns: {Disc N}, (Disc N), [Disc N], - Disc N, _Disc N
-	base=$(echo "$base" | sed -E 's/[[:space:]]*[\{\(\[]?[Dd]isc[[:space:]]+[0-9]+[\}\)\]]?[[:space:]]*$//')
-	base=$(echo "$base" | sed -E 's/[[:space:]]*[-_][[:space:]]*[Dd]isc[[:space:]]+[0-9]+[[:space:]]*$//')
+	# Remove disc number patterns in various formats with a single comprehensive pattern:
+	# - Bracketed: (Disc 1), [Disc 1], {Disc 1}
+	# - Separated: - Disc 1, _Disc 1, -Disc1, _Disc1
+	# - Compact: disc1, DISC1, disc 01
+	# The pattern matches: optional spaces, then either (separator+spaces) or (optional bracket),
+	# then "disc" (case insensitive), optional spaces, digits, optional closing bracket, optional trailing spaces
+	base=$(echo "$base" | sed -E 's/[[:space:]]*(([-_]+[[:space:]]*)|[][{(]?)[Dd][Ii][Ss][Cc][[:space:]]*[0-9]+[])}]?[[:space:]]*$//')
 
 	echo "$base"
 }
@@ -130,12 +137,35 @@ get_base_game_name() {
 # Function to extract disc number from filename
 get_disc_number() {
 	local filename="$1"
-	# Look for disc number patterns
-	if [[ "$filename" =~ [Dd]isc[[:space:]]+([0-9]+) ]]; then
+	# Look for disc number patterns - handle various formats
+	# Matches: disc 1, disc1, disc 01, DISC 1, etc.
+	if [[ "$filename" =~ [Dd][Ii][Ss][Cc][[:space:]]*([0-9]+) ]]; then
 		echo "${BASH_REMATCH[1]}"
 		return 0
 	fi
 	return 1
+}
+
+# Function to get all files referenced by a .cue file
+get_cue_referenced_files() {
+	local cue_file="$1"
+	local cue_dir=$(dirname "$cue_file")
+	local -a referenced_files=()
+
+	while IFS= read -r line; do
+		# Match FILE lines - handle both quoted and unquoted filenames
+		# Also match various file types: BINARY, MOTOROLA, AIFF, WAVE, MP3
+		if [[ "$line" =~ FILE[[:space:]]+\"([^\"]+)\" ]] || [[ "$line" =~ FILE[[:space:]]+([^[:space:]]+)[[:space:]] ]]; then
+			local ref_file="${BASH_REMATCH[1]}"
+			# Convert to absolute path relative to cue directory
+			local full_path="${cue_dir}/${ref_file}"
+			if [[ -f "$full_path" ]]; then
+				referenced_files+=("$full_path")
+			fi
+		fi
+	done < "$cue_file"
+
+	printf '%s\n' "${referenced_files[@]}"
 }
 
 # Function to convert a single disc image
@@ -161,22 +191,27 @@ convert_disc() {
 		rm "$chd_file"
 	fi
 
-	# Get original file size (for .cue, sum all associated .bin files)
+	# Get original file size (for .cue, sum all associated files)
 	local original_size=0
+	local -a files_to_delete=()
+
 	if [[ "$disc_file" =~ \.[Cc][Uu][Ee]$ ]]; then
-		# Parse .cue file to find all .bin files and sum their sizes
+		# Parse .cue file to find all referenced files and sum their sizes
+		files_to_delete+=("$disc_file")
 		local cue_dir=$(dirname "$disc_file")
 		while IFS= read -r line; do
-			if [[ "$line" =~ FILE[[:space:]]+\"([^\"]+)\"[[:space:]]+BINARY ]]; then
-				local bin_file="${cue_dir}/${BASH_REMATCH[1]}"
-				if [[ -f "$bin_file" ]]; then
-					local bin_size=$(get_file_size "$bin_file")
-					original_size=$((original_size + bin_size))
+			if [[ "$line" =~ FILE[[:space:]]+\"([^\"]+)\" ]] || [[ "$line" =~ FILE[[:space:]]+([^[:space:]]+)[[:space:]] ]]; then
+				local ref_file="${cue_dir}/${BASH_REMATCH[1]}"
+				if [[ -f "$ref_file" ]]; then
+					local file_size=$(get_file_size "$ref_file")
+					original_size=$((original_size + file_size))
+					files_to_delete+=("$ref_file")
 				fi
 			fi
 		done < "$disc_file"
 	else
 		original_size=$(get_file_size "$disc_file")
+		files_to_delete+=("$disc_file")
 	fi
 
 	# Start timing
@@ -212,23 +247,11 @@ convert_disc() {
 			fi
 
 			# Remove original file(s)
-			echo -e "${BLUE}Removing original file(s):${NC} $disc_file"
-			if [[ "$disc_file" =~ \.[Cc][Uu][Ee]$ ]]; then
-				# Remove the .cue file and all associated .bin files
-				local cue_dir=$(dirname "$disc_file")
-				while IFS= read -r line; do
-					if [[ "$line" =~ FILE[[:space:]]+\"([^\"]+)\"[[:space:]]+BINARY ]]; then
-						local bin_file="${cue_dir}/${BASH_REMATCH[1]}"
-						if [[ -f "$bin_file" ]]; then
-							rm "$bin_file"
-							echo -e "${BLUE}  Removed:${NC} $(basename "$bin_file")"
-						fi
-					fi
-				done < "$disc_file"
-				rm "$disc_file"
-			else
-				rm "$disc_file"
-			fi
+			echo -e "${BLUE}Removing original file(s):${NC}"
+			for file in "${files_to_delete[@]}"; do
+				rm "$file"
+				echo -e "${BLUE}  Removed:${NC} $(basename "$file")"
+			done
 			echo -e "${GREEN}✓ Original file(s) deleted${NC}"
 			((converted_files++))
 			return 0
@@ -295,13 +318,44 @@ if [[ "$OVERWRITE" == true ]]; then
 fi
 echo ""
 
-# Find all .cue and .iso files (case-insensitive)
-# We deliberately exclude .bin files to avoid double-processing when .cue files exist
-while IFS= read -r -d '' disc_file; do
+# PHASE 1: Parse all .cue files and track their referenced files
+echo "Parsing .cue files to identify referenced images..."
+while IFS= read -r -d '' cue_file; do
+	while IFS= read -r ref_file; do
+		# Normalize path and mark as referenced
+		ref_file=$(realpath "$ref_file" 2>/dev/null || echo "$ref_file")
+		cue_referenced_files["$ref_file"]=1
+	done < <(get_cue_referenced_files "$cue_file")
+done < <(find . -maxdepth 1 -iname "*.cue" -print0)
+
+if [[ ${#cue_referenced_files[@]} -gt 0 ]]; then
+	echo -e "${CYAN}Found ${#cue_referenced_files[@]} file(s) referenced by .cue files${NC}"
+fi
+echo ""
+
+# PHASE 2: Process all .cue files
+while IFS= read -r -d '' cue_file; do
 	((total_files++))
-	convert_disc "$disc_file"
+	convert_disc "$cue_file"
 	echo ""  # Add spacing between files
-done < <(find . -maxdepth 1 \( -iname "*.iso" -o -iname "*.cue" \) -print0)
+done < <(find . -maxdepth 1 -iname "*.cue" -print0)
+
+# PHASE 3: Process standalone .iso files (not referenced by any .cue)
+while IFS= read -r -d '' iso_file; do
+	# Normalize path for comparison
+	iso_path=$(realpath "$iso_file" 2>/dev/null || echo "$iso_file")
+
+	# Skip if this ISO is referenced by a .cue file
+	if [[ -n "${cue_referenced_files[$iso_path]}" ]]; then
+		echo -e "${CYAN}Skipping $iso_file (referenced by .cue file)${NC}"
+		echo ""
+		continue
+	fi
+
+	((total_files++))
+	convert_disc "$iso_file"
+	echo ""  # Add spacing between files
+done < <(find . -maxdepth 1 -iname "*.iso" -print0)
 
 # Generate M3U playlists for multi-disc games
 if [[ ${#game_discs[@]} -gt 0 ]]; then
