@@ -123,13 +123,13 @@ get_base_game_name() {
 	# Remove extension first
 	local base="${filename%.*}"
 
-	# Remove disc number patterns in various formats with a single comprehensive pattern:
-	# - Bracketed: (Disc 1), [Disc 1], {Disc 1}
-	# - Separated: - Disc 1, _Disc 1, -Disc1, _Disc1
-	# - Compact: disc1, DISC1, disc 01
+	# Remove disc/CD number patterns in various formats with a single comprehensive pattern:
+	# - Bracketed: (Disc 1), [CD 1], {Disc 2}
+	# - Separated: - Disc 1, _CD1, -Disc1, _CD 2
+	# - Compact: disc1, CD1, DISC1, cd 01
 	# The pattern matches: optional spaces, then either (separator+spaces) or (optional bracket),
-	# then "disc" (case insensitive), optional spaces, digits, optional closing bracket, optional trailing spaces
-	base=$(echo "$base" | sed -E 's/[[:space:]]*(([-_]+[[:space:]]*)|[][{(]?)[Dd][Ii][Ss][Cc][[:space:]]*[0-9]+[])}]?[[:space:]]*$//')
+	# then "disc" or "cd" (case insensitive), optional spaces, digits, optional closing bracket, optional trailing spaces
+	base=$(echo "$base" | sed -E 's/[[:space:]]*(([-_]+[[:space:]]*)|[][{(]?)([Dd][Ii][Ss][Cc]|[Cc][Dd])[[:space:]]*[0-9]+[])}]?[[:space:]]*$//')
 
 	echo "$base"
 }
@@ -137,10 +137,10 @@ get_base_game_name() {
 # Function to extract disc number from filename
 get_disc_number() {
 	local filename="$1"
-	# Look for disc number patterns - handle various formats
-	# Matches: disc 1, disc1, disc 01, DISC 1, etc.
-	if [[ "$filename" =~ [Dd][Ii][Ss][Cc][[:space:]]*([0-9]+) ]]; then
-		echo "${BASH_REMATCH[1]}"
+	# Look for disc/CD number patterns - handle various formats
+	# Matches: disc 1, cd1, CD 01, DISC 1, etc.
+	if [[ "$filename" =~ ([Dd][Ii][Ss][Cc]|[Cc][Dd])[[:space:]]*([0-9]+) ]]; then
+		echo "${BASH_REMATCH[2]}"
 		return 0
 	fi
 	return 1
