@@ -12,7 +12,7 @@ A collection of miscellaneous resources for Linux gaming and system tasks. These
 | Multimedia | [midi2wav.sh](midi2wav.sh) | Convert MIDI file(s) to digital audio like WAV, FLAC, AAC or MP3 |
 | Multimedia | [pipewire_tuning_guide.md](pipewire_tuning_guide.md) | Quick & dirty guide to setting up low-latency, multi-rate PipeWire |
 | Multimedia | [sonicsqueezer.sh](sonicsqueezer.sh) | A multi-threaded audio converter for WAV and FLAC to MP3, AAC, OGG, and more | 
-| Multimedia | [transcode-monster.sh](transcode-monster.sh) | Transcode single titles (movies) or series to H.265 with hardware accelleration |
+| Multimedia | [transcode-monster.sh](transcode-monster.sh) | Transcode single titles (movies) or series to H.265 with hardware accelleration ([manual](transcode-monster.md)) |
 
 ## Installation
 Clone the whole repo:
