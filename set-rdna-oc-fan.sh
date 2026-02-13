@@ -115,12 +115,16 @@ find_card_paths() {
 	    ((elapsed+=WAIT_INTERVAL))
     done
 
-    # Verify all required files exist and are writable
+    # Verify all required files exist
     for file in "${FAN_CURVE_PATH}" "${ZERO_RPM_PATH}" "${PP_OD_PATH}" "${POWER_CAP_PATH}" "${POWER_PROFILE_PATH}" "${POWER_CAP_DEFAULT_PATH}"; do
 	    if [[ ! -f "$file" ]]; then
 		    color_echo "$COLOR_RED" "Error: File $file not found after waiting"
 		    exit 1
 	    fi
+    done
+
+    # Verify writable files (POWER_CAP_DEFAULT_PATH is read-only by design)
+    for file in "${FAN_CURVE_PATH}" "${ZERO_RPM_PATH}" "${PP_OD_PATH}" "${POWER_CAP_PATH}" "${POWER_PROFILE_PATH}"; do
 	    check_writable "$file"
     done
 }
@@ -162,18 +166,19 @@ detect_rdna_gen() {
 check_pci_id() {
 	local mode="$1"
 	if [[ -f "$CONFIG_FILE" ]]; then
-		# shellcheck disable=SC1090
-		source "$CONFIG_FILE"
-		if [[ -n "$EXPECTED_PCI_ID" && "$EXPECTED_PCI_ID" != "$PCI_ID" ]]; then
+		# Only extract EXPECTED_PCI_ID to avoid clobbering globals before load_config
+		local config_pci_id
+		config_pci_id=$(grep -oP '^EXPECTED_PCI_ID="\K[^"]+' "$CONFIG_FILE" 2>/dev/null || true)
+		if [[ -n "$config_pci_id" && "$config_pci_id" != "$PCI_ID" ]]; then
 			if [[ "$mode" == "apply" && ! -t 0 ]]; then
-				color_echo "$COLOR_RED" "Error: PCI ID mismatch (Config: $EXPECTED_PCI_ID, Detected: $PCI_ID) in non-interactive mode"
+				color_echo "$COLOR_RED" "Error: PCI ID mismatch (Config: $config_pci_id, Detected: $PCI_ID) in non-interactive mode"
 				exit 1
 			elif [[ "$mode" == "apply" ]]; then
-				color_echo "$COLOR_YELLOW" "Warning: PCI ID mismatch (Config: $EXPECTED_PCI_ID, Detected: $PCI_ID). Proceeding with interactive confirmation."
+				color_echo "$COLOR_YELLOW" "Warning: PCI ID mismatch (Config: $config_pci_id, Detected: $PCI_ID). Proceeding with interactive confirmation."
 				read -p "Continue with detected GPU? [y/N]: " confirm
 				[[ "$confirm" != "y" && "$confirm" != "Y" ]] && { color_echo "$COLOR_RED" "Aborted due to PCI ID mismatch"; exit 1; }
 			elif [[ "$mode" == "reset" || "$mode" == "status" ]]; then
-				color_echo "$COLOR_YELLOW" "Warning: PCI ID mismatch (Config: $EXPECTED_PCI_ID, Detected: $PCI_ID; Not applying profile)."
+				color_echo "$COLOR_YELLOW" "Warning: PCI ID mismatch (Config: $config_pci_id, Detected: $PCI_ID; Not applying profile)."
 			fi
 		fi
 	fi
@@ -181,7 +186,18 @@ check_pci_id() {
 
 # Read hardware default settings directly from sysfs
 read_hardware_defaults() {
-	color_echo "$COLOR_CYAN" "Raw pp_od_clk_voltage content:"
+	# Reset OD staging areas to factory defaults before reading
+	# Writing "r" resets the staging table without committing to hardware,
+	# so the GPU continues running undisturbed with its current settings.
+	# This ensures we read true defaults even if a previous OC is active.
+	if [[ -w "$PP_OD_PATH" ]]; then
+		echo "r" > "$PP_OD_PATH" 2>/dev/null || color_echo "$COLOR_YELLOW" "Warning: Failed to reset pp_od_clk_voltage staging area"
+	fi
+	if [[ -w "$FAN_CURVE_PATH" ]]; then
+		echo "r" > "$FAN_CURVE_PATH" 2>/dev/null || color_echo "$COLOR_YELLOW" "Warning: Failed to reset fan_curve staging area"
+	fi
+
+	color_echo "$COLOR_CYAN" "Raw pp_od_clk_voltage content (factory defaults):"
 	local pp_od_data
 	if ! pp_od_data=$(timeout "$SYSFS_TIMEOUT" cat "${PP_OD_PATH}" 2>/dev/null | tr -d '\0'); then
 		color_echo "$COLOR_RED" "Error: Failed to read pp_od_clk_voltage"
@@ -275,6 +291,8 @@ else
 
     # Read fan curve settings based on junction temperature from hardware
     if [[ -f "${FAN_CURVE_PATH}" ]]; then
+	    local fan_curve_data
+	    fan_curve_data=$(timeout "$SYSFS_TIMEOUT" cat "${FAN_CURVE_PATH}" 2>/dev/null | tr -d '\0' || echo "")
 	    FAN_CURVE=()
 	    local invalid_curve=false
 	    local has_valid_points=false
@@ -288,11 +306,11 @@ else
 			    [[ "$temp" -eq 0 || "$speed" -eq 0 ]] && invalid_curve=true
 			    [[ "$DEBUG_MODE" -eq 1 ]] && color_echo "$COLOR_YELLOW" "Debug: Parsed fan curve point: $point $temp $speed"
 		    fi
-	    done < <(timeout "$SYSFS_TIMEOUT" cat "${FAN_CURVE_PATH}" 2>/dev/null | tr -d '\0' || echo "")
-	    TEMP_MIN=$(timeout "$SYSFS_TIMEOUT" cat "${FAN_CURVE_PATH}" 2>/dev/null | tr -d '\0' | grep -i "FAN_CURVE(hotspot temp):" | grep -o "[0-9]\+" | head -n 1 || echo "25")
-	    TEMP_MAX=$(timeout "$SYSFS_TIMEOUT" cat "${FAN_CURVE_PATH}" 2>/dev/null | tr -d '\0' | grep -i "FAN_CURVE(hotspot temp):" | grep -o "[0-9]\+" | tail -n 1 || echo "110")
-	    SPEED_MIN=$(timeout "$SYSFS_TIMEOUT" cat "${FAN_CURVE_PATH}" 2>/dev/null | tr -d '\0' | grep -i "FAN_CURVE(fan speed):" | grep -o "[0-9]\+" | head -n 1 || echo "15")
-	    SPEED_MAX=$(timeout "$SYSFS_TIMEOUT" cat "${FAN_CURVE_PATH}" 2>/dev/null | tr -d '\0' | grep -i "FAN_CURVE(fan speed):" | grep -o "[0-9]\+" | tail -n 1 || echo "100")
+	    done <<< "$fan_curve_data"
+	    TEMP_MIN=$(echo "$fan_curve_data" | grep -i "FAN_CURVE(hotspot temp):" | grep -o "[0-9]\+" | head -n 1 || echo "25")
+	    TEMP_MAX=$(echo "$fan_curve_data" | grep -i "FAN_CURVE(hotspot temp):" | grep -o "[0-9]\+" | tail -n 1 || echo "110")
+	    SPEED_MIN=$(echo "$fan_curve_data" | grep -i "FAN_CURVE(fan speed):" | grep -o "[0-9]\+" | head -n 1 || echo "15")
+	    SPEED_MAX=$(echo "$fan_curve_data" | grep -i "FAN_CURVE(fan speed):" | grep -o "[0-9]\+" | tail -n 1 || echo "100")
 	    if [[ "$has_valid_points" == true && ${#FAN_CURVE[@]} -eq 5 && "$invalid_curve" == false ]]; then
 		    color_echo "$COLOR_GREEN" "Valid junction fan curve detected with ${#FAN_CURVE[@]} points"
 	    else
@@ -528,7 +546,6 @@ load_config() {
 
     [[ -z "$POWER_CAP" ]] && { color_echo "$COLOR_RED" "Error: POWER_CAP not set in config"; exit 1; }
     [[ ! "$POWER_CAP" =~ ^[0-9]+$ ]] && { color_echo "$COLOR_RED" "Error: Invalid POWER_CAP: $POWER_CAP"; exit 1; }
-    [[ "$POWER_CAP" -lt 0 ]] && { color_echo "$COLOR_RED" "Error: POWER_CAP $POWER_CAP below minimum 0"; exit 1; }
     [[ "$POWER_CAP" -gt "$POWER_CAP_MAX" ]] && { color_echo "$COLOR_RED" "Error: POWER_CAP $POWER_CAP above maximum $POWER_CAP_MAX"; exit 1; }
     [[ -z "$ZERO_RPM" ]] && { color_echo "$COLOR_RED" "Error: ZERO_RPM not set in config"; exit 1; }
     [[ ! "$ZERO_RPM" =~ ^[0-1]$ ]] && { color_echo "$COLOR_RED" "Error: Invalid ZERO_RPM: $ZERO_RPM"; exit 1; }
@@ -548,11 +565,43 @@ load_config() {
 	    [[ "$speed" -lt "$SPEED_MIN" ]] && { color_echo "$COLOR_RED" "Error: Fan curve point $idx speed $speed below minimum $SPEED_MIN"; exit 1; }
 	    [[ "$speed" -gt "$SPEED_MAX" ]] && { color_echo "$COLOR_RED" "Error: Fan curve point $idx speed $speed above maximum $SPEED_MAX"; exit 1; }
     done
+
+    # Validate fan curve monotonicity (each point must have temp >= previous and speed >= previous)
+    local prev_temp=-1 prev_speed=-1
+    for point in "${FAN_CURVE[@]}"; do
+	    read -r idx temp speed <<< "$point"
+	    if [[ "$prev_temp" -ge 0 ]]; then
+		    [[ "$temp" -lt "$prev_temp" ]] && { color_echo "$COLOR_RED" "Error: Fan curve point $idx temperature $temp is lower than previous point ($prev_temp); curve must be monotonically increasing"; exit 1; }
+		    [[ "$speed" -lt "$prev_speed" ]] && { color_echo "$COLOR_RED" "Error: Fan curve point $idx speed $speed is lower than previous point ($prev_speed); curve must be monotonically increasing"; exit 1; }
+	    fi
+	    prev_temp="$temp"
+	    prev_speed="$speed"
+    done
 }
 
 # Apply GPU settings based on configuration with simultaneous commit
 apply_settings() {
-	[[ "$DRY_RUN_MODE" -eq 1 ]] && { color_echo "$COLOR_YELLOW" "Dry-run mode: Settings not applied"; exit 0; }
+	if [[ "$DRY_RUN_MODE" -eq 1 ]]; then
+		color_echo "$COLOR_YELLOW" "=== Dry-run mode: The following settings would be applied ==="
+		if [[ "$RDNA_GEN" == "4" ]]; then
+			color_echo "$COLOR_CYAN" "  SCLK_OFFSET: $SCLK_OFFSET MHz"
+		else
+			color_echo "$COLOR_CYAN" "  SCLK: $SCLK MHz"
+		fi
+		color_echo "$COLOR_CYAN" "  MCLK: $MCLK MHz"
+		if [[ "$SUPPORTS_VOLTAGE_OFFSET" -eq 1 && -n "$VDDGFX_OFFSET" ]]; then
+			color_echo "$COLOR_CYAN" "  VDDGFX_OFFSET: $VDDGFX_OFFSET mV"
+		fi
+		color_echo "$COLOR_CYAN" "  POWER_CAP: $((POWER_CAP / 1000000)) W ($POWER_CAP uW)"
+		color_echo "$COLOR_CYAN" "  ZERO_RPM: $ZERO_RPM"
+		color_echo "$COLOR_CYAN" "  Junction Fan Curve:"
+		for point in "${FAN_CURVE[@]}"; do
+			read -r idx temp speed <<< "$point"
+			color_echo "$COLOR_CYAN" "    Point $idx: ${temp}C ${speed}%"
+		done
+		color_echo "$COLOR_YELLOW" "=== No changes were made ==="
+		exit 0
+	fi
 
     # Set power profile to manual
     check_writable "$POWER_PROFILE_PATH"
@@ -653,13 +702,13 @@ create_config() {
 		if [[ "$RDNA_GEN" == "4" ]]; then
 			color_echo "$COLOR_CYAN" "Enter SCLK_OFFSET (MHz, range $SCLK_MIN-$SCLK_MAX, hardware default $SCLK_OFFSET_DEFAULT, proposed 0):"
 			read -r sclk_offset
-			sclk_offset=${sclk_offset:-$SCLK_OFFSET_DEFAULT}
+			sclk_offset=${sclk_offset:-0}
 			[[ ! "$sclk_offset" =~ ^-?[0-9]+$ ]] && { color_echo "$COLOR_RED" "Error: Invalid SCLK_OFFSET"; exit 1; }
 			[[ "$sclk_offset" -lt "$SCLK_MIN" || "$sclk_offset" -gt "$SCLK_MAX" ]] && { color_echo "$COLOR_RED" "Error: SCLK_OFFSET out of range"; exit 1; }
 		else
 			color_echo "$COLOR_CYAN" "Enter SCLK (MHz, range $SCLK_MIN-$SCLK_MAX, hardware default $SCLK_DEFAULT, proposed $SCLK_MAX):"
 			read -r sclk
-			sclk=${sclk:-$SCLK_DEFAULT}
+			sclk=${sclk:-$SCLK_MAX}
 			[[ ! "$sclk" =~ ^[0-9]+$ ]] && { color_echo "$COLOR_RED" "Error: Invalid SCLK"; exit 1; }
 			[[ "$sclk" -lt "$SCLK_MIN" || "$sclk" -gt "$SCLK_MAX" ]] && { color_echo "$COLOR_RED" "Error: SCLK out of range"; exit 1; }
 		fi
@@ -682,7 +731,7 @@ create_config() {
 
 	color_echo "$COLOR_CYAN" "Enter POWER_CAP (Watts, range 0-$((POWER_CAP_MAX / 1000000)), hardware default $((POWER_CAP_DEFAULT / 1000000)), proposed $((POWER_CAP_MAX / 1000000))):"
 	read -r power_cap
-	power_cap=${power_cap:-$((POWER_CAP_DEFAULT / 1000000))}
+	power_cap=${power_cap:-$((POWER_CAP_MAX / 1000000))}
 	[[ ! "$power_cap" =~ ^[0-9]+$ ]] && { color_echo "$COLOR_RED" "Error: Invalid POWER_CAP"; exit 1; }
 	power_cap=$((power_cap * 1000000))
 	[[ "$power_cap" -lt 0 || "$power_cap" -gt "$POWER_CAP_MAX" ]] && { color_echo "$COLOR_RED" "Error: POWER_CAP out of range"; exit 1; }
@@ -879,7 +928,7 @@ reset_gpu() {
 	fi
 	if [[ -w "$ZERO_RPM_PATH" ]]; then
 		check_writable "$ZERO_RPM_PATH"
-		echo "0" > "$ZERO_RPM_PATH" || { color_echo "$COLOR_RED" "Error: Failed to reset fan_zero_rpm_enable"; exit 1; }
+		echo "$ZERO_RPM_DEFAULT" > "$ZERO_RPM_PATH" || { color_echo "$COLOR_RED" "Error: Failed to reset fan_zero_rpm_enable"; exit 1; }
 	fi
 	if [[ -w "$FAN_CURVE_PATH" ]]; then
 		check_writable "$FAN_CURVE_PATH"
