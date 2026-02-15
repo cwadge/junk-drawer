@@ -65,20 +65,15 @@ transcode-monster.sh --version
 
 ### Configuration
 
-Create `~/.config/transcode-monster.conf` for persistent settings:
+Create `~/.config/transcode-monster.conf` for persistent settings. Here is my own config for reference:
 
 ```bash
-# Video quality (CRF/CQP value - lower = better quality)
-QUALITY="20.6"
-
-# Deinterlacer preference (bwdif, nnedi, yadif)
-DEINTERLACER="bwdif"
-
-# Default language for audio/subtitles
-LANGUAGE="eng"
-
-# Upgrade 8-bit sources to 10-bit (recommended)
-UPGRADE_8BIT_TO_10BIT="true"
+# Max bframes for compression. Playback even works great on Raspberry Pi4
+BFRAMES="4"
+# Prefer the source media's native language over dubs in our default language.
+PREFER_ORIGINAL="true"
+# Default to hardware encoding, even if the source media has weird or missing color metadata. Fallback manually with the `-c libx265` flag.
+VIDEO_CODEC="hevc_vaapi"
 ```
 
 ## Common Use Cases
@@ -101,7 +96,6 @@ Dolby Vision **cannot be preserved** during transcoding. When re-encoding DV con
 - The script will warn you that DV will be stripped
 - Only the HDR10 base layer is preserved
 - Colors may appear washed out compared to the original
-- **Recommendation**: Keep original files for DV playback on compatible devices
 
 If you have Dolby Vision-capable playback (Apple TV 4K, LG OLED, etc.), consider keeping the original file rather than transcoding.
 
@@ -500,6 +494,14 @@ Force software encoding:
 ```bash
 transcode-monster.sh --codec libx265 "/path/to/source/"
 ```
+
+### I Want To Do a Custom, Weird, One-Off
+
+If the script doesn't handle some 0.001% edge-case, you can still use it to do the hard work and build the bulk of your `ffmpeg` command for you with the `--dry-run` option:
+```
+transcode-monster.sh --dry-run "/path/to/special-one-off/"
+```
+Then just copy the resulting `ffmpeg` command and adjust as needed.
 
 ### Washed Out Colors on UHD/HDR Content
 
