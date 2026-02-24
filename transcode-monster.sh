@@ -30,9 +30,9 @@ set -euo pipefail
 
 SCRIPT_VERSION="1.15.1"
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 # Script assets
 CONFIG_FILE="${HOME}/.config/transcode-monster.conf"
@@ -108,9 +108,9 @@ DEFAULT_FFMPEG_LOGLEVEL="warning"  # FFmpeg verbosity: quiet, panic, fatal, erro
 DEFAULT_FFMPEG_ANALYZEDURATION="120000000"  # Microseconds (2 minutes) - analyze input to determine codec params
 DEFAULT_FFMPEG_PROBESIZE="128000000"  # Bytes (128MB) - amount of data to probe for stream info
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # ERROR HANDLING
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 # Track what we're currently processing for better error messages
 CURRENT_OPERATION=""
@@ -122,9 +122,9 @@ error_handler() {
 	local line_number=$1
 
 	echo ""
-	echo -e "${RED}============================================${RESET}"
+	echo -e "${RED}════════════════════════════════════════════${RESET}"
 	echo -e "${RED}ERROR: Script failed with exit code $exit_code${RESET}"
-	echo -e "${RED}============================================${RESET}"
+	echo -e "${RED}════════════════════════════════════════════${RESET}"
 	echo -e "${RED}Line number: $line_number${RESET}"
 
 	if [[ -n "$CURRENT_OPERATION" ]]; then
@@ -151,9 +151,9 @@ interrupt_handler() {
 trap 'error_handler ${LINENO}' ERR
 trap 'interrupt_handler' INT
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # TERMINAL SETUP
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 # Check if stdout is a terminal
 if [[ -t 1 ]]; then
@@ -178,9 +178,9 @@ else
 	RESET=''
 fi
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # LOAD USER CONFIG (Priority 2: User .conf)
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 if [[ -f "$CONFIG_FILE" ]]; then
 	# shellcheck source=/dev/null
@@ -255,9 +255,9 @@ FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-$DEFAULT_FFMPEG_LOGLEVEL}"
 FFMPEG_ANALYZEDURATION="${FFMPEG_ANALYZEDURATION:-$DEFAULT_FFMPEG_ANALYZEDURATION}"
 FFMPEG_PROBESIZE="${FFMPEG_PROBESIZE:-$DEFAULT_FFMPEG_PROBESIZE}"
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # FUNCTIONS
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 show_help() {
 	cat << EOF
@@ -996,9 +996,9 @@ build_vf() {
     fi
 
     if [[ "$encoder_type" == "vaapi" ]]; then
-	    # ============================================================
+	    # ────────────────────────────────────────────────────────────
 	    # VAAPI PATH: Minimize CPU processing, use GPU deinterlacer
-	    # ============================================================
+	    # ────────────────────────────────────────────────────────────
 
 	# Determine if we should check for telecine
 	local should_check_telecine=false
@@ -1094,9 +1094,9 @@ build_vf() {
 	[[ -n "$vf_gpu" ]] && vf="$vf,$vf_gpu"
 
 else
-	# ============================================================
+	# ────────────────────────────────────────────────────────────
 	# SOFTWARE PATH: Use CPU filters with comprehensive color handling
-	# ============================================================
+	# ────────────────────────────────────────────────────────────
 
 	vf="$vf_cpu"
 
@@ -1457,7 +1457,7 @@ should_use_software_encoder() {
 	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
 	local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
 
-	# === HARD BLOCKERS: Will definitely produce artifacts ===
+	# ─── HARD BLOCKERS: Will definitely produce artifacts ───
 
 	# 12-bit encoding when VAAPI doesn't support it
 	# Very few GPUs support 12-bit HEVC encoding
@@ -1511,7 +1511,7 @@ should_use_software_encoder() {
 	# If we reach here and need color space conversion (not "none"), we can safely
 	# convert and still use hardware encoding
 
-	# === SOFT INDICATORS: Correlate with problems but not guaranteed ===
+	# ─── SOFT INDICATORS: Correlate with problems but not guaranteed ───
 
 	local software_score=0
 	local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
@@ -2270,9 +2270,9 @@ build_ffmpeg_command() {
     echo "$cmd"
 }
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # PARSE COMMAND LINE ARGUMENTS (Priority 3: CLI)
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 CONTENT_TYPE=""
 CONTENT_NAME=""
@@ -2435,9 +2435,9 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # VALIDATE ARGUMENTS
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 if [[ $# -lt 1 ]]; then
 	echo -e "${RED}Error: Source required (directory or file)${RESET}"
@@ -2507,9 +2507,9 @@ if [[ ${#SOURCE_FILES[@]} -gt 0 ]]; then
 	echo -e "${CYAN}File mode: Processing ${#SOURCE_FILES[@]} specific file(s)${RESET}"
 fi
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # CONTENT DETECTION
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 # Auto-detect if not specified
 if [[ -z "$CONTENT_TYPE" ]]; then
@@ -2589,9 +2589,9 @@ if [[ ! -w "$OUTPUT_DIR" ]]; then
 	exit 1
 fi
 
-echo -e "${BLUE}============================================${RESET}"
+echo -e "${BLUE}════════════════════════════════════════════${RESET}"
 echo -e "${BOLDBLUE}Transcode Monster v${SCRIPT_VERSION}${RESET}"
-echo -e "${BLUE}============================================${RESET}"
+echo -e "${BLUE}════════════════════════════════════════════${RESET}"
 echo -e "${BOLD}Source:${RESET}       $SOURCE_DIR"
 echo -e "${BOLD}Output:${RESET}       $OUTPUT_DIR"
 echo -e "${BOLD}Type:${RESET}         $CONTENT_TYPE"
@@ -2607,17 +2607,17 @@ echo -e "${BOLD}Deinterlace:${RESET}  $DETECT_INTERLACING"
 echo -e "${BOLD}Pulldown:${RESET}     $DETECT_PULLDOWN"
 echo -e "${BOLD}Split Chapters:${RESET} $SPLIT_CHAPTERS"
 [[ "$DRY_RUN" == true ]] && echo -e "${YELLOW}Mode:         DRY RUN${RESET}"
-echo -e "${BLUE}============================================${RESET}"
+echo -e "${BLUE}════════════════════════════════════════════${RESET}"
 echo ""
 
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 # PROCESS FILES
-# ============================================================================
+# ════════════════════════════════════════════════════════════════════════════
 
 if [[ "$CONTENT_TYPE" == "movie" ]]; then
-	# ========================================
+	# ────────────────────────────────────────
 	# MOVIE MODE
-	# ========================================
+	# ────────────────────────────────────────
 
 	CURRENT_OPERATION="Finding movie file(s)"
 
@@ -2764,15 +2764,15 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 	[[ "$DRY_RUN" == true ]] && exit 0
 
 else
-	# ========================================
+	# ────────────────────────────────────────
 	# SERIES MODE
-	# ========================================
+	# ────────────────────────────────────────
 
     # Process each season
     for SEASON_NUM in "${SEASONS_TO_PROCESS[@]}"; do
-	    echo -e "${BLUE}========================================${RESET}"
+	    echo -e "${BLUE}────────────────────────────────────────${RESET}"
 	    echo -e "${BOLDBLUE}PROCESSING SEASON $SEASON_NUM${RESET}"
-	    echo -e "${BLUE}========================================${RESET}"
+	    echo -e "${BLUE}────────────────────────────────────────${RESET}"
 	    echo ""
 
 	    episode_files=()
