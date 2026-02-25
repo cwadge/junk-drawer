@@ -7,7 +7,7 @@
 # Automatically creates .m3u playlists for multi-disc games
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Color codes                                                  │
+# │ Color codes                                                 │
 # └─────────────────────────────────────────────────────────────┘
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,7 +18,7 @@ MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Box drawing constants (60 chars wide)                        │
+# │ Box drawing constants (60 chars wide)                       │
 # └─────────────────────────────────────────────────────────────┘
 BOX_TOP='╔══════════════════════════════════════════════════════════╗'
 BOX_BOT='╚══════════════════════════════════════════════════════════╝'
@@ -65,7 +65,7 @@ box_row_kv() {
 }
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Counters                                                     │
+# │ Counters                                                    │
 # └─────────────────────────────────────────────────────────────┘
 total_files=0
 converted_files=0
@@ -78,7 +78,7 @@ declare -A game_discs
 declare -A cue_referenced_files  # tracks files referenced by .cue/.gdi to avoid double-processing
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Runtime state                                                │
+# │ Runtime state                                               │
 # └─────────────────────────────────────────────────────────────┘
 CHDMAN_MAJOR=0
 CHDMAN_MINOR=0
@@ -86,7 +86,7 @@ HUNK_SIZE_FLAG=""
 CREATEDVD_AVAILABLE=false
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Command line options                                         │
+# │ Command line options                                        │
 # └─────────────────────────────────────────────────────────────┘
 OVERWRITE=false
 FORCE_MODE=""  # "cd", "dvd", or "" for auto-detect
@@ -151,7 +151,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Banner                                                       │
+# │ Banner                                                      │
 # └─────────────────────────────────────────────────────────────┘
 echo -e "${BLUE}${BOX_TOP}${NC}"
 echo -e "${BLUE}$(box_row "Disc Crusher - Universal CHD Converter")${NC}"
@@ -160,7 +160,7 @@ echo -e "${BLUE}${BOX_BOT}${NC}"
 echo ""
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Dependency check                                             │
+# │ Dependency check                                            │
 # └─────────────────────────────────────────────────────────────┘
 if ! command -v chdman &> /dev/null; then
 	echo -e "${RED}Error: chdman not found in PATH${NC}"
@@ -194,7 +194,7 @@ echo "createdvd      : $(${CREATEDVD_AVAILABLE} && echo "available" || echo "not
 echo ""
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Utility functions                                            │
+# │ Utility functions                                           │
 # └─────────────────────────────────────────────────────────────┘
 
 get_file_size() {
@@ -239,7 +239,7 @@ get_disc_number() {
 }
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Referenced-file parsers (CUE and GDI)                        │
+# │ Referenced-file parsers (CUE and GDI)                       │
 # └─────────────────────────────────────────────────────────────┘
 
 get_cue_referenced_files() {
@@ -381,7 +381,7 @@ get_files_to_delete_toc() {
 }
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Format detection                                             │
+# │ Format detection                                            │
 # └─────────────────────────────────────────────────────────────┘
 
 # Check for UDF filesystem signature (NSR02/NSR03) at VRS sectors 16-18
@@ -450,7 +450,7 @@ detect_disc_mode() {
 }
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Core conversion function                                     │
+# │ Core conversion function                                    │
 # └─────────────────────────────────────────────────────────────┘
 
 # convert_disc <input_file> <forced_mode|""> [mode_reason]
@@ -616,7 +616,7 @@ convert_disc() {
 }
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ M3U playlist generation                                      │
+# │ M3U playlist generation                                     │
 # └─────────────────────────────────────────────────────────────┘
 
 create_m3u_playlists() {
@@ -651,7 +651,7 @@ create_m3u_playlists() {
 }
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Main                                                         │
+# │ Main                                                        │
 # └─────────────────────────────────────────────────────────────┘
 
 echo "Searching for disc images in current directory..."
@@ -800,7 +800,7 @@ if [[ ${#game_discs[@]} -gt 0 ]]; then
 fi
 
 # ┌─────────────────────────────────────────────────────────────┐
-# │ Summary                                                      │
+# │ Summary                                                     │
 # └─────────────────────────────────────────────────────────────┘
 echo -e "${BLUE}${BOX_TOP}${NC}"
 echo -e "${BLUE}$(box_row "Summary")${NC}"
