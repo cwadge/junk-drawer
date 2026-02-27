@@ -69,6 +69,9 @@ Create `~/.config/transcode-monster.conf` for persistent settings. Here is my ow
 
 ```bash
 # Max bframes for compression. Playback even works great on Raspberry Pi4
+# NOTE: Has no effect when VIDEO_CODEC="hevc_vaapi" on AMD GPUs — B-frames
+# are unsupported in AMD HEVC hardware encoding across all VCN generations.
+# Only takes effect with libx265 (software encoding).
 BFRAMES="4"
 # Prefer the source media's native language over dubs in our default language.
 PREFER_ORIGINAL="true"
@@ -333,7 +336,12 @@ transcode-monster.sh --codec hevc_vaapi "/path/to/source/"
 
 ### Hardware Encoding Quality
 
-Intel VAAPI compression level (0-7, default 4):
+VAAPI compression level (0-7, default 4):
+
+This parameter controls encoder effort. On **Intel VAAPI**, it has a meaningful
+impact on compression efficiency. On **AMD VAAPI** (RDNA 3/4, Mesa 25.2+), it
+produces a marginal but measurable improvement (~1%); on older Mesa it is
+effectively a no-op. On other VAAPI backends, behavior is driver-dependent.
 
 ```bash
 # Faster, larger files
@@ -418,12 +426,18 @@ transcode-monster.sh -s 1 -e 3 "/path/to/source/" "/output/"
 Control B-frame count (0-4+):
 
 ```bash
-# Maximum compatibility (older AMD GPUs, Raspberry Pi)
+# Maximum compatibility
 transcode-monster.sh -b 0 "/path/to/source/"
 
-# Best compression
+# Best compression (libx265 only)
 transcode-monster.sh -b 4 "/path/to/source/"
 ```
+
+> **AMD HEVC hardware encoding note:** `-b`/`BFRAMES` is **silently ignored**
+> by `hevc_vaapi` on all AMD GPUs. This is a hardware-level limitation present
+> across all VCN generations (VCN 1 through 5, covering every GPU up to and
+> including RDNA 4). B-frames only take effect with `libx265` (software
+> encoding).
 
 ### x265 Tuning (Software Encoding)
 

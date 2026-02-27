@@ -54,7 +54,7 @@ DEFAULT_X265_POOLS="+"  # Thread pools for libx265: "+" = auto-detect optimal, o
 DEFAULT_X265_TUNE=""  # x265 tuning: "" (none), "fastdecode", "grain", "psnr", "ssim", "zerolatency"
 DEFAULT_GOP_SIZE="120"
 DEFAULT_MIN_KEYINT="12"
-DEFAULT_BFRAMES="0"  # B-frames: 0=max compatibility (older AMD), 1-2=balanced, 3-4=best compression
+DEFAULT_BFRAMES="0"  # B-frames: only effective for libx265 (software encoding); ignored by hevc_vaapi on all AMD GPUs (hardware limitation, VCN 1-5)
 DEFAULT_REFS="4"
 
 # Process priority
@@ -300,6 +300,9 @@ OPTIONS:
 			 0 = max compatibility, 1-2 = balanced, 3-4 = best compression
 			 Higher values increase decode complexity (slower on weak devices)
 			 Automatically adjusted to 1 when using --tune fastdecode
+			 NOTE: Silently ignored by hevc_vaapi on all AMD GPUs (hardware
+			 limitation across all VCN generations). Effective only with
+			 libx265 (software encoding) or non-AMD VAAPI
 
   --no-crop              Disable automatic crop detection
   --no-deinterlace       Disable automatic deinterlacing
@@ -443,7 +446,10 @@ ENCODER:
   - Default: 0 (disabled) for maximum hardware compatibility
 	   1-2 = balanced efficiency with minimal overhead
 	   3-4 = best compression for archiving (higher decode complexity)
-  - Hardware support varies: Intel QSV and newer AMD (RX 6000+) support 2-4
+  - IMPORTANT: AMD hevc_vaapi silently ignores -bf at the hardware level
+	  across current VCN generations (VCN 1 through 5 / RDNA 4). B-frames
+	  are only effective with libx265 (software encoding). Setting
+	  BFRAMES > 0 has no effect on AMD HEVC hardware encodes.
   - Note: Higher B-frame values increase decode complexity; may not play
 	  smoothly on older/low-power devices (smart TVs, older phones, etc.)
   - Configure via BFRAMES in config file or --bframes option
@@ -2243,7 +2249,7 @@ build_ffmpeg_command() {
 	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
 	    cmd="$cmd -c:v \"$actual_codec\" -vaapi_device \"$VAAPI_DEVICE\" -rc_mode CQP -qp \"$QUALITY\""
 	    [[ -n "$VAAPI_COMPRESSION_LEVEL" ]] && cmd="$cmd -compression_level \"$VAAPI_COMPRESSION_LEVEL\""
-	    cmd="$cmd -g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf \"$BFRAMES\" -low_power false"
+	    cmd="$cmd -g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf \"$BFRAMES\" -low_power false"  # -bf ignored by hevc_vaapi on AMD (all VCN); effective on libx265/h264_vaapi only
 	    cmd="$cmd -refs \"$REFS\" -profile:v \"$vaapi_profile\""
 	    [[ -n "$vf" ]] && cmd="$cmd -vf \"$vf\""
 	    cmd="$cmd -map_chapters 0"
