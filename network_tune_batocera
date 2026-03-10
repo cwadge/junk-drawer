@@ -1,172 +1,386 @@
 #!/bin/bash
 
-# A Batocera service to set custom network interface parameters (e.g., MTU, speed) at startup.
-# Create as /userdata/system/services/network_tune
-# (Note the `_` underscore; `-` hyphens are not allowed)
-# Make it executable: chmod 755 /userdata/system/services/network_tune
-# Enable it: batocera-services enable network_tune
-# It will run automatically at boot
+# A Batocera service to apply custom network interface parameters (MTU, speed,
+# etc.) at startup, with an optional code path to configure ntpd using either
+# a DHCP-advertised NTP server or a user-supplied override.
+#
+# Installation:
+#   cp network_tune /userdata/system/services/network_tune
+#   chmod 755 /userdata/system/services/network_tune
+#   batocera-services enable network_tune
+#
+# Note: Batocera service names must use underscores, not hyphens.
 
-# ============================================================================================
-# Configuration: Set these variables as needed
-# Leave blank to skip applying the setting
-INTERFACES=""  # Space-separated list of interfaces to tune (e.g., "eth0 eno1 enp4s0")
-MTU=""         # Maximum Transmission Unit in bytes (e.g., "9000" for jumbo frames)
-SPEED=""       # Link speed in megabits per second (e.g., "2500")
-DUPLEX=""      # Duplex mode (e.g., "full")
-AUTONEG=""     # Auto-negotiation setting (e.g., "off")
-TXQUEUELEN=""  # Transmit queue length (e.g., "1000")
-# ============================================================================================
-LOG_FILE="/var/log/network_tune.log" # By default, /var is mounted on tmpfs
+# ==============================================================================
+# Configuration
+# ==============================================================================
+# Space-separated list of interfaces to tune (e.g., "eth0 eno1 enp4s0")
+INTERFACES=""
+# Maximum Transmission Unit in bytes (e.g., "9000" for jumbo frames)
+MTU=""
+# Link speed in Mbps (e.g., "2500"). Must be set together with DUPLEX.
+SPEED=""
+# Duplex mode (e.g., "full"). Must be set together with SPEED.
+DUPLEX=""
+# Auto-negotiation (e.g., "off")
+AUTONEG=""
+# Transmit queue length (e.g., "1000")
+TXQUEUELEN=""
+# Set to "true" to probe connmanctl for a DHCP-advertised NTP server on each
+# interface. Falls back to pool.ntp.org defaults if nothing is found.
+DHCP_NTP="false"
+# If set, this server (or space-separated list of servers) is used as the NTP
+# source unconditionally, overriding both DHCP discovery and the pool defaults.
+# DHCP_NTP is ignored when this is set.
+# Example: NTP_OVERRIDE="192.168.1.1"
+# Example: NTP_OVERRIDE="192.168.1.1 192.168.1.2"
+NTP_OVERRIDE=""
+# ==============================================================================
+# Internals — no user-serviceable parts below
+# ==============================================================================
 
-# Create log file if it doesn't exist
+LOG_FILE="/var/log/network_tune.log"
+GENERATED_NTP_CONF="/var/tmp/network_tune_ntp.conf"
+SYSTEM_NTP_CONF="/etc/ntp.conf"
+POOL_SERVERS="0.pool.ntp.org 1.pool.ntp.org 2.pool.ntp.org 3.pool.ntp.org"
+
+# Seconds to wait for link presence / IP address before giving up per interface
+LINK_TIMEOUT=30
+IP_TIMEOUT=30
+
 touch "$LOG_FILE"
 
 log() {
 	echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
 }
 
-start() {
-	log "Starting network_tune service..."
+# ------------------------------------------------------------------------------
+# Wait helpers
+# ------------------------------------------------------------------------------
 
-    # Check if INTERFACES is set
-    if [ -z "$INTERFACES" ]; then
-	    log "No interfaces specified. Exiting."
-	    exit 0
+wait_for_link() {
+	local iface="$1"
+	local counter=0
+	while [ "$counter" -lt "$LINK_TIMEOUT" ]; do
+		ip link show "$iface" >/dev/null 2>&1 && return 0
+		log "Waiting for link on $iface..."
+		sleep 1
+		counter=$(( counter + 1 ))
+	done
+	return 1
+}
+
+# Waits until the interface has been assigned an IPv4 address, which signals
+# that DHCP has completed. Does not require a default route, so this works
+# correctly on air-gapped or internet-less networks.
+wait_for_ip() {
+	local iface="$1"
+	local counter=0
+	while [ "$counter" -lt "$IP_TIMEOUT" ]; do
+		ip addr show "$iface" 2>/dev/null | grep -q 'inet ' && return 0
+		log "Waiting for IP address on $iface..."
+		sleep 1
+		counter=$(( counter + 1 ))
+	done
+	return 1
+}
+
+# ------------------------------------------------------------------------------
+# Interface tuning
+# ------------------------------------------------------------------------------
+
+tune_interface() {
+	local iface="$1"
+
+	if [ -n "$MTU" ]; then
+		if ip link set "$iface" mtu "$MTU"; then
+			log "Set MTU=$MTU on $iface."
+		else
+			log "Error: Failed to set MTU=$MTU on $iface."
+		fi
+	fi
+
+	if [ -n "$SPEED" ] && [ -n "$DUPLEX" ]; then
+		if ethtool -s "$iface" speed "$SPEED" duplex "$DUPLEX"; then
+			log "Set speed=$SPEED duplex=$DUPLEX on $iface."
+		else
+			log "Error: Failed to set speed/duplex on $iface."
+		fi
+	elif [ -n "$SPEED" ] || [ -n "$DUPLEX" ]; then
+		log "Error: SPEED and DUPLEX must both be set. Skipping for $iface."
+	fi
+
+	if [ -n "$AUTONEG" ]; then
+		if ethtool -s "$iface" autoneg "$AUTONEG"; then
+			log "Set autoneg=$AUTONEG on $iface."
+		else
+			log "Error: Failed to set autoneg=$AUTONEG on $iface."
+		fi
+	fi
+
+	if [ -n "$TXQUEUELEN" ]; then
+		if ip link set "$iface" txqueuelen "$TXQUEUELEN"; then
+			log "Set txqueuelen=$TXQUEUELEN on $iface."
+		else
+			log "Error: Failed to set txqueuelen=$TXQUEUELEN on $iface."
+		fi
+	fi
+}
+
+# ------------------------------------------------------------------------------
+# NTP: connmanctl discovery
+#
+# connmanctl holds DHCP-supplied NTP servers in memory (they are NOT written to
+# any filesystem path by connman). The only way to retrieve them at runtime is
+# via connmanctl. We match the connman service to $INTERFACE using the
+# "Interface=" field in each service's Ethernet property block.
+#
+# Echoes a space-separated list of NTP server addresses on success, or nothing.
+# ------------------------------------------------------------------------------
+
+get_dhcp_ntp_for_interface() {
+	local iface="$1"
+
+	if ! command -v connmanctl >/dev/null 2>&1; then
+		log "connmanctl not available; cannot probe DHCP NTP."
+		return 1
+	fi
+
+	local svc
+	while IFS= read -r svc; do
+		[ -n "$svc" ] || continue
+
+		local details
+		details=$(connmanctl services "$svc" 2>/dev/null)
+
+	# Skip this service if it doesn't correspond to our interface
+	echo "$details" | grep -q "Interface=$iface" || continue
+
+	# Extract the Timeservers list, e.g. "[ 10.0.25.25, 10.0.25.26 ]"
+	# and normalise to a plain space-separated string.
+	local ntp
+	ntp=$(echo "$details" \
+		| awk '/Timeservers = \[/ {
+			gsub(/.*\[ /,""); gsub(/ \].*/,"")
+			gsub(/,/," ")
+			print
+			exit
+		}')
+
+		if [ -n "$ntp" ]; then
+			log "DHCP NTP for $iface via connmanctl ($svc): $ntp"
+			echo "$ntp"
+			return 0
+		fi
+
+	# Timeservers block was found for this service but was empty
+	log "connmanctl service $svc matched $iface but Timeservers is empty."
+	return 1
+
+done < <(connmanctl services 2>/dev/null | awk '{print $NF}')
+
+log "No connmanctl service matched interface $iface."
+return 1
+}
+
+# ------------------------------------------------------------------------------
+# NTP: config generation and bind-mount
+# ------------------------------------------------------------------------------
+
+write_ntp_conf() {
+	local preferred_servers="$1"   # space-separated, already prioritised
+	local fallback_servers="$2"    # space-separated, used only if preferred set
+
+	{
+		printf '# Generated by network_tune service  (%s)\n' "$(date -Iseconds)"
+		printf '# Do not edit — regenerated on each start.\n\n'
+
+		printf '# ---- Preferred server(s) ----\n'
+		for s in $preferred_servers; do
+			printf 'server %s iburst prefer\n' "$s"
+		done
+
+		if [ -n "$fallback_servers" ]; then
+			printf '\n# ---- Fallback servers ----\n'
+			for s in $fallback_servers; do
+				printf 'server %s iburst\n' "$s"
+			done
+		fi
+
+		printf '\n# ---- Restrictions (Batocera defaults) ----\n'
+		printf 'restrict default nomodify nopeer noquery limited kod\n'
+		printf 'restrict 127.0.0.1\n'
+		printf 'restrict [::1]\n'
+
+	} > "$GENERATED_NTP_CONF"
+}
+
+apply_ntp() {
+	local iface="$1"
+	local preferred=""
+	local fallback=""
+
+    # Priority 1: explicit user override — ignores DHCP entirely
+    if [ -n "$NTP_OVERRIDE" ]; then
+	    log "NTP_OVERRIDE set; using: $NTP_OVERRIDE"
+	    preferred="$NTP_OVERRIDE"
+	    fallback=""
+
+    # Priority 2: DHCP-discovered server
+elif [ "$DHCP_NTP" = "true" ]; then
+	local dhcp_ntp
+	dhcp_ntp=$(get_dhcp_ntp_for_interface "$iface")
+
+	if [ -n "$dhcp_ntp" ]; then
+		preferred="$dhcp_ntp"
+		fallback="$POOL_SERVERS"
+	else
+		log "No DHCP NTP found for $iface; using pool defaults."
+		preferred="$POOL_SERVERS"
+		fallback=""
+	fi
+
+else
+	# Neither option active; leave /etc/ntp.conf untouched.
+	return 0
     fi
 
-    # Loop through each interface
-    for INTERFACE in $INTERFACES; do
-	    log "Processing interface $INTERFACE..."
+    write_ntp_conf "$preferred" "$fallback"
+    log "NTP config written to $GENERATED_NTP_CONF."
 
-	# Wait for network interface to be up (max 30 seconds)
-	local timeout=30
-	local counter=0
-	while [ $counter -lt $timeout ]; do
-		if ip link show "$INTERFACE" >/dev/null 2>&1; then
-			log "Interface $INTERFACE is up."
-			break
-		fi
-		log "Waiting for interface $INTERFACE to be up..."
-		sleep 1
-		counter=$((counter + 1))
-	done
+    # Guard against a double bind-mount (e.g. restart with multiple interfaces)
+    if grep -q " $SYSTEM_NTP_CONF " /proc/mounts 2>/dev/null; then
+	    log "NTP bind-mount already active; skipping."
+	    return 0
+    fi
 
-	if [ $counter -ge $timeout ]; then
-		log "Error: Interface $INTERFACE not found or not up after $timeout seconds."
-		continue
+    if mount --bind "$GENERATED_NTP_CONF" "$SYSTEM_NTP_CONF"; then
+	    log "Bind-mounted $GENERATED_NTP_CONF over $SYSTEM_NTP_CONF."
+    else
+	    log "Error: bind-mount of NTP config failed."
+	    return 1
+    fi
+
+    # Reload ntpd so it picks up the new config immediately
+    if pkill -HUP ntpd 2>/dev/null; then
+	    log "ntpd reloaded via SIGHUP."
+    else
+	    log "ntpd not running; attempting to start it."
+	    ntpd -g 2>/dev/null &
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Service actions
+# ------------------------------------------------------------------------------
+
+start() {
+	log "--- network_tune starting ---"
+
+	if [ -z "$INTERFACES" ]; then
+		log "No interfaces specified; skipping link tuning."
+	else
+		local first_iface=""
+
+		for iface in $INTERFACES; do
+			log "Processing $iface..."
+
+			if ! wait_for_link "$iface"; then
+				log "Error: $iface not present after ${LINK_TIMEOUT}s. Skipping."
+				continue
+			fi
+
+			tune_interface "$iface"
+
+	    # Record the first interface that successfully gets an IP; this is
+	    # the one we'll use for DHCP NTP discovery.
+	    if [ -n "$NTP_OVERRIDE" ] || [ "$DHCP_NTP" = "true" ]; then
+		    if [ -z "$first_iface" ]; then
+			    if wait_for_ip "$iface"; then
+				    first_iface="$iface"
+			    else
+				    log "Warning: No IP on $iface after ${IP_TIMEOUT}s; skipping for NTP probe."
+			    fi
+		    fi
+	    fi
+    done
+
+	# Apply NTP config once, using the first interface that got an IP.
+	# (NTP is a host-wide setting; there is only one ntp.conf.)
+	if [ -n "$first_iface" ]; then
+		apply_ntp "$first_iface"
+	elif [ -n "$NTP_OVERRIDE" ]; then
+		# Override doesn't require DHCP at all; apply without an interface.
+		apply_ntp ""
+	fi
 	fi
 
-	# Apply MTU if set
-	if [ ! -z "$MTU" ]; then
-		log "Setting MTU to $MTU on interface $INTERFACE..."
-		if ip link set "$INTERFACE" mtu "$MTU"; then
-			log "Successfully set MTU to $MTU on $INTERFACE."
-		else
-			log "Error: Failed to set MTU to $MTU on $INTERFACE."
-		fi
-	fi
+    # If INTERFACES is empty but the user still wants NTP configured
+    if [ -z "$INTERFACES" ]; then
+	    if [ -n "$NTP_OVERRIDE" ]; then
+		    log "No interfaces configured; applying NTP_OVERRIDE regardless."
+		    apply_ntp ""
+	    elif [ "$DHCP_NTP" = "true" ]; then
+		    log "Warning: DHCP_NTP=true but no INTERFACES set; cannot probe. Using pool defaults."
+		    write_ntp_conf "$POOL_SERVERS" ""
+	    fi
+    fi
 
-	# Apply SPEED and DUPLEX if both are set
-	if [ ! -z "$SPEED" ] && [ ! -z "$DUPLEX" ]; then
-		log "Setting speed to $SPEED Mbps and duplex to $DUPLEX on $INTERFACE..."
-		if ethtool -s "$INTERFACE" speed "$SPEED" duplex "$DUPLEX"; then
-			log "Successfully set speed to $SPEED Mbps and duplex to $DUPLEX on $INTERFACE."
-		else
-			log "Error: Failed to set speed or duplex on $INTERFACE."
-		fi
-	elif [ ! -z "$SPEED" ] || [ ! -z "$DUPLEX" ]; then
-		log "Error: Both SPEED and DUPLEX must be set together for $INTERFACE. Skipping."
-	fi
-
-	# Apply AUTONEG if set
-	if [ ! -z "$AUTONEG" ]; then
-		log "Setting auto-negotiation to $AUTONEG on $INTERFACE..."
-		if ethtool -s "$INTERFACE" autoneg "$AUTONEG"; then
-			log "Successfully set auto-negotiation to $AUTONEG on $INTERFACE."
-		else
-			log "Error: Failed to set auto-negotiation on $INTERFACE."
-		fi
-	fi
-
-	# Apply TXQUEUELEN if set
-	if [ ! -z "$TXQUEUELEN" ]; then
-		log "Setting transmit queue length to $TXQUEUELEN on $INTERFACE..."
-		if ip link set "$INTERFACE" txqueuelen "$TXQUEUELEN"; then
-			log "Successfully set transmit queue length to $TXQUEUELEN on $INTERFACE."
-		else
-			log "Error: Failed to set transmit queue length on $INTERFACE."
-		fi
-	fi
-done
-
-log "network_tune service completed."
+    log "--- network_tune started ---"
 }
 
 stop() {
-	log "Stopping network_tune service (no action taken)."
+	log "--- network_tune stopping ---"
+
+	if grep -q " $SYSTEM_NTP_CONF " /proc/mounts 2>/dev/null; then
+		if umount "$SYSTEM_NTP_CONF"; then
+			log "Unmounted NTP bind; stock config restored."
+		else
+			log "Error: Failed to unmount NTP bind from $SYSTEM_NTP_CONF."
+		fi
+	fi
+
+	rm -f "$GENERATED_NTP_CONF"
+	log "--- network_tune stopped ---"
 }
 
 status() {
-	log "Checking status of network_tune service..."
+	log "--- network_tune status ---"
 
-    # Check if INTERFACES is set
-    if [ -z "$INTERFACES" ]; then
-	    log "No interfaces specified."
-	    echo "No interfaces specified in configuration."
-	    exit 0
-    fi
-
-    # Loop through each interface
-    for INTERFACE in $INTERFACES; do
-	    log "Checking status for interface $INTERFACE..."
-
-	# Check if interface exists
-	if ! ip link show "$INTERFACE" >/dev/null 2>&1; then
-		log "Error: Interface $INTERFACE not found."
-		echo "Error: Interface $INTERFACE not found."
-		continue
-	fi
-
-	# Display and log ip link status, removing interface index (e.g., "2:")
-	log "ip link status for $INTERFACE:"
-	ip_output=$(ip link show "$INTERFACE" | sed 's/^[0-9]\+://')
-	log "$ip_output"
-	echo "Interface $INTERFACE (ip link):"
-	echo "$ip_output"
-	echo ""
-
-	# Display and log ethtool status
-	log "ethtool status for $INTERFACE:"
-	ethtool_output=$(ethtool "$INTERFACE" 2>/dev/null | grep -E "Speed|Duplex|Auto-negotiation")
-	if [ ! -z "$ethtool_output" ]; then
-		log "$ethtool_output"
-		echo "Interface $INTERFACE (ethtool):"
-		echo "$ethtool_output"
+	if [ -z "$INTERFACES" ]; then
+		echo "No interfaces configured."
 	else
-		log "No relevant ethtool output for $INTERFACE."
-		echo "No relevant ethtool output for $INTERFACE."
-	fi
-	echo ""
-done
+		for iface in $INTERFACES; do
+			if ! ip link show "$iface" >/dev/null 2>&1; then
+				echo "Interface $iface: not found."
+				log "Interface $iface not found."
+				continue
+			fi
 
-log "network_tune status check completed."
+			echo "=== $iface ==="
+			ip link show "$iface" | sed 's/^[0-9]\+://'
+			ethtool "$iface" 2>/dev/null \
+				| grep -E "Speed|Duplex|Auto-negotiation" \
+				|| echo "(no ethtool data)"
+							echo ""
+						done
+	fi
+
+	echo "=== NTP ==="
+	if grep -q " $SYSTEM_NTP_CONF " /proc/mounts 2>/dev/null; then
+		echo "Custom NTP config active ($GENERATED_NTP_CONF bind-mounted):"
+		cat "$GENERATED_NTP_CONF"
+	else
+		echo "Stock NTP config in use:"
+		cat "$SYSTEM_NTP_CONF"
+	fi
 }
 
 case "$1" in
-	start)
-		start
-		;;
-	stop)
-		stop
-		;;
-	restart)
-		stop
-		start
-		;;
-	status)
-		status
-		;;
+	start)   start   ;;
+	stop)    stop    ;;
+	restart) stop; start ;;
+	status)  status  ;;
 	*)
 		echo "Usage: $0 {start|stop|restart|status}"
 		exit 1
