@@ -7,6 +7,7 @@ A collection of miscellaneous resources for Linux gaming and system tasks. Many 
 | Emulation | [network_tune_batocera](network_tune_batocera) | Sets custom network interface parameters (e.g., MTU, speed) at Batocera startup |
 | Emulation | [nfs_mount_batocera](nfs_mount_batocera) | Mounts NFS exports locally as a client on Batocera Linux, e.g. for Kodi |
 | Emulation | [disc-crusher.sh](disc-crusher.sh) | Compresses DVD or CD-ROM-based console images to CHD, auto-creates M3U for multi-disc games |
+| Utility | [net-core-status.sh](net-core-status.sh) | Monitors the status of `unbound`, `kea`, and `chrony` on a core network services box |
 | Hardware | [set-rdna-oc-fan.sh](set-rdna-oc-fan.sh) | Creates and applies overclocking / fan profiles for AMD RDNA GPUs |
 | Multimedia | [midi2wav.sh](midi2wav.sh) | Convert MIDI file(s) to digital audio like WAV, FLAC, AAC or MP3 |
 | Multimedia | [pipewire_tuning_guide.md](pipewire_tuning_guide.md) | Quick & dirty guide to setting up low-latency, multi-rate PipeWire |
