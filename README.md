@@ -41,6 +41,11 @@ wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/network_tune_bato
 wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/nfs_mount_batocera -O /userdata/system/services/nfs_mount && chmod 755 /userdata/system/services/nfs_mount
 ```
 
+On a core network services machine:
+```bash
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/net-core-status.sh -O /usr/local/bin/net-core-status.sh && sudo chmod 755 /usr/local/bin/net-core-status.sh
+```
+
 ## Usage
 Navigate to the script's folder and run it with appropriate arguments. See each script's `--help` or inline comments for details.
 
