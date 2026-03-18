@@ -134,6 +134,7 @@ Options:
   -n, --nice     N     Nice value for stat subprocesses (-20–19, default: $NICE_VALUE)
   -1, --once           Render once and exit (non-interactive / scriptable)
   -h, --help           Show this help and exit
+      --help-kea       Show Kea DHCP socket setup requirements and exit
 
 Live key bindings (while running):
   q / Q / Ctrl-C   Quit
@@ -145,6 +146,59 @@ Live key bindings (while running):
 
 Settings changed interactively are persisted to:
   $CFG_FILE
+EOF
+}
+
+usage_kea() {
+	cat <<EOF
+Kea DHCP lease counting — socket requirements
+==============================================
+
+Accurate lease counts are read live from the Kea control socket using the
+stat-lease4-get / stat-lease6-get commands.  Two things must be in place:
+
+1. Control socket
+   Add the following stanza inside the "Dhcp4": { } block in kea-dhcp4.conf
+   (and equivalently in kea-dhcp6.conf if DHCPv6 is in use):
+
+     "control-socket": {
+	 "socket-type": "unix",
+	 "socket-name": "/run/kea/kea4-ctrl-socket"
+ },
+
+   The socket directory /run/kea/ is owned by _kea:_kea and not world-
+   readable, so the dashboard must be run as root (via sudo, su, or
+   equivalent).
+
+2. stat_cmds hook library
+   The stat-lease4-get command is provided by the stat_cmds hook, which is
+   not loaded by default.  Add it to the "hooks-libraries" array:
+
+     "hooks-libraries": [
+	 {
+	     "library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_stat_cmds.so"
+     }
+     ],
+
+   Verify the library path on your system:
+     find /usr/lib -name 'libdhcp_stat_cmds.so' 2>/dev/null
+
+   After editing the config, restart the service:
+     systemctl restart kea-dhcp4-server
+
+3. Verify the socket is responding correctly
+   The following should return JSON with "result": 0 and row data:
+
+     printf '{"command":"stat-lease4-get","service":["dhcp4"]}' \\
+       | sudo socat -t2 - UNIX-CONNECT:/run/kea/kea4-ctrl-socket
+
+Fallback behavior
+   If the socket is absent, unresponsive, or returns a non-zero result
+   (e.g. missing hook), the dashboard falls back to parsing the lease CSV
+   at /var/lib/kea/kea-leases4.csv.  CSV counts are marked "(≈ csv)" and
+   are approximate: the file is an append log flushed only on LFC cycles,
+   does not include static reservations, and may contain stale entries
+   between cleanup runs.
 EOF
 }
 
@@ -161,6 +215,8 @@ parse_args() {
 				ONE_SHOT=true; shift ;;
 			-h|--help)
 				usage; exit 0 ;;
+			--help-kea)
+				usage_kea; exit 0 ;;
 			--) shift; break ;;
 			-*)
 				printf 'Unknown option: %s\n' "$1" >&2
@@ -174,7 +230,7 @@ load_config
 parse_args "$@"
 apply_nice
 
-# ── Colours ───────────────────────────────────────────────────────────────────
+# ── Colors ────────────────────────────────────────────────────────────────────
 RESET=$'\033[0m';  BOLD=$'\033[1m';  DIM=$'\033[2m'
 FG_RED=$'\033[0;31m';    FG_GREEN=$'\033[0;32m';   FG_YELLOW=$'\033[0;33m'
 FG_BLUE=$'\033[0;34m';   FG_CYAN=$'\033[0;36m';    FG_WHITE=$'\033[0;37m'
@@ -323,34 +379,35 @@ section_unbound() {
 	kv_line "Status " "$(svc_status_badge)  Boot: $(svc_enabled_badge)"
 	kv_line "Uptime " "$(svc_uptime "$_NOW")"
 
-	if command -v unbound-control &>/dev/null \
-		&& unbound-control status &>/dev/null 2>&1; then
-
-	local stats
-	stats=$(unbound-control stats_noreset 2>/dev/null)
-
-	local total_q cache_hits cache_miss prefetch avg_ms rec_ms msg_cache rrset_cache cache_pct=''
-	eval "$(awk -F= '
-	/^total\.num\.queries=/            { total=$2+0;     printf "total_q=\"%'"'"'d\"\n",    $2+0 }
-	/^total\.num\.cachehits=/          { hits=$2+0;      printf "cache_hits=\"%'"'"'d\"\n", $2+0 }
-	/^total\.num\.cachemiss=/          {                 printf "cache_miss=\"%'"'"'d\"\n", $2+0 }
-	/^total\.num\.prefetch=/           {                 printf "prefetch=\"%'"'"'d\"\n",   $2+0 }
-	/^total\.recursion\.time\.avg=/    {                 printf "avg_ms=\"%.2f ms\"\n",     $2*1000 }
-	/^total\.recursion\.time\.median=/ {                 printf "rec_ms=\"%.2f ms\"\n",     $2*1000 }
-	/^mem\.cache\.message=/            {                 printf "msg_cache=\"%.1f MiB\"\n", $2/1048576 }
-	/^mem\.cache\.rrset=/              {                 printf "rrset_cache=\"%.1f MiB\"\n",$2/1048576 }
-	END { if (total>0) printf "cache_pct=\"%.1f%%\"\n", hits/total*100 }
-	' <<< "$stats")"
-
-	inner_rule dash
-	kv_line "Queries (total)" "${FG_BWHITE}${total_q:-n/a}${RESET}"
-	kv_line "Cache hits     " "${FG_BGREEN}$(printf '%-12s' "${cache_hits:-n/a}")${RESET}misses:  ${FG_YELLOW}${cache_miss:-n/a}${RESET}${cache_pct:+   ${FG_BCYAN}(${cache_pct} hit rate)${RESET}}"
-	kv_line "Prefetches     " "${FG_WHITE}${prefetch:-n/a}${RESET}"
-	kv_line "Avg recursion  " "${FG_WHITE}$(printf '%-12s' "${avg_ms:-n/a}")${RESET}median:  ${FG_WHITE}${rec_ms:-n/a}${RESET}"
-	kv_line "Msg cache      " "${FG_WHITE}$(printf '%-12s' "${msg_cache:-n/a}")${RESET}RRset:   ${FG_WHITE}${rrset_cache:-n/a}${RESET}"
-else
-	inner_rule dash
-	box_line "   ${FG_YELLOW}⚠  unbound-control unavailable or remote-control not configured${RESET}"
+	if command -v unbound-control &>/dev/null; then
+		local stats
+		stats=$(unbound-control stats_noreset 2>/dev/null)
+		if [[ -n "$stats" ]]; then
+			local total_q cache_hits cache_miss prefetch avg_ms rec_ms msg_cache rrset_cache cache_pct=''
+			eval "$(awk -F= '
+			/^total\.num\.queries=/            { total=$2+0;     printf "total_q=\"%'"'"'d\"\n",    $2+0 }
+			/^total\.num\.cachehits=/          { hits=$2+0;      printf "cache_hits=\"%'"'"'d\"\n", $2+0 }
+			/^total\.num\.cachemiss=/          {                 printf "cache_miss=\"%'"'"'d\"\n", $2+0 }
+			/^total\.num\.prefetch=/           {                 printf "prefetch=\"%'"'"'d\"\n",   $2+0 }
+			/^total\.recursion\.time\.avg=/    {                 printf "avg_ms=\"%.2f ms\"\n",     $2*1000 }
+			/^total\.recursion\.time\.median=/ {                 printf "rec_ms=\"%.2f ms\"\n",     $2*1000 }
+			/^mem\.cache\.message=/            {                 printf "msg_cache=\"%.1f MiB\"\n", $2/1048576 }
+			/^mem\.cache\.rrset=/              {                 printf "rrset_cache=\"%.1f MiB\"\n",$2/1048576 }
+			END { if (total>0) printf "cache_pct=\"%.1f%%\"\n", hits/total*100 }
+			' <<< "$stats")"
+			inner_rule dash
+			kv_line "Queries (total)" "${FG_BWHITE}${total_q:-n/a}${RESET}"
+			kv_line "Cache hits     " "${FG_BGREEN}$(printf '%-12s' "${cache_hits:-n/a}")${RESET}misses:  ${FG_YELLOW}${cache_miss:-n/a}${RESET}${cache_pct:+   ${FG_BCYAN}(${cache_pct} hit rate)${RESET}}"
+			kv_line "Prefetches     " "${FG_WHITE}${prefetch:-n/a}${RESET}"
+			kv_line "Avg recursion  " "${FG_WHITE}$(printf '%-12s' "${avg_ms:-n/a}")${RESET}median:  ${FG_WHITE}${rec_ms:-n/a}${RESET}"
+			kv_line "Msg cache      " "${FG_WHITE}$(printf '%-12s' "${msg_cache:-n/a}")${RESET}RRset:   ${FG_WHITE}${rrset_cache:-n/a}${RESET}"
+		else
+			inner_rule dash
+			box_line "   ${FG_YELLOW}⚠  unbound-control unavailable or remote-control not configured${RESET}"
+		fi
+	else
+		inner_rule dash
+		box_line "   ${FG_YELLOW}⚠  unbound-control not found${RESET}"
 	fi
 	box_blank
 }
@@ -363,75 +420,181 @@ section_kea() {
 
 	local services=('kea-dhcp4-server' 'kea-dhcp6-server' 'kea-dhcp-ddns-server')
 	local labels=('DHCPv4' 'DHCPv6' 'DDNS  ')
-	local i
+	local i _kea4_active='' _kea6_active=''
 	for i in "${!services[@]}"; do
-		local svc="${services[$i]}"
-		svc_fetch "$svc"
+		svc_fetch "${services[$i]}"
 		kv_line "${labels[$i]} status" \
 			"$(svc_status_badge)  Boot: $(svc_enabled_badge)  Up: $(svc_uptime "$_NOW")"
-		done
+					# Capture before next svc_fetch overwrites _SVC_ACTIVE.
+					[[ $i -eq 0 ]] && _kea4_active="$_SVC_ACTIVE"
+					[[ $i -eq 1 ]] && _kea6_active="$_SVC_ACTIVE"
+				done
 
-		inner_rule dash
+				inner_rule dash
 
-		local lease4='/var/lib/kea/kea-leases4.csv'
-		if [[ -r "$lease4" ]]; then
-			local t4 a4 e4 d4
-			read -r t4 a4 e4 d4 < <(awk -F, '
-			NR>1 { t++; if($10==0) a++; else if($10==2) e++; else if($10==1) d++ }
-			END  { printf "%d %d %d %d\n", t+0, a+0, e+0, d+0 }
-			' "$lease4")
-			kv_line "DHCPv4 leases" \
-				"Total: ${FG_BWHITE}$(printf '%4d' "$t4")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a4")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e4")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$d4")${RESET}"
-						else
-							kv_line "DHCPv4 leases" "${FG_YELLOW}lease file not readable (${lease4})${RESET}"
-		fi
+				local sock4='/run/kea/kea4-ctrl-socket'
+				local sock6='/run/kea/kea6-ctrl-socket'
+				local has_socat=false
+				command -v socat &>/dev/null && has_socat=true
 
-		local lease6='/var/lib/kea/kea-leases6.csv'
-		if [[ -r "$lease6" ]]; then
-			local t6 a6 e6 d6
-			read -r t6 a6 e6 d6 < <(awk -F, '
-			NR>1 { t++; if($9==0) a++; else if($9==2) e++; else if($9==1) d++ }
-			END  { printf "%d %d %d %d\n", t+0, a+0, e+0, d+0 }
-			' "$lease6")
-			kv_line "DHCPv6 leases" \
-				"Total: ${FG_BWHITE}$(printf '%4d' "$t6")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a6")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e6")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$d6")${RESET}"
-						else
-							kv_line "DHCPv6 leases" "${FG_YELLOW}lease file not readable (${lease6})${RESET}"
-		fi
-
-		local ctl_sock='/run/kea/kea4-ctrl-socket'
-		if command -v socat &>/dev/null && [[ -S "$ctl_sock" ]]; then
-			local raw rcv sent drop
-			raw=$(printf '{"command":"statistic-get-all","service":["dhcp4"]}' \
-				| socat - UNIX-CONNECT:"$ctl_sock" 2>/dev/null)
-							if [[ -n "$raw" ]]; then
-								# Kea emits compact single-line JSON.  RS="," gives one field per record;
-								# getval() seeks past the "[[" value marker to avoid matching digits in
-								# key names like "pkt4".
-								read -r rcv sent drop < <(awk 'BEGIN{RS=","}
-								function getval(s,  i,t) {
-								i=index(s,"[["); t=substr(s,i+2)
-								match(t,/[0-9]+/); return substr(t,RSTART,RLENGTH)+0
-							}
-							/"pkt4-received":/     { rcv=getval($0) }
-							/"pkt4-sent":/         { sent=getval($0) }
-							/"pkt4-receive-drop":/ { drop=getval($0) }
-							END { printf "%d %d %d\n", rcv+0, sent+0, drop+0 }
-							' <<< "$raw")
-							kv_line "DHCPv4 packets" \
-								"Rcvd: ${FG_BWHITE}$(printf '%7d' "${rcv:-0}")${RESET}   Sent: ${FG_BGREEN}$(printf '%7d' "${sent:-0}")${RESET}   Dropped: ${FG_BRED}$(printf '%7d' "${drop:-0}")${RESET}"
+	# ── DHCPv4 leases ─────────────────────────────────────────────────────────
+	if [[ "$_kea4_active" == "active" ]]; then
+		local leases4_line=''
+		if [[ "$has_socat" == true && -S "$sock4" ]]; then
+			local raw4
+			raw4=$(printf '{"command":"stat-lease4-get","service":["dhcp4"]}' \
+				| socat -t2 - UNIX-CONNECT:"$sock4" 2>/dev/null)
+							# Kea returns "result": 1/2 if stat_cmds hook is missing or command fails;
+							# treat anything other than result:0 as a socket failure and fall back to CSV.
+							if [[ "$raw4" == *'"result": 0'* || "$raw4" == *'"result":0'* ]]; then
+								local tot4 asgn4 decl4
+								# stat-lease4-get rows: [subnet-id, total-addresses, cumulative-assigned-addresses, assigned-addresses, declined-addresses]
+								# Kea may emit "rows": [ with a space; /, */ handles space after comma in each row.
+								read -r tot4 asgn4 decl4 < <(awk '
+								{ if (match($0, /"rows": *\[/)) {
+									s = substr($0, RSTART + RLENGTH)
+									while (match(s, /\[ *[0-9, ]+\]/)) {
+										row = substr(s, RSTART+1, RLENGTH-2)
+										n = split(row, a, /, */)
+										if (n >= 5) { tot+=a[2]+0; asgn+=a[4]+0; decl+=a[5]+0 }
+											s = substr(s, RSTART + RLENGTH)
+										}
+									} }
+									END { printf "%d %d %d\n", tot+0, asgn+0, decl+0 }
+									' <<< "$raw4")
+									# Kea has no explicit expired count; remainder of pool = expired/available.
+									local exp4=$(( tot4 - asgn4 - decl4 ))
+									(( exp4 < 0 )) && exp4=0
+									leases4_line="Total: ${FG_BWHITE}$(printf '%4d' "$tot4")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$asgn4")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$exp4")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$decl4")${RESET}"
 							fi
 		fi
+		if [[ -z "$leases4_line" ]]; then
+			local lease4='/var/lib/kea/kea-leases4.csv'
+			if [[ -r "$lease4" ]]; then
+				local t4 a4 e4 d4
+				# Kea appends a row on every renewal; dedupe by address keeping the
+				# highest expire per IP, then classify — static leases not reflected.
+				read -r t4 a4 e4 d4 < <(awk -F, -v now="$_NOW" '
+				NR>1 {
+				addr=$1; expire=$5+0; state=$10+0
+				if (expire > best_expire[addr]) {
+					best_expire[addr] = expire
+					best_state[addr]  = state
+				}
+			}
+			END {
+			for (addr in best_expire) {
+				t++
+				s = best_state[addr]; e = best_expire[addr]
+				if      (s == 1)           d++
+				else if (s == 2 || e <= now) ex++
+				else                         a++
+				}
+				printf "%d %d %d %d\n", t+0, a+0, ex+0, d+0
+			}
+			' "$lease4")
+			leases4_line="Total: ${FG_BWHITE}$(printf '%4d' "$t4")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a4")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e4")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$d4")${RESET}  ${DIM}(≈ csv)${RESET}"
+		else
+			leases4_line="${FG_YELLOW}socket unavailable · lease file not readable${RESET}"
+			fi
+		fi
+		kv_line "DHCPv4 leases" "$leases4_line"
+	fi # _kea4_active
 
-		box_blank
-	}
+	# ── DHCPv6 leases ─────────────────────────────────────────────────────────
+	if [[ "$_kea6_active" == "active" ]]; then
+		local leases6_line=''
+		if [[ "$has_socat" == true && -S "$sock6" ]]; then
+			local raw6
+			raw6=$(printf '{"command":"stat-lease6-get","service":["dhcp6"]}' \
+				| socat -t2 - UNIX-CONNECT:"$sock6" 2>/dev/null)
+							# Same result:0 guard as v4.
+							if [[ "$raw6" == *'"result": 0'* || "$raw6" == *'"result":0'* ]]; then
+								local tna ana dna tpd apd
+								# stat-lease6-get rows: [subnet-id, total-nas, assigned-nas, declined-nas, total-pds, assigned-pds]
+								# >= 6 guards against extra cumulative columns; /, */ handles spaces after commas.
+								read -r tna ana dna tpd apd < <(awk '
+								{ if (match($0, /"rows": *\[/)) {
+									s = substr($0, RSTART + RLENGTH)
+									while (match(s, /\[ *[0-9, ]+\]/)) {
+										row = substr(s, RSTART+1, RLENGTH-2)
+										n = split(row, a, /, */)
+										if (n >= 6) { tna+=a[2]+0; ana+=a[3]+0; dna+=a[4]+0; tpd+=a[5]+0; apd+=a[6]+0 }
+											s = substr(s, RSTART + RLENGTH)
+										}
+									} }
+									END { printf "%d %d %d %d %d\n", tna+0, ana+0, dna+0, tpd+0, apd+0 }
+									' <<< "$raw6")
+									local exp_na=$(( tna - ana - dna ))
+									(( exp_na < 0 )) && exp_na=0
+									leases6_line="NA — Total: ${FG_BWHITE}$(printf '%3d' "$tna")${RESET}  Active: ${FG_BGREEN}$(printf '%3d' "$ana")${RESET}  Expired: ${FG_YELLOW}$(printf '%3d' "$exp_na")${RESET}  Declined: ${FG_BRED}$(printf '%3d' "$dna")${RESET}   PD: ${FG_BGREEN}$(printf '%3d' "$apd")${RESET}${DIM}/${RESET}${FG_BWHITE}$(printf '%3d' "$tpd")${RESET}"
+							fi
+		fi
+		if [[ -z "$leases6_line" ]]; then
+			local lease6='/var/lib/kea/kea-leases6.csv'
+			if [[ -r "$lease6" ]]; then
+				local t6 a6 e6 d6
+				# v6 CSV: $3=expire, $9=state — column position may vary across Kea versions.
+				read -r t6 a6 e6 d6 < <(awk -F, -v now="$_NOW" '
+				NR>1 {
+				addr=$1; expire=$3+0; state=$9+0
+				if (expire > best_expire[addr]) {
+					best_expire[addr] = expire
+					best_state[addr]  = state
+				}
+			}
+			END {
+			for (addr in best_expire) {
+				t++
+				s = best_state[addr]; e = best_expire[addr]
+				if      (s == 1)           d++
+				else if (s == 2 || e <= now) ex++
+				else                         a++
+				}
+				printf "%d %d %d %d\n", t+0, a+0, ex+0, d+0
+			}
+			' "$lease6")
+			leases6_line="Total: ${FG_BWHITE}$(printf '%4d' "$t6")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a6")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e6")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$d6")${RESET}  ${DIM}(≈ csv)${RESET}"
+		else
+			leases6_line="${FG_YELLOW}socket unavailable · lease file not readable${RESET}"
+			fi
+		fi
+		kv_line "DHCPv6 leases" "$leases6_line"
+	fi # _kea6_active
+
+	# ── DHCPv4 packet counters ─────────────────────────────────────────────────
+	if [[ "$has_socat" == true && -S "$sock4" ]]; then
+		local raw rcv sent drop
+		raw=$(printf '{"command":"statistic-get-all","service":["dhcp4"]}' \
+			| socat -t2 - UNIX-CONNECT:"$sock4" 2>/dev/null)
+					if [[ -n "$raw" ]]; then
+						# Kea emits compact single-line JSON.  RS="," gives one field per record;
+						# getval() seeks past the "[[" value marker to avoid matching digits in
+						# key names like "pkt4".
+						read -r rcv sent drop < <(awk 'BEGIN{RS=","}
+						function getval(s,  i,t) {
+						i=index(s,"[["); t=substr(s,i+2)
+						match(t,/[0-9]+/); return substr(t,RSTART,RLENGTH)+0
+					}
+					/"pkt4-received":/     { rcv=getval($0) }
+					/"pkt4-sent":/         { sent=getval($0) }
+					/"pkt4-receive-drop":/ { drop=getval($0) }
+					END { printf "%d %d %d\n", rcv+0, sent+0, drop+0 }
+					' <<< "$raw")
+					kv_line "DHCPv4 pkts  " \
+						"Rcvd : ${FG_BWHITE}$(printf '%4d' "${rcv:-0}")${RESET}   Sent  : ${FG_BGREEN}$(printf '%4d' "${sent:-0}")${RESET}   Dropped: ${FG_BRED}$(printf '%4d' "${drop:-0}")${RESET}"
+					fi
+	fi
+
+	box_blank
+}
 
 # =============================================================================
 # ── CHRONY ────────────────────────────────────────────────────────────────────
 # =============================================================================
 section_chrony() {
 	local svc='chrony'
-	section_header "CHRONY" "NTP Time Synchronisation" "🕐"
+	section_header "CHRONY" "NTP Time Synchronization" "🕐"
 	svc_fetch "$svc"
 	kv_line "Status " "$(svc_status_badge)  Boot: $(svc_enabled_badge)"
 	kv_line "Uptime " "$(svc_uptime "$_NOW")"
@@ -449,7 +612,7 @@ section_chrony() {
 
 		local ref_id stratum sys_time rms_offset freq_err leap offset_key
 		# Single awk pass; emits offset_key (good/warn/bad) so bash can choose a
-		# colour without spawning another awk just for the float comparison.
+		# color without spawning another awk just for the float comparison.
 		eval "$(awk -F': ' '
 		/^Reference ID/ { printf "ref_id=\"%s\"\n",      $2 }
 		/^Stratum/       { printf "stratum=\"%s\"\n",     $2 }
@@ -492,7 +655,7 @@ section_chrony() {
 		box_line "   ${DIM}${NTP_HDR}${RESET}"
 		inner_rule dash
 
-		# Colour by selection state character at index 1 (0-based):
+		# Color by selection state character at index 1 (0-based):
 		#   * current best  + combined  - not combined
 		#   ? unreachable   x falseticker   ~ too variable
 		while IFS= read -r line; do
@@ -508,7 +671,7 @@ section_chrony() {
 				*)   sc="$FG_WHITE"   ;;
 			esac
 			box_line "   ${sc}${line}${RESET}"
-		done <<< "$(grep -E '^[\^=#][*+?x~-]' <<< "$src_output")"
+		done < <(grep -E '^[\^=#][*+?x~-]' <<< "$src_output")
 	fi
 
 	box_blank
@@ -539,8 +702,8 @@ draw_loading() {
 
 		draw_dashboard() {
 			_BUF=''
-			_NOW=$(date +%s)   # one fork; shared by all svc_uptime calls this frame
-			local ts; ts=$(date '+%A %d %B %Y  %H:%M:%S %Z')
+			local ts
+			read -r _NOW ts < <(date '+%s %A %d %B %Y  %H:%M:%S %Z')   # one fork for both epoch and display time
 			local nice_disp; printf -v nice_disp '%+d' "$NICE_VALUE"
 
 			box_blank
@@ -617,7 +780,7 @@ do_draw() {
 sync_dimensions() {
 	TERM_WIDTH=${COLUMNS:-80}
 	INNER_WIDTH=$(( TERM_WIDTH - 2 ))
-	B="${FG_BLUE}${BOX_V}${RESET}"
+	# B is composed of constants set at startup; no need to reassign here.
 	(( INNER_WIDTH != _LAST_WIDTH )) && rebuild_fills
 }
 
@@ -625,7 +788,7 @@ main() {
 	if [[ "$ONE_SHOT" == "true" ]]; then
 		_HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'unknown')
 		sync_dimensions
-		LAST_REFRESH=$(date '+%H:%M:%S')
+		printf -v LAST_REFRESH '%(%H:%M:%S)T' -1   # bash strftime builtin — no fork
 		draw_dashboard
 		outer_top
 		printf '%s' "$_BUF"
@@ -657,7 +820,7 @@ main() {
 			[[ -n "$_BUF" ]] && { printf '\033[H'; outer_top; printf '%s' "$_BUF"; outer_bottom; printf '\033[J'; }
 
 			[[ "$PAUSED" == "false" || "$force_refresh" == "true" ]] \
-				&& LAST_REFRESH=$(date '+%H:%M:%S')
+				&& printf -v LAST_REFRESH '%(%H:%M:%S)T' -1   # bash strftime builtin — no fork
 							force_refresh=false
 							_NEED_REDRAW=false
 							draw_dashboard
