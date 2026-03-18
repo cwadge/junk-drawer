@@ -568,12 +568,11 @@ section_kea() {
 		raw=$(printf '{"command":"statistic-get-all","service":["dhcp4"]}' \
 			| socat -t2 - UNIX-CONNECT:"$sock4" 2>/dev/null)
 					if [[ -n "$raw" ]]; then
-						# Kea emits compact single-line JSON.  RS="," gives one field per record;
-						# getval() seeks past the "[[" value marker to avoid matching digits in
-						# key names like "pkt4".
+						# RS="," gives one field per record; getval() seeks past the "[ [" value
+						# marker (space-tolerant) to avoid matching digits in key names like "pkt4".
 						read -r rcv sent drop < <(awk 'BEGIN{RS=","}
 						function getval(s,  i,t) {
-						i=index(s,"[["); t=substr(s,i+2)
+						match(s,/\[ *\[/); t=substr(s,RSTART+RLENGTH)
 						match(t,/[0-9]+/); return substr(t,RSTART,RLENGTH)+0
 					}
 					/"pkt4-received":/     { rcv=getval($0) }
