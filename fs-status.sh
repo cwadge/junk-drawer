@@ -771,7 +771,7 @@ section_drives() {
 		local io_col=" ↓ ${rrc}$(printf '%-12s' "$rrs")${RESET}  ↑ ${rwc}$(printf '%-12s' "$rws")${RESET}  ${DIM}R:${RESET} ${FG_WHITE}$(printf '%-10s' "$(fmt_bytes "$bytes_r")")${RESET}  ${DIM}W:${RESET} ${FG_WHITE}$(fmt_bytes "$bytes_w")${RESET}"
 
 		# SMART health (md* arrays are skipped; requires root for block devices)
-		local hs='─' hc="$DIM" temps='      ' mdls='' errs=''
+		local hs='n/a' hc="$DIM" temps='      ' mdls='' errs=''
 		if [[ "$smart_avail" == "true" && "$devname" != md* ]]; then
 			local sout
 			sout=$(smartctl -i -H -A "/dev/${devname}" 2>/dev/null)
