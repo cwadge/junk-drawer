@@ -8,6 +8,7 @@ A collection of miscellaneous resources for Linux gaming and system tasks. Many 
 | Emulation | [nfs_mount_batocera](nfs_mount_batocera) | Mounts NFS exports locally as a client on Batocera Linux, e.g. for Kodi |
 | Emulation | [disc-crusher.sh](disc-crusher.sh) | Compresses DVD or CD-ROM-based console images to CHD, auto-creates M3U for multi-disc games |
 | Utility | [net-core-status.sh](net-core-status.sh) | Monitors the status of `unbound`, `kea`, and `chrony` on a core network services box |
+| Utility | [fs-status.sh](fs-status.sh) | Monitors the status of ZFS, `mdadm`, storage devices, volumes, networks, NFS and Samba |
 | Hardware | [set-rdna-oc-fan.sh](set-rdna-oc-fan.sh) | Creates and applies overclocking / fan profiles for AMD RDNA GPUs |
 | Multimedia | [midi2wav.sh](midi2wav.sh) | Convert MIDI file(s) to digital audio like WAV, FLAC, AAC or MP3 |
 | Multimedia | [pipewire_tuning_guide.md](pipewire_tuning_guide.md) | Quick & dirty guide to setting up low-latency, multi-rate PipeWire |
@@ -44,6 +45,11 @@ wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/nfs_mount_batocer
 On a core network services machine:
 ```bash
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/net-core-status.sh -O /usr/local/bin/net-core-status.sh && sudo chmod 755 /usr/local/bin/net-core-status.sh
+```
+
+On a file server:
+```bash                                                                                                                                                                                                                                                                                                                        
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/fs-status.sh -O /usr/local/bin/fs-status.sh && sudo chmod 755 /usr/local/bin/fs-status.sh                                                                                                                                                
 ```
 
 ## Usage
