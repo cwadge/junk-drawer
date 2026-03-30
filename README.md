@@ -48,8 +48,8 @@ sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/net-core-sta
 ```
 
 On a file server:
-```bash                                                                                                                                                                                                                                                                                                                        
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/fs-status.sh -O /usr/local/bin/fs-status.sh && sudo chmod 755 /usr/local/bin/fs-status.sh                                                                                                                                                
+```bash
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/fs-status.sh -O /usr/local/bin/fs-status.sh && sudo chmod 755 /usr/local/bin/fs-status.sh
 ```
 
 ## Usage
