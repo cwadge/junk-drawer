@@ -460,9 +460,9 @@ section_zfs() {
 				local arc_right=''
 				if [[ "$l2arc_present" == "true" ]]; then
 					if   [[ -z "$l2arc_hit_pct" ]];              then l2_col="$FG_WHITE"
-					elif (( ${l2arc_hit_pct%%.*} >= 80 ));        then l2_col="$FG_BGREEN"
-					elif (( ${l2arc_hit_pct%%.*} >= 50 ));        then l2_col="$FG_BYELLOW"
-					else                                               l2_col="$FG_BRED"
+					elif (( ${l2arc_hit_pct%%.*} >= 40 ));        then l2_col="$FG_BGREEN"
+					elif (( ${l2arc_hit_pct%%.*} >= 10 ));        then l2_col="$FG_WHITE"
+					else                                               l2_col="$FG_BYELLOW"
 					fi
 					local l2_hit_str
 					[[ -n "$l2arc_hit_pct" ]] \
