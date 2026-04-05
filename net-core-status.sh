@@ -321,23 +321,29 @@ svc_fetch() {
 			done <<< "$raw"
 		}
 
-		svc_status_badge() {   # reads _SVC_ACTIVE (set by svc_fetch)
+		svc_status_badge() {   # reads _SVC_ACTIVE, _SVC_ENABLED (set by svc_fetch)
 			case "$_SVC_ACTIVE" in
 				active)   printf '%s● Active  %s' "$FG_BGREEN" "$RESET" ;;
-				inactive) printf '%s✖ Inactive%s' "$FG_BRED"   "$RESET" ;;
-				failed)   printf '%s✖ Failed  %s' "$FG_BRED"   "$RESET" ;;
-				*)        printf '%s%-10s%s'       "$FG_YELLOW" "? ${_SVC_ACTIVE:-unknown}" "$RESET" ;;
-			esac
-		}
+				inactive)
+					# Dim when deliberately disabled/masked; red only when enabled but not running.
+					if [[ "$_SVC_ENABLED" == "disabled" || "$_SVC_ENABLED" == "masked" ]]; then
+						printf '%s✖ Inactive%s' "$DIM"     "$RESET"
+					else
+						printf '%s✖ Inactive%s' "$FG_BRED" "$RESET"
+						fi ;;
+					failed)   printf '%s✖ Failed  %s' "$FG_BRED"   "$RESET" ;;
+					*)        printf '%s%-10s%s'       "$FG_YELLOW" "? ${_SVC_ACTIVE:-unknown}" "$RESET" ;;
+				esac
+			}
 
-		svc_enabled_badge() {   # reads _SVC_ENABLED (set by svc_fetch)
-			case "$_SVC_ENABLED" in
-				enabled)  printf '%sEnabled %s' "$FG_BGREEN" "$RESET" ;;
-				disabled) printf '%sDisabled%s' "$FG_YELLOW" "$RESET" ;;
-				masked)   printf '%sMasked  %s' "$FG_BRED"   "$RESET" ;;
-				*)        printf '%s%-8s%s'      "$FG_WHITE"  "${_SVC_ENABLED:-unknown}" "$RESET" ;;
-			esac
-		}
+			svc_enabled_badge() {   # reads _SVC_ENABLED (set by svc_fetch)
+				case "$_SVC_ENABLED" in
+					enabled)  printf '%sEnabled %s' "$FG_BGREEN" "$RESET" ;;
+					disabled) printf '%sDisabled%s' "$FG_YELLOW" "$RESET" ;;
+					masked)   printf '%sMasked  %s' "$FG_BRED"   "$RESET" ;;
+					*)        printf '%s%-8s%s'      "$FG_WHITE"  "${_SVC_ENABLED:-unknown}" "$RESET" ;;
+				esac
+			}
 
 # $1 = epoch seconds from draw_dashboard (_NOW); reads _SVC_ENTER (set by svc_fetch).
 svc_uptime() {
