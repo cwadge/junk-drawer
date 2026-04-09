@@ -572,6 +572,12 @@ get_episode_num() {
 	local filename="$1"
 	local ep_num=""
 
+	# 0. OVA/OAV prefix — normalize OAV→OVA, encode as N-1000 so negatives sort before episodes
+	if echo "$filename" | grep -qiP '^O(VA|AV)[\s._\-]'; then
+		ep_num=$(echo "$filename" | grep -oP '\d{1,3}' | head -1)
+		[[ -n "$ep_num" ]] && { echo $((10#$ep_num - 1000)); return; }
+	fi
+
 	# 1. Standard SxxExx / sxxexx
 	ep_num=$(echo "$filename" | grep -oP '[Ss]\d{2}[Ee]\K\d{2,3}' | head -1)
 	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
@@ -619,13 +625,21 @@ resolve_unknown_episodes() {
 	done
 	[[ $unknown_count -eq 0 ]] && return
 
-	# Collect UNKNOWN source paths and sort alphabetically by basename
-	local -a unknown_srcs=()
+	# Collect UNKNOWN source paths: sort regular files alphabetically, OVA/OAV files last
+	local -a regular_srcs=() ova_srcs=()
 	for entry in "${episode_files[@]}"; do
 		IFS='|' read -r _ _ ep src _ _ <<< "$entry"
-		[[ "$ep" == "UNKNOWN" ]] && unknown_srcs+=("$src")
+		if [[ "$ep" == "UNKNOWN" ]]; then
+			if basename "$src" | grep -qiP '^OV[AV]\b'; then
+				ova_srcs+=("$src")
+			else
+				regular_srcs+=("$src")
+			fi
+		fi
 	done
-	IFS=$'\n' unknown_srcs=($(printf '%s\n' "${unknown_srcs[@]}" | sort)); unset IFS
+	IFS=$'\n' regular_srcs=($(printf '%s\n' "${regular_srcs[@]+${regular_srcs[@]}}" | sort)); unset IFS
+	IFS=$'\n' ova_srcs=($(printf '%s\n' "${ova_srcs[@]+${ova_srcs[@]}}" | sort)); unset IFS
+	local -a unknown_srcs=("${regular_srcs[@]+${regular_srcs[@]}}" "${ova_srcs[@]+${ova_srcs[@]}}")
 
 	# Build a set of episode numbers already claimed by parsed entries
 	local -A known_eps=()
@@ -3071,16 +3085,22 @@ else
 	ep_index=1
 	for sorted_line in "${sorted_files[@]}"; do
 		IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
+		if [[ "$parsed_ep_num" -lt 0 ]]; then
+			ova_num=$((parsed_ep_num + 1000))
+			episode_label="OVA $(printf "%02d" $ova_num)"
+		else
+			episode_label="Episode $ep_index"
+		fi
 		if [[ "$start_ch" == "-1" ]]; then
-			echo "    $(basename "$source_file") -> Episode $ep_index"
+			echo "    $(basename "$source_file") -> $episode_label"
 		else
 			if [[ "$start_ch" == "$end_ch" ]]; then
-				echo "    $(basename "$source_file") [Chapter $((start_ch + 1))] -> Episode $ep_index"
+				echo "    $(basename "$source_file") [Chapter $((start_ch + 1))] -> $episode_label"
 			else
-				echo "    $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))] -> Episode $ep_index"
+				echo "    $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))] -> $episode_label"
 			fi
 		fi
-		ep_index=$((ep_index + 1))
+		[[ "$parsed_ep_num" -ge 0 ]] && ep_index=$((ep_index + 1))
 	done
 
 	echo ""
@@ -3091,7 +3111,12 @@ else
 		ep_index=1
 		for sorted_line in "${sorted_files[@]}"; do
 			IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
-			episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
+			if [[ "$parsed_ep_num" -lt 0 ]]; then
+				ova_num=$((parsed_ep_num + 1000))
+				episode_num="OVA $(printf "%02d" $ova_num)"
+			else
+				episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
+			fi
 			output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 			if [[ "$start_ch" == "-1" ]]; then
 				echo -e "${YELLOW}[DRY RUN] Would transcode: $(basename "$source_file") -> $(basename "$output_file")${RESET}"
@@ -3102,14 +3127,19 @@ else
 					echo -e "${YELLOW}[DRY RUN] Would transcode: $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))] -> $(basename "$output_file")${RESET}"
 				fi
 			fi
-			ep_index=$((ep_index + 1))
+			[[ "$parsed_ep_num" -ge 0 ]] && ep_index=$((ep_index + 1))
 		done
 		echo ""
 
 	    # Show command for first episode as an example
 	    echo -e "${CYAN}Example command for first episode:${RESET}"
 	    IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "${sorted_files[0]}"
-	    episode_num="S$(printf "%02d" $SEASON_NUM)E01"
+	    if [[ "$parsed_ep_num" -lt 0 ]]; then
+		    ova_num=$((parsed_ep_num + 1000))
+		    episode_num="OVA $(printf "%02d" $ova_num)"
+	    else
+		    episode_num="S$(printf "%02d" $SEASON_NUM)E01"
+	    fi
 	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 
 	    # Build input options for chapter extraction if needed
@@ -3147,34 +3177,39 @@ else
 	for sorted_line in "${sorted_files[@]}"; do
 		IFS='|' read -r disc_num disc_path parsed_ep_num source_file start_ch end_ch <<< "$sorted_line"
 
-	    # Skip if user specified a specific episode and this isn't it
-	    if [[ -n "$EPISODE_NUM" ]] && [[ "$ep_index" -ne "$EPISODE_NUM" ]]; then
-		    ep_index=$((ep_index + 1))
-		    continue
-	    fi
+		if [[ "$parsed_ep_num" -lt 0 ]]; then
+			# OVA episode — always process, label as OVA NN, does not consume ep_index
+			ova_num=$((parsed_ep_num + 1000))
+			episode_num="OVA $(printf "%02d" $ova_num)"
+		else
+			# Skip if user specified a specific episode and this isn't it
+			if [[ -n "$EPISODE_NUM" ]] && [[ "$ep_index" -ne "$EPISODE_NUM" ]]; then
+				ep_index=$((ep_index + 1))
+				continue
+			fi
+			episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
+		fi
+		output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 
-	    episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
-	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
+		if [[ -f "$output_file" && "$OVERWRITE" != "true" ]]; then
+			echo -e "${YELLOW}[$ep_index/${#sorted_files[@]}] Skipping: $(basename "$output_file") (already exists)${RESET}"
+			[[ "$parsed_ep_num" -ge 0 ]] && ep_index=$((ep_index + 1))
+			continue
+		fi
 
-	    if [[ -f "$output_file" && "$OVERWRITE" != "true" ]]; then
-		    echo -e "${YELLOW}[$ep_index/${#sorted_files[@]}] Skipping: $(basename "$output_file") (already exists)${RESET}"
-		    ep_index=$((ep_index + 1))
-		    continue
-	    fi
+		if [[ "$start_ch" == "-1" ]]; then
+			echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file")${RESET}"
+		else
+			if [[ "$start_ch" == "$end_ch" ]]; then
+				echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file") [Chapter $((start_ch + 1))]${RESET}"
+			else
+				echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))]${RESET}"
+			fi
+		fi
+		echo "    Output: $(basename "$output_file")"
 
-	    if [[ "$start_ch" == "-1" ]]; then
-		    echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file")${RESET}"
-	    else
-		    if [[ "$start_ch" == "$end_ch" ]]; then
-			    echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file") [Chapter $((start_ch + 1))]${RESET}"
-		    else
-			    echo -e "${BOLD}[$ep_index/${#sorted_files[@]}] Processing: $(basename "$source_file") [Chapters $((start_ch + 1))-$((end_ch + 1))]${RESET}"
-		    fi
-	    fi
-	    echo "    Output: $(basename "$output_file")"
-
-	    CURRENT_FILE="$source_file"
-	    CURRENT_OPERATION="Building chapter extraction parameters"
+		CURRENT_FILE="$source_file"
+		CURRENT_OPERATION="Building chapter extraction parameters"
 
 	    # Build input options for chapter extraction
 	    input_opts=""
@@ -3190,7 +3225,7 @@ else
 		# Validate start_time is a number
 		if ! [[ "$start_time" =~ ^[0-9]+\.?[0-9]*$ ]]; then
 			echo "    ERROR: Invalid chapter start time: $start_time"
-			ep_index=$((ep_index + 1))
+			[[ "$parsed_ep_num" -ge 0 ]] && ep_index=$((ep_index + 1))
 			continue
 		fi
 
@@ -3275,7 +3310,7 @@ else
 
 	    echo "    Complete!"
 	    echo ""
-	    ep_index=$((ep_index + 1))
+	    [[ "$parsed_ep_num" -ge 0 ]] && ep_index=$((ep_index + 1))
     done
 
     echo -e "${GREEN}Season $SEASON_NUM complete!${RESET}"
