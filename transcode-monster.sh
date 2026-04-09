@@ -572,14 +572,88 @@ show_version() {
 # Parse episode number from filename
 get_episode_num() {
 	local filename="$1"
-	local ep_num=$(echo "$filename" | sed -E 's/.*[t_]([0-9]{2,3})\.mkv$/\1/')
-	if [[ -z "$ep_num" || ! "$ep_num" =~ ^[0-9]{2,3}$ ]]; then
-		echo "UNKNOWN"
-	else
-		# Strip leading zeros for sorting (will be reformatted later)
-		ep_num=$((10#$ep_num))
-		echo "$ep_num"
+	local ep_num=""
+
+	# 1. Standard SxxExx / sxxexx
+	ep_num=$(echo "$filename" | grep -oP '[Ss]\d{2}[Ee]\K\d{2,3}' | head -1)
+	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
+
+	# 2. NxNN / NNxNN (e.g. 2x07)
+	ep_num=$(echo "$filename" | grep -oP '\d{1,2}[xX]\K\d{2,3}' | head -1)
+	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
+
+	# 3. Episode NNN or ep/ep./epNNN (case-insensitive)
+	ep_num=$(echo "$filename" | sed -En 's/.*[Ee]pisode[[:space:]]*([0-9]{2,3}).*/\1/p' | head -1)
+	[[ -z "$ep_num" ]] && ep_num=$(echo "$filename" | sed -En 's/.*[Ee][Pp][[:punct:][:space:]]*([0-9]{2,3}).*/\1/p' | head -1)
+	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
+
+	# 4. _NN or _NNN before a dot (e.g. Name_01.extra.mkv)
+	ep_num=$(echo "$filename" | grep -oP '(?<=_)\d{2,3}(?=\.)' | head -1)
+	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
+
+	# 5. Original: [t_]NN directly before .mkv
+	ep_num=$(echo "$filename" | sed -E 's/.*[t_]([0-9]{2,3})\.mkv$/\1/')
+	if [[ -n "$ep_num" && "$ep_num" =~ ^[0-9]{2,3}$ ]]; then
+		echo $((10#$ep_num)); return
 	fi
+
+	# 6. Bare NN/NNN surrounded by separators (space, hyphen, dot)
+	ep_num=$(echo "$filename" | grep -oP '(?<=[\s.\-])\d{2,3}(?=[\s.\-])' | head -1)
+	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
+
+	echo "UNKNOWN"
+}
+
+# Assign sequential episode numbers (by alphabetical filename sort) to any
+# episode_files[] entries that get_episode_num() could not parse. Fills gaps
+# left by known episodes; if all are unknown, assigns 1..N in sorted order.
+resolve_unknown_episodes() {
+	local unknown_count=0
+	local entry ep src
+
+	for entry in "${episode_files[@]}"; do
+		IFS='|' read -r _ _ ep src _ _ <<< "$entry"
+		[[ "$ep" == "UNKNOWN" ]] && ((unknown_count++)) || true
+	done
+	[[ $unknown_count -eq 0 ]] && return
+
+	# Collect UNKNOWN source paths and sort alphabetically by basename
+	local -a unknown_srcs=()
+	for entry in "${episode_files[@]}"; do
+		IFS='|' read -r _ _ ep src _ _ <<< "$entry"
+		[[ "$ep" == "UNKNOWN" ]] && unknown_srcs+=("$src")
+	done
+	IFS=$'\n' unknown_srcs=($(printf '%s\n' "${unknown_srcs[@]}" | sort)); unset IFS
+
+	# Build a set of episode numbers already claimed by parsed entries
+	local -A known_eps=()
+	for entry in "${episode_files[@]}"; do
+		IFS='|' read -r _ _ ep _ _ _ <<< "$entry"
+		[[ "$ep" != "UNKNOWN" ]] && known_eps["$ep"]=1
+	done
+
+	# Assign the next free episode number to each unknown file in sorted order
+	local -A assignment=()
+	local next_ep=1
+	for src in "${unknown_srcs[@]}"; do
+		while [[ -n "${known_eps[$next_ep]:-}" ]]; do ((next_ep++)); done
+		assignment["$src"]=$next_ep
+		known_eps[$next_ep]=1
+		((next_ep++))
+	done
+
+	# Rebuild episode_files[] with resolved numbers
+	local -a new_episode_files=()
+	for entry in "${episode_files[@]}"; do
+		IFS='|' read -r disc_num disc_dir ep src start end <<< "$entry"
+		if [[ "$ep" == "UNKNOWN" ]]; then
+			ep="${assignment[$src]}"
+		fi
+		new_episode_files+=("$disc_num|$disc_dir|$ep|$src|$start|$end")
+	done
+	episode_files=("${new_episode_files[@]}")
+
+	echo -e "${YELLOW}  Notice: Could not parse episode number(s) from $unknown_count file(s) — using alphabetical sort order as fallback${RESET}"
 }
 
 # Detect if content is telecined (3:2 pulldown)
@@ -2841,8 +2915,8 @@ else
 			    # Store with chapter markers as -1 to indicate whole file
 			    episode_files+=("$file_disc_num|$file_dir|$ep_num|$source_file|-1|-1")
 		    else
-			    # No episode number, use sequential numbering
-			    episode_files+=("$file_disc_num|$file_dir|${#episode_files[@]}|$source_file|-1|-1")
+			    # Store with UNKNOWN marker; resolved by resolve_unknown_episodes() after collection
+			    episode_files+=("$file_disc_num|$file_dir|UNKNOWN|$source_file|-1|-1")
 		    fi
 		fi
 	done
@@ -2962,16 +3036,19 @@ else
 			# Regular file - parse episode number from filename
 			ep_num=$(get_episode_num "$(basename "$source_file")")
 			if [[ "$ep_num" != "UNKNOWN" ]]; then
-				# Store with chapter markers as -1 to indicate whole file
 				# Store: disc_num|disc_dir|episode_num|source_file|start_chapter|end_chapter
 				episode_files+=("$disc_number|$disc_dir|$ep_num|$source_file|-1|-1")
 			else
-				echo -e "${YELLOW}    Warning: Could not parse episode number from $(basename "$source_file")${RESET}"
+				# Store with UNKNOWN marker; resolved by resolve_unknown_episodes() after collection
+				episode_files+=("$disc_number|$disc_dir|UNKNOWN|$source_file|-1|-1")
 			fi
 			    fi
 		    done
 	    done
 	    fi
+
+	    # Resolve any UNKNOWN episode numbers using alphabetical fallback
+	    resolve_unknown_episodes
 
 	    if [[ ${#episode_files[@]} -eq 0 ]]; then
 		    echo -e "${YELLOW}Warning: No valid episode files found for season $SEASON_NUM${RESET}"
