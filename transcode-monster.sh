@@ -43,8 +43,6 @@ NNEDI_WEIGHTS_SHA256="27f382430435bb7613deb1c52f3c79c300c9869812cfe29079432a9c82
 # Hardware acceleration
 DEFAULT_VAAPI_DEVICE="/dev/dri/renderD128"
 DEFAULT_VAAPI_COMPRESSION_LEVEL="4"  # 0-7: Trade encoding speed for better compression (0=fast, 7=slow/small)
-                                     # Level 4 provides excellent balance - still 5x faster than software
-                                     # Supported on Intel Arc/11th+ gen, no problems on unsupported hardware
 
 # Video encoding settings
 DEFAULT_VIDEO_CODEC="auto"  # Will choose hevc_vaapi or libx265 based on resolution
@@ -587,17 +585,21 @@ get_episode_num() {
 	[[ -z "$ep_num" ]] && ep_num=$(echo "$filename" | sed -En 's/.*[Ee][Pp][[:punct:][:space:]]*([0-9]{2,3}).*/\1/p' | head -1)
 	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
 
-	# 4. _NN or _NNN before a dot (e.g. Name_01.extra.mkv)
+	# 4. NN or NNN at start of filename before a separator (e.g. "01 - Title.mkv")
+	ep_num=$(echo "$filename" | grep -oP '^\d{2,3}(?=[\s.\-])' | head -1)
+	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
+
+	# 5. _NN or _NNN before a dot (e.g. Name_01.extra.mkv)
 	ep_num=$(echo "$filename" | grep -oP '(?<=_)\d{2,3}(?=\.)' | head -1)
 	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
 
-	# 5. Original: [t_]NN directly before .mkv
+	# 6. Original: [t_]NN directly before .mkv
 	ep_num=$(echo "$filename" | sed -E 's/.*[t_]([0-9]{2,3})\.mkv$/\1/')
 	if [[ -n "$ep_num" && "$ep_num" =~ ^[0-9]{2,3}$ ]]; then
 		echo $((10#$ep_num)); return
 	fi
 
-	# 6. Bare NN/NNN surrounded by separators (space, hyphen, dot)
+	# 7. Bare NN/NNN surrounded by separators (space, hyphen, dot)
 	ep_num=$(echo "$filename" | grep -oP '(?<=[\s.\-])\d{2,3}(?=[\s.\-])' | head -1)
 	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
 
