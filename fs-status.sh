@@ -12,6 +12,7 @@ shopt -s checkwinsize
 REFRESH_INTERVAL=3
 NICE_VALUE=10
 ONE_SHOT=false
+SMART_INTERVAL_MULT=20
 
 # ── Live state ────────────────────────────────────────────────────────────────
 PAUSED=false
@@ -33,6 +34,17 @@ _NET_PREV_TS=0
 declare -A _DISK_PREV_R=()
 declare -A _DISK_PREV_W=()
 _DISK_PREV_TS=0
+
+# ── SMART cache — polled at SMART_INTERVAL_MULT × REFRESH_INTERVAL cadence ────
+declare -A _SMART_HS=()    # health string  (PASSED / OK / FAILED / ?)
+declare -A _SMART_HC=()    # health color escape sequence
+declare -A _SMART_TC=()    # temperature integer (°C); empty if unknown
+declare -A _SMART_RL=()    # reallocated sectors
+declare -A _SMART_PD=()    # pending sectors
+declare -A _SMART_UC=()    # uncorrectable sectors
+declare -A _SMART_MDL=()   # model string (pre-truncated)
+declare -A _SMART_CAP=()   # capacity string
+_SMART_LAST_TS=0
 
 # ── Optional-section presence — checked once at startup ──────────────────────
 _ZFS_PRESENT=false
@@ -56,8 +68,9 @@ load_config() {
 		key="${line%%=*}";  key="${key//[[:space:]]/}"
 		val="${line#*=}";   val="${val//[[:space:]]/}"
 		case "$key" in
-			REFRESH_INTERVAL) REFRESH_INTERVAL="$val" ;;
-			NICE_VALUE)       NICE_VALUE="$val"       ;;
+			REFRESH_INTERVAL)   REFRESH_INTERVAL="$val"   ;;
+			NICE_VALUE)         NICE_VALUE="$val"         ;;
+			SMART_INTERVAL_MULT) SMART_INTERVAL_MULT="$val" ;;
 		esac
 	done < "$CFG_FILE"
 }
@@ -66,8 +79,9 @@ save_config() {
 	mkdir -p "$CFG_DIR"
 	{
 		printf '# fs-status — saved %s\n' "$(date '+%F %T')"
-		printf 'REFRESH_INTERVAL=%s\n' "$REFRESH_INTERVAL"
-		printf 'NICE_VALUE=%s\n'       "$NICE_VALUE"
+		printf 'REFRESH_INTERVAL=%s\n'   "$REFRESH_INTERVAL"
+		printf 'NICE_VALUE=%s\n'         "$NICE_VALUE"
+		printf 'SMART_INTERVAL_MULT=%s\n' "$SMART_INTERVAL_MULT"
 	} > "$CFG_FILE"
 }
 
@@ -707,15 +721,36 @@ _mdadm_format_array() {
 	box_blank
 }
 
+
 # =============================================================================
 # ── DRIVES ────────────────────────────────────────────────────────────────────
-# Combined SMART health + I/O throughput in a two-column grid (one row per
-# drive pair) when the terminal is wide enough; single-column otherwise.
+# I/O throughput is read from /proc/diskstats on every fast frame.
+# SMART data (health, temp, model, error counters) is expensive — smartctl
+# blocks per device — so it is cached and re-polled only every
+# SMART_INTERVAL_MULT × REFRESH_INTERVAL seconds.  The cache is keyed by device name
+# and persists across draw_dashboard calls in the main shell.
 # =============================================================================
 section_drives() {
 	local smart_avail=false
 	command -v smartctl &>/dev/null && smart_avail=true
-	section_header "DRIVES" "I/O Throughput${smart_avail:+ · SMART Health}" "💾"
+
+	# ── Decide whether this frame triggers a SMART refresh ───────────────────
+	# First frame always polls (_SMART_LAST_TS == 0); thereafter only when the
+	# cache is older than SMART_INTERVAL_MULT × REFRESH_INTERVAL seconds.
+	local _smart_secs=$(( REFRESH_INTERVAL * SMART_INTERVAL_MULT ))
+	local _do_smart=false
+	if [[ "$smart_avail" == "true" ]]; then
+		(( _SMART_LAST_TS == 0 || _NOW - _SMART_LAST_TS >= _smart_secs )) \
+			&& _do_smart=true
+	fi
+
+	# ── Section header — show SMART poll age when data is cached ─────────────
+	local _smart_note=''
+	if [[ "$smart_avail" == "true" && _SMART_LAST_TS -gt 0 ]]; then
+		local _smart_age=$(( _NOW - _SMART_LAST_TS ))
+		_smart_note="  ${DIM}· SMART polled ${_smart_age}s ago (every ${_smart_secs}s)${RESET}"
+	fi
+	section_header "DRIVES" "I/O Throughput${smart_avail:+ · SMART Health}${_smart_note}" "💾"
 
 	# ── Pre-parse diskstats into lookup tables ────────────────────────────────
 	local elapsed=0
@@ -728,9 +763,9 @@ section_drives() {
 			read -r _ _ _dn _ _ _dr _ _ _ _dw _ <<< "$dline"
 			[[ -n "$_dn" ]] && {
 				_ds_r[$_dn]=$(( _dr * 512 ))
-							_ds_w[$_dn]=$(( _dw * 512 ))
-						}
-					done < /proc/diskstats
+				_ds_w[$_dn]=$(( _dw * 512 ))
+			}
+		done < /proc/diskstats
 	fi
 
 	# ── Device enumeration: physical (lsblk) + software RAID (md*) ───────────
@@ -738,31 +773,30 @@ section_drives() {
 	if command -v lsblk &>/dev/null; then
 		dev_list=$(lsblk -d -o NAME,TYPE --noheadings 2>/dev/null \
 			| awk '$2=="disk"{print $1}')
-				else
-					dev_list=$(for d in /sys/block/*/device; do
-					[[ -e "$d" ]] || continue
-					local _b="${d%/device}"; _b="${_b##*/}"; printf '%s\n' "$_b"
-				done)
+	else
+		dev_list=$(for d in /sys/block/*/device; do
+			[[ -e "$d" ]] || continue
+			local _b="${d%/device}"; _b="${_b##*/}"; printf '%s\n' "$_b"
+		done)
 	fi
 	local md_list=''
 	[[ -r /proc/diskstats ]] \
 		&& md_list=$(awk '$3~/^md[0-9]+$/{print $3}' /proc/diskstats | sort -u)
-			local all_devs="${dev_list}${dev_list:+${md_list:+$'\n'}}${md_list}"
+	local all_devs="${dev_list}${dev_list:+${md_list:+$'\n'}}${md_list}"
 
-			if [[ -z "$all_devs" ]]; then
-				inner_rule dash
-				box_line "   ${DIM}No drives found${RESET}"
-				box_blank; return
-			fi
+	if [[ -z "$all_devs" ]]; then
+		inner_rule dash
+		box_line "   ${DIM}No drives found${RESET}"
+		box_blank; return
+	fi
 
 	# ── Collect per-drive data into parallel arrays before rendering ──────────
-	# All smartctl calls happen here so the two-column pairing is clean.
 	local -a _line1=() _line2=()
 
 	while IFS= read -r devname; do
 		[[ -z "$devname" ]] && continue
 
-		# I/O throughput from diskstats
+		# Fast path: I/O throughput from /proc/diskstats — no subprocess
 		local bytes_r="${_ds_r[$devname]:-0}"
 		local bytes_w="${_ds_w[$devname]:-0}"
 		local rrc="$FG_BGREEN" rwc="$FG_BYELLOW" rrs rws
@@ -780,81 +814,96 @@ section_drives() {
 
 		local io_col=" ↓ ${rrc}$(printf '%-12s' "$rrs")${RESET}  ↑ ${rwc}$(printf '%-12s' "$rws")${RESET}  ${DIM}R:${RESET} ${FG_WHITE}$(printf '%-10s' "$(fmt_bytes "$bytes_r")")${RESET}  ${DIM}W:${RESET} ${FG_WHITE}$(fmt_bytes "$bytes_w")${RESET}"
 
-		# SMART health (md* arrays are skipped; requires root for block devices)
-		local hs='n/a' hc="$DIM" temps='      ' mdls='' errs=''
+		# Slow path: SMART — run smartctl and update cache only on SMART frames.
+		# md* arrays have no SMART data and are always skipped.
+		local hs hc tc rl pd uc mdl cap
 		if [[ "$smart_avail" == "true" && "$devname" != md* ]]; then
-			local sout
-			sout=$(smartctl -i -H -A "/dev/${devname}" 2>/dev/null)
-			if [[ -n "$sout" ]]; then
-				if   [[ "$sout" == *"PASSED"* ]]; then hs='PASSED'; hc="$FG_BGREEN"
-				elif [[ "$sout" == *": OK"*   ]]; then hs='OK';     hc="$FG_BGREEN"
-				elif [[ "$sout" == *"FAILED"* ]]; then hs='FAILED'; hc="$FG_BRED"
-				else                                   hs='?';      hc="$FG_YELLOW"
-				fi
-
-				local tc='' rl='' pd='' uc=''
-				eval "$(awk '
-				# Attribute table: field 10 is the raw value first token.
-				# Using $10 (not $NF) avoids mis-parsing "34 (Min/Max 22/45)" → would give 22.
-				$1+0==5   && NF>=10 && /Reallocated/ { printf "rl=\"%d\"\n", $10+0 }
-				$1+0==190 && NF>=10                  { if(!tc) printf "tc=\"%d\"\n", $10+0 }
-				$1+0==194 && NF>=10                  { printf "tc=\"%d\"\n", $10+0 }
-				$1+0==197 && NF>=10 && /Pending/     { printf "pd=\"%d\"\n", $10+0 }
-				$1+0==198 && NF>=10 && /Uncorrect/   { printf "uc=\"%d\"\n", $10+0 }
-				# Generic temperature lines (NVMe + some SATA/SAS)
-				/^Temperature:[[:space:]]/ && NF>=2       { if(!tc) printf "tc=\"%d\"\n", $2+0 }
-				/^Temperature Sensor 1:[[:space:]]/ && NF>=4 { if(!tc) printf "tc=\"%d\"\n", $4+0 }
-				/^Current Drive Temperature:[[:space:]]/ && NF>=4 { if(!tc) printf "tc=\"%d\"\n", $4+0 }
-				' <<< "$sout")"
-
-				if [[ -n "$tc" && "$tc" =~ ^[0-9]+$ && "$tc" -gt 0 ]]; then
-					local tcol
-					if   (( tc >= 55 )); then tcol="$FG_BRED"
-					elif (( tc >= 45 )); then tcol="$FG_BYELLOW"
-					else                      tcol="$FG_BGREEN"
+			if [[ "$_do_smart" == "true" ]]; then
+				local sout
+				sout=$(smartctl -i -H -A "/dev/${devname}" 2>/dev/null)
+				if [[ -n "$sout" ]]; then
+					if   [[ "$sout" == *"PASSED"* ]]; then hs='PASSED'; hc="$FG_BGREEN"
+					elif [[ "$sout" == *": OK"*   ]]; then hs='OK';     hc="$FG_BGREEN"
+					elif [[ "$sout" == *"FAILED"* ]]; then hs='FAILED'; hc="$FG_BRED"
+					else                                   hs='?';      hc="$FG_YELLOW"
 					fi
-					# Fixed 6 visual-char slot regardless of digit count:
-					# 1-dig → "   9°C", 2-dig → "  34°C", 3-dig → " 100°C"
-					local tc_lead
-					case ${#tc} in
-						1) tc_lead="   " ;;
-						2) tc_lead="  "  ;;
-						*) tc_lead=" "   ;;
-					esac
-					temps="${tc_lead}${tcol}${tc}°C${RESET}"
+
+					tc=''; rl=''; pd=''; uc=''
+					eval "$(awk '
+					# Field 10 is raw value; avoids mis-parsing "34 (Min/Max 22/45)"
+					$1+0==5   && NF>=10 && /Reallocated/ { printf "rl=\"%d\"\n", $10+0 }
+					$1+0==190 && NF>=10                  { if(!tc) printf "tc=\"%d\"\n", $10+0 }
+					$1+0==194 && NF>=10                  { printf "tc=\"%d\"\n", $10+0 }
+					$1+0==197 && NF>=10 && /Pending/     { printf "pd=\"%d\"\n", $10+0 }
+					$1+0==198 && NF>=10 && /Uncorrect/   { printf "uc=\"%d\"\n", $10+0 }
+					/^Temperature:[[:space:]]/ && NF>=2       { if(!tc) printf "tc=\"%d\"\n", $2+0 }
+					/^Temperature Sensor 1:[[:space:]]/ && NF>=4 { if(!tc) printf "tc=\"%d\"\n", $4+0 }
+					/^Current Drive Temperature:[[:space:]]/ && NF>=4 { if(!tc) printf "tc=\"%d\"\n", $4+0 }
+					' <<< "$sout")"
+
+					mdl=$(awk '/^(Device Model|Model Number|Model Family|Product):/{
+						sub(/^[^:]+:[[:space:]]*/,""); print; exit}' <<< "$sout")
+					cap=$(awk '/^(User Capacity|Namespace 1 Size):/{
+						match($0,/\[[^\]]+\]/); if(RSTART){print substr($0,RSTART+1,RLENGTH-2); exit}
+						match($0,/[0-9.]+ [KMGT]iB/); if(RSTART){print substr($0,RSTART,RLENGTH); exit}
+					}' <<< "$sout")
+					[[ ${#mdl} -gt 30 ]] && mdl="${mdl:0:27}…"
+				else
+					hs='?'; hc="$DIM"   # no output — likely not root
+					tc=''; rl=''; pd=''; uc=''; mdl=''; cap=''
 				fi
-
-				local mdl cap
-				mdl=$(awk '/^(Device Model|Model Number|Model Family|Product):/{
-				sub(/^[^:]+:[[:space:]]*/,""); print; exit}' <<< "$sout")
-				cap=$(awk '/^(User Capacity|Namespace 1 Size):/{
-				match($0,/\[[^\]]+\]/); if(RSTART){print substr($0,RSTART+1,RLENGTH-2); exit}
-				match($0,/[0-9.]+ [KMGT]iB/); if(RSTART){print substr($0,RSTART,RLENGTH); exit}
-			}' <<< "$sout")
-			if [[ -n "$mdl" ]]; then
-				[[ ${#mdl} -gt 30 ]] && mdl="${mdl:0:27}…"
-				mdls="  ${DIM}${mdl}${cap:+  (${cap})}${RESET}"
+				# Write to cache
+				_SMART_HS[$devname]="$hs";    _SMART_HC[$devname]="$hc"
+				_SMART_TC[$devname]="${tc:-}"; _SMART_RL[$devname]="${rl:-0}"
+				_SMART_PD[$devname]="${pd:-0}"; _SMART_UC[$devname]="${uc:-0}"
+				_SMART_MDL[$devname]="${mdl:-}"; _SMART_CAP[$devname]="${cap:-}"
 			fi
 
-			if [[ "${rl:-0}" != "0" || "${pd:-0}" != "0" || \
-				"${uc:-0}" != "0" || "$hs" == "FAILED" ]]; then
-							local rc pc ucc
-							[[ "${rl:-0}" != "0" ]] && rc="$FG_BRED"    || rc="$DIM"
-							[[ "${pd:-0}" != "0" ]] && pc="$FG_BYELLOW" || pc="$DIM"
-							[[ "${uc:-0}" != "0" ]] && ucc="$FG_BRED"   || ucc="$DIM"
-							errs=" $(printf '%-10s' '')  ⚠  ${rc}Reallocated: ${rl:-0}${RESET}   ${pc}Pending: ${pd:-0}${RESET}   ${ucc}Uncorrectable: ${uc:-0}${RESET}"
-			fi
+			# Read from cache (always — ensures consistent fast-frame rendering)
+			hs="${_SMART_HS[$devname]:-}";  hc="${_SMART_HC[$devname]:-$DIM}"
+			tc="${_SMART_TC[$devname]:-}";  rl="${_SMART_RL[$devname]:-0}"
+			pd="${_SMART_PD[$devname]:-0}"; uc="${_SMART_UC[$devname]:-0}"
+			mdl="${_SMART_MDL[$devname]:-}"; cap="${_SMART_CAP[$devname]:-}"
 		else
-			hs='?'; hc="$DIM"   # no output — likely not root
-			fi
+			hs=''; hc="$DIM"; tc=''; rl=0; pd=0; uc=0; mdl=''; cap=''
 		fi
 
-		_line1+=( " ${FG_BWHITE}$(printf '%-10s' "$devname")${RESET}  ${hc}$(printf '%-8s' "$hs")${RESET}${temps}${io_col}${mdls}" )
+		# Build display strings from (possibly cached) raw values
+		local temps='      ' mdls='' errs=''
+		if [[ -n "$tc" && "$tc" =~ ^[0-9]+$ && "$tc" -gt 0 ]]; then
+			local tcol
+			if   (( tc >= 55 )); then tcol="$FG_BRED"
+			elif (( tc >= 45 )); then tcol="$FG_BYELLOW"
+			else                      tcol="$FG_BGREEN"
+			fi
+			# Fixed 6 visual-char slot: "   9°C" / "  34°C" / " 100°C"
+			local tc_lead
+			case ${#tc} in
+				1) tc_lead="   " ;;
+				2) tc_lead="  "  ;;
+				*) tc_lead=" "   ;;
+			esac
+			temps="${tc_lead}${tcol}${tc}°C${RESET}"
+		fi
+		if [[ -n "$mdl" ]]; then
+			mdls="  ${DIM}${mdl}${cap:+  (${cap})}${RESET}"
+		fi
+		if [[ "${rl:-0}" != "0" || "${pd:-0}" != "0" || \
+			"${uc:-0}" != "0" || "$hs" == "FAILED" ]]; then
+			local rc pc ucc
+			[[ "${rl:-0}" != "0" ]] && rc="$FG_BRED"    || rc="$DIM"
+			[[ "${pd:-0}" != "0" ]] && pc="$FG_BYELLOW" || pc="$DIM"
+			[[ "${uc:-0}" != "0" ]] && ucc="$FG_BRED"   || ucc="$DIM"
+			errs=" $(printf '%-10s' '')  ⚠  ${rc}Reallocated: ${rl:-0}${RESET}   ${pc}Pending: ${pd:-0}${RESET}   ${ucc}Uncorrectable: ${uc:-0}${RESET}"
+		fi
+
+		_line1+=( " ${FG_BWHITE}$(printf '%-10s' "$devname")${RESET}  ${hc}$(printf '%-8s' "${hs:-n/a}")${RESET}${temps}${io_col}${mdls}" )
 		_line2+=( "$errs" )
 
 	done <<< "$all_devs"
 
 	_DISK_PREV_TS="$_NOW"
+	[[ "$_do_smart" == "true" ]] && _SMART_LAST_TS=$_NOW
 
 	# ── Render ────────────────────────────────────────────────────────────────
 	local n=${#_line1[@]}
