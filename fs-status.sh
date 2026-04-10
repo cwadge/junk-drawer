@@ -218,6 +218,7 @@ FG_RED=$'\033[0;31m';    FG_GREEN=$'\033[0;32m';   FG_YELLOW=$'\033[0;33m'
 FG_BLUE=$'\033[0;34m';   FG_CYAN=$'\033[0;36m';    FG_WHITE=$'\033[0;37m'
 FG_BWHITE=$'\033[1;37m'; FG_BCYAN=$'\033[1;36m';   FG_BGREEN=$'\033[1;32m'
 FG_BRED=$'\033[1;31m';   FG_BYELLOW=$'\033[1;33m'; FG_BBLUE=$'\033[1;34m'
+FG_HGREEN=$'\033[92m'  # high-intensity bright green (for "Excellent" ratings)
 
 # ── Box-drawing ───────────────────────────────────────────────────────────────
 BOX_TL='╔'; BOX_TR='╗'; BOX_BL='╚'; BOX_BR='╝'
@@ -426,7 +427,10 @@ section_zfs() {
 				END {
 				printf "arc_size=\"%s\"\n",  fmtb(v["size"]+0)
 				printf "arc_max=\"%s\"\n",   fmtb(v["c"]+0)
-				h = v["hits"]+0; m = v["misses"]+0; tot = h + m
+				# demand-only hits: excludes prefetch, which inflates totals
+				h = v["demand_data_hits"]+v["demand_metadata_hits"]
+				m = v["demand_data_misses"]+v["demand_metadata_misses"]
+				tot = h + m
 				printf "arc_hits=\"%d\"\n",   h
 				printf "arc_misses=\"%d\"\n", m
 				if (tot > 0) printf "arc_hit_pct=\"%.1f\"\n",  h/tot*100
@@ -447,10 +451,13 @@ section_zfs() {
 				}' "$arcstats")"
 
 				local arc_col l2_col
-				if   [[ -z "$arc_hit_pct" ]];              then arc_col="$FG_WHITE"
-				elif (( ${arc_hit_pct%%.*} >= 90 ));        then arc_col="$FG_BGREEN"
-				elif (( ${arc_hit_pct%%.*} >= 70 ));        then arc_col="$FG_BYELLOW"
-				else                                             arc_col="$FG_BRED"
+				# Cold <50% · Poor 50–75% · Normal 75–90% · Good 90–95% · Excellent >95%
+				if   [[ -z "$arc_hit_pct" ]];               then arc_col="$FG_WHITE"
+				elif (( ${arc_hit_pct%%.*} >= 95 ));         then arc_col="$FG_HGREEN"
+				elif (( ${arc_hit_pct%%.*} >= 90 ));         then arc_col="$FG_GREEN"
+				elif (( ${arc_hit_pct%%.*} >= 75 ));         then arc_col="$FG_WHITE"
+				elif (( ${arc_hit_pct%%.*} >= 50 ));         then arc_col="$FG_WHITE"
+				else                                              arc_col="$FG_CYAN"
 				fi
 				local arc_hit_str
 				[[ -n "$arc_hit_pct" ]] \
@@ -459,10 +466,13 @@ section_zfs() {
 
 				local arc_right=''
 				if [[ "$l2arc_present" == "true" ]]; then
-					if   [[ -z "$l2arc_hit_pct" ]];              then l2_col="$FG_WHITE"
-					elif (( ${l2arc_hit_pct%%.*} >= 40 ));        then l2_col="$FG_BGREEN"
-					elif (( ${l2arc_hit_pct%%.*} >= 10 ));        then l2_col="$FG_WHITE"
-					else                                               l2_col="$FG_BYELLOW"
+					# Cold <10% · Poor 10–20% · Normal 20–40% · Good 40–60% · Excellent >60%
+					if   [[ -z "$l2arc_hit_pct" ]];               then l2_col="$FG_WHITE"
+					elif (( ${l2arc_hit_pct%%.*} > 60 ));          then l2_col="$FG_HGREEN"
+					elif (( ${l2arc_hit_pct%%.*} >= 40 ));         then l2_col="$FG_GREEN"
+					elif (( ${l2arc_hit_pct%%.*} >= 20 ));         then l2_col="$FG_WHITE"
+					elif (( ${l2arc_hit_pct%%.*} >= 10 ));         then l2_col="$FG_WHITE"
+					else                                                l2_col="$FG_CYAN"
 					fi
 					local l2_hit_str
 					[[ -n "$l2arc_hit_pct" ]] \
