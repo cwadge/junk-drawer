@@ -1357,6 +1357,7 @@ draw_loading() {
 
 															local force_refresh=true
 															local key=''
+															local _t0=0   # draw start time; used to subtract draw duration from the wait
 
 															while true; do
 																sync_dimensions
@@ -1368,6 +1369,7 @@ draw_loading() {
 																		&& printf -v LAST_REFRESH '%(%H:%M:%S)T' -1
 																																			force_refresh=false
 																																			_NEED_REDRAW=false
+																																			_t0=$EPOCHSECONDS
 																																			draw_dashboard
 																																			do_draw
 																fi
@@ -1376,7 +1378,13 @@ draw_loading() {
 																if [[ "$PAUSED" == "true" ]]; then
 																	IFS= read -r -s -n 1 key 2>/dev/null || true
 																else
-																	IFS= read -r -s -n 1 -t "$REFRESH_INTERVAL" key 2>/dev/null || true
+																	# Subtract draw_dashboard duration so total cycle ≈ REFRESH_INTERVAL.
+																	# Without this, sequential smartctl calls (one per drive) stack on top
+																	# of the full interval wait, doubling the apparent refresh time.
+																	local _elapsed=$(( EPOCHSECONDS - _t0 ))
+																	local _wait=$(( REFRESH_INTERVAL - _elapsed ))
+																	(( _wait < 1 )) && _wait=1
+																	IFS= read -r -s -n 1 -t "$_wait" key 2>/dev/null || true
 																fi
 
 																if [[ "$key" == $'\033' ]]; then
