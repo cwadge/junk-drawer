@@ -12,6 +12,8 @@ shopt -s checkwinsize
 REFRESH_INTERVAL=2
 NICE_VALUE=10
 ONE_SHOT=false
+SLOW_INTERVAL_MULT=20  # unbound/chrony stats polled every SLOW_INTERVAL_MULT × REFRESH_INTERVAL s
+SOCAT_TIMEOUT=1        # per-call timeout for Kea control socket queries (was hardcoded 2)
 
 # ── Live state ────────────────────────────────────────────────────────────────
 PAUSED=false
@@ -23,6 +25,17 @@ _FOOTER_ROW=0       # terminal row the footer occupies; set each draw
 _TTY_STATE=''       # tty state captured at startup, before any read -s
 _HOSTNAME=''        # cached once — hostname -f can trigger a DNS lookup
 _NOW=0              # epoch seconds, set once per draw_dashboard call
+
+# ── Slow-cadence data cache ───────────────────────────────────────────────────
+# unbound-control and chronyc output is cached here and re-polled only every
+# SLOW_INTERVAL_MULT × REFRESH_INTERVAL seconds.  Kea socket queries (socat)
+# stay on the fast cycle for live lease visibility but use SOCAT_TIMEOUT.
+_UB_STATS_RAW=''      # unbound-control stats_noreset output
+_CHR_TRACKING_RAW=''  # chronyc tracking output
+_CHR_SOURCES_RAW=''   # chronyc sources output
+_SLOW_LAST_TS=0        # epoch of last slow-cadence poll
+_DO_SLOW=false         # true on frames that trigger a slow poll
+_SLOW_SECS=0           # effective slow interval in seconds (computed each frame)
 
 # ── Config (XDG-compliant) ────────────────────────────────────────────────────
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -37,8 +50,10 @@ load_config() {
 		key="${line%%=*}";  key="${key//[[:space:]]/}"
 		val="${line#*=}";   val="${val//[[:space:]]/}"
 		case "$key" in
-			REFRESH_INTERVAL) REFRESH_INTERVAL="$val" ;;
-			NICE_VALUE)       NICE_VALUE="$val"       ;;
+			REFRESH_INTERVAL)  REFRESH_INTERVAL="$val"  ;;
+			NICE_VALUE)        NICE_VALUE="$val"        ;;
+			SLOW_INTERVAL_MULT) SLOW_INTERVAL_MULT="$val" ;;
+			SOCAT_TIMEOUT)     SOCAT_TIMEOUT="$val"     ;;
 		esac
 	done < "$CFG_FILE"
 }
@@ -47,8 +62,10 @@ save_config() {
 	mkdir -p "$CFG_DIR"
 	{
 		printf '# net-core-status — saved %s\n' "$(date '+%F %T')"
-		printf 'REFRESH_INTERVAL=%s\n' "$REFRESH_INTERVAL"
-		printf 'NICE_VALUE=%s\n'       "$NICE_VALUE"
+		printf 'REFRESH_INTERVAL=%s\n'   "$REFRESH_INTERVAL"
+		printf 'NICE_VALUE=%s\n'         "$NICE_VALUE"
+		printf 'SLOW_INTERVAL_MULT=%s\n' "$SLOW_INTERVAL_MULT"
+		printf 'SOCAT_TIMEOUT=%s\n'      "$SOCAT_TIMEOUT"
 	} > "$CFG_FILE"
 }
 
@@ -380,15 +397,27 @@ svc_uptime() {
 # =============================================================================
 section_unbound() {
 	local svc='unbound'
-	section_header "UNBOUND" "Recursive DNS Resolver" "🔍"
+
+	# Slow-poll note for header (shown once cache is primed)
+	local _ub_note=''
+	if (( _SLOW_LAST_TS > 0 )); then
+		local _ub_age=$(( _NOW - _SLOW_LAST_TS ))
+		_ub_note="  ${DIM}· stats polled ${_ub_age}s ago (every ${_SLOW_SECS}s)${RESET}"
+	fi
+	section_header "UNBOUND" "Recursive DNS Resolver${_ub_note}" "🔍"
+
+	# Fast path: service status changes matter immediately
 	svc_fetch "$svc"
 	kv_line "Status " "$(svc_status_badge)  Boot: $(svc_enabled_badge)"
 	kv_line "Uptime " "$(svc_uptime "$_NOW")"
 
 	if command -v unbound-control &>/dev/null; then
-		local stats
-		stats=$(unbound-control stats_noreset 2>/dev/null)
-		if [[ -n "$stats" ]]; then
+		# Slow path: unbound-control stats — accumulate over seconds/minutes;
+		# running every 2s adds subprocess cost for data that won't meaningfully differ.
+		if [[ "$_DO_SLOW" == "true" ]]; then
+			_UB_STATS_RAW=$(unbound-control stats_noreset 2>/dev/null)
+		fi
+		if [[ -n "$_UB_STATS_RAW" ]]; then
 			local total_q cache_hits cache_miss prefetch avg_ms rec_ms msg_cache rrset_cache cache_pct=''
 			eval "$(awk -F= '
 			/^total\.num\.queries=/            { total=$2+0;     printf "total_q=\"%'"'"'d\"\n",    $2+0 }
@@ -400,7 +429,7 @@ section_unbound() {
 			/^mem\.cache\.message=/            {                 printf "msg_cache=\"%.1f MiB\"\n", $2/1048576 }
 			/^mem\.cache\.rrset=/              {                 printf "rrset_cache=\"%.1f MiB\"\n",$2/1048576 }
 			END { if (total>0) printf "cache_pct=\"%.1f%%\"\n", hits/total*100 }
-			' <<< "$stats")"
+			' <<< "$_UB_STATS_RAW")"
 			inner_rule dash
 			kv_line "Queries (total)" "${FG_BWHITE}${total_q:-n/a}${RESET}"
 			kv_line "Cache hits     " "${FG_BGREEN}$(printf '%-12s' "${cache_hits:-n/a}")${RESET}misses:  ${FG_YELLOW}${cache_miss:-n/a}${RESET}${cache_pct:+   ${FG_BCYAN}(${cache_pct} hit rate)${RESET}}"
@@ -449,7 +478,7 @@ section_kea() {
 		if [[ "$has_socat" == true && -S "$sock4" ]]; then
 			local raw4
 			raw4=$(printf '{"command":"stat-lease4-get","service":["dhcp4"]}' \
-				| socat -t2 - UNIX-CONNECT:"$sock4" 2>/dev/null)
+				| socat -t${SOCAT_TIMEOUT} - UNIX-CONNECT:"$sock4" 2>/dev/null)
 							# Kea returns "result": 1/2 if stat_cmds hook is missing or command fails;
 							# treat anything other than result:0 as a socket failure and fall back to CSV.
 							if [[ "$raw4" == *'"result": 0'* || "$raw4" == *'"result":0'* ]]; then
@@ -513,7 +542,7 @@ section_kea() {
 		if [[ "$has_socat" == true && -S "$sock6" ]]; then
 			local raw6
 			raw6=$(printf '{"command":"stat-lease6-get","service":["dhcp6"]}' \
-				| socat -t2 - UNIX-CONNECT:"$sock6" 2>/dev/null)
+				| socat -t${SOCAT_TIMEOUT} - UNIX-CONNECT:"$sock6" 2>/dev/null)
 							# Same result:0 guard as v4.
 							if [[ "$raw6" == *'"result": 0'* || "$raw6" == *'"result":0'* ]]; then
 								local tna ana dna tpd apd
@@ -572,7 +601,7 @@ section_kea() {
 	if [[ "$has_socat" == true && -S "$sock4" ]]; then
 		local raw rcv sent drop
 		raw=$(printf '{"command":"statistic-get-all","service":["dhcp4"]}' \
-			| socat -t2 - UNIX-CONNECT:"$sock4" 2>/dev/null)
+			| socat -t${SOCAT_TIMEOUT} - UNIX-CONNECT:"$sock4" 2>/dev/null)
 					if [[ -n "$raw" ]]; then
 						# RS="," gives one field per record; getval() seeks past the "[ [" value
 						# marker (space-tolerant) to avoid matching digits in key names like "pkt4".
@@ -599,7 +628,16 @@ section_kea() {
 # =============================================================================
 section_chrony() {
 	local svc='chrony'
-	section_header "CHRONY" "NTP Time Synchronization" "🕐"
+
+	# Slow-poll note for header (shown once cache is primed)
+	local _chr_note=''
+	if (( _SLOW_LAST_TS > 0 )); then
+		local _chr_age=$(( _NOW - _SLOW_LAST_TS ))
+		_chr_note="  ${DIM}· stats polled ${_chr_age}s ago (every ${_SLOW_SECS}s)${RESET}"
+	fi
+	section_header "CHRONY" "NTP Time Synchronization${_chr_note}" "🕐"
+
+	# Fast path: service status changes matter immediately
 	svc_fetch "$svc"
 	kv_line "Status " "$(svc_status_badge)  Boot: $(svc_enabled_badge)"
 	kv_line "Uptime " "$(svc_uptime "$_NOW")"
@@ -610,9 +648,14 @@ section_chrony() {
 		box_blank; return
 	fi
 
-	local tracking
-	tracking=$(chronyc tracking 2>/dev/null)
-	if [[ -n "$tracking" ]]; then
+	# Slow path: chronyc output — NTP convergence plays out over minutes,
+	# and source selection rarely changes; no value in polling every 2s.
+	if [[ "$_DO_SLOW" == "true" ]]; then
+		_CHR_TRACKING_RAW=$(chronyc tracking 2>/dev/null)
+		_CHR_SOURCES_RAW=$(chronyc sources 2>/dev/null)
+	fi
+
+	if [[ -n "$_CHR_TRACKING_RAW" ]]; then
 		inner_rule dash
 
 		local ref_id stratum sys_time rms_offset freq_err leap offset_key
@@ -630,7 +673,7 @@ section_chrony() {
 			/^RMS offset/    { printf "rms_offset=\"%s\"\n",  $2 }
 			/^Frequency/     { printf "freq_err=\"%s\"\n",    $2 }
 			/^Leap status/   { printf "leap=\"%s\"\n",         $2 }
-			' <<< "$tracking")"
+			' <<< "$_CHR_TRACKING_RAW")"
 
 			local offset_col leap_col
 			case "${offset_key:-bad}" in
@@ -648,9 +691,7 @@ section_chrony() {
 			kv_line "Leap status " "${leap_col}${leap}${RESET}"
 	fi
 
-	local src_output
-	src_output=$(chronyc sources 2>/dev/null)
-	if [[ -n "$src_output" ]]; then
+	if [[ -n "$_CHR_SOURCES_RAW" ]]; then
 		inner_rule dash
 		box_line "   ${FG_BCYAN}NTP Sources${RESET}"
 
@@ -676,7 +717,7 @@ section_chrony() {
 				*)   sc="$FG_WHITE"   ;;
 			esac
 			box_line "   ${sc}${line}${RESET}"
-		done < <(grep -E '^[\^=#][*+?x~-]' <<< "$src_output")
+		done < <(grep -E '^[\^=#][*+?x~-]' <<< "$_CHR_SOURCES_RAW")
 	fi
 
 	box_blank
@@ -709,6 +750,11 @@ draw_loading() {
 			_BUF=''
 			local ts
 			read -r _NOW ts < <(date '+%s %A %d %B %Y  %H:%M:%S %Z')   # one fork for both epoch and display time
+
+			# Slow-frame decision — shared by section_unbound and section_chrony
+			_SLOW_SECS=$(( REFRESH_INTERVAL * SLOW_INTERVAL_MULT ))
+			_DO_SLOW=false
+			(( _SLOW_LAST_TS == 0 || _NOW - _SLOW_LAST_TS >= _SLOW_SECS )) && _DO_SLOW=true
 			local nice_disp; printf -v nice_disp '%+d' "$NICE_VALUE"
 
 			box_blank
@@ -724,6 +770,9 @@ draw_loading() {
 															section_kea
 															inner_rule mid
 															section_chrony
+
+															# Update slow-cadence timestamp after all sections have rendered
+															[[ "$_DO_SLOW" == "true" ]] && _SLOW_LAST_TS=$_NOW
 
 															inner_rule thin
 
@@ -815,6 +864,7 @@ main() {
 
 	local force_refresh=true
 	local key=''
+	local _t0=0   # draw start time; used to subtract draw duration from the wait
 
 	while true; do
 		# Belt-and-suspenders resize check for multiplexers that don't send SIGWINCH.
@@ -828,6 +878,7 @@ main() {
 				&& printf -v LAST_REFRESH '%(%H:%M:%S)T' -1   # bash strftime builtin — no fork
 							force_refresh=false
 							_NEED_REDRAW=false
+							_t0=$EPOCHSECONDS
 							draw_dashboard
 							do_draw
 		fi
@@ -836,7 +887,13 @@ main() {
 		if [[ "$PAUSED" == "true" ]]; then
 			IFS= read -r -s -n 1 key 2>/dev/null || true
 		else
-			IFS= read -r -s -n 1 -t "$REFRESH_INTERVAL" key 2>/dev/null || true
+			# Subtract draw_dashboard duration so total cycle ≈ REFRESH_INTERVAL.
+			# Without this, slow socat timeouts and external queries stack on top
+			# of the full interval wait, multiplying the apparent refresh time.
+			local _elapsed=$(( EPOCHSECONDS - _t0 ))
+			local _wait=$(( REFRESH_INTERVAL - _elapsed ))
+			(( _wait < 1 )) && _wait=1
+			IFS= read -r -s -n 1 -t "$_wait" key 2>/dev/null || true
 		fi
 
 		# Drain any multi-byte escape sequence (arrow keys, F-keys, etc.)
