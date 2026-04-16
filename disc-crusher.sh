@@ -226,9 +226,9 @@ format_duration() {
 
 # Extract base game name (strips disc/CD number suffix for M3U grouping)
 get_base_game_name() {
-	local base="${1%.*}"
-	base=$(echo "$base" | sed -E 's/[[:space:]]*(([-_]+[[:space:]]*)|[][{(]?)([Dd][Ii][Ss][Cc]|[Cc][Dd])[[:space:]]*[0-9]+[])}]?[[:space:]]*$//')
-	echo "$base"
+    local base="${1%.*}"
+    base=$(echo "$base" | sed -E 's/[[:space:]]*([-_]+[[:space:]]*|[][{(]+[[:space:]]*)?([Dd][Ii][Ss][Cc]|[Cc][Dd])[[:space:]]*[0-9]+.*//')
+    echo "$base"
 }
 
 # Extract disc number from filename (returns empty string if not found)
