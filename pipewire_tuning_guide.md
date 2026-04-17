@@ -120,7 +120,7 @@ Available formats:
 - S32_LE
 ```
 
-In this case, I'm just playing a null WAV file I made with `sox`, but it could be literally any sound file that's supported by `aplay`. We only care about the hardware dump output, which tells us: `RATE: [32000 192000]`; this is a range, not a series like the previous card we looked at. That means this particular card supports a floor and a ceiling in hardware, and everything in between, so we can use any rates in that range natively. Nice.
+In this case, I'm just playing a null WAV file I made with `sox`, but it could be literally any sound file that's supported by `aplay`. We only care about the hardware dump output, which tells us: `RATE: [32000 192000]`; this is a continuous range, not a series like the previous card we looked at. That means this particular card supports a floor and a ceiling in hardware, and everything in between, so we can use any rates in that range natively. Nice.
 
 ## Setting Up WirePlumber
 
@@ -256,12 +256,12 @@ About **5.3ms**.
 
 A `default.clock.quantum` of 256 worked very well for this particular system:
 
- - Ryzen 7 3700X @4.63GHz (-48mV)
- - 32GB DDR4 3200 (XMP)
+ - Ryzen 7 5800XT @5GHz (per-core negative CO)
+ - 32GB DDR4 @3600 (1:1:1 sync)
  - ASUS Xonar DX (C-Media Electronics Inc CMI8788 [Oxygen HD Audio])
  - Latest [XanMod](https://xanmod.org/) kernel
 
-Despite the somewhat modest and outdated hardware, I haven't had any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do. If you do need to tune, I'd start by experimenting with the `default.clock.quantum` value.
+I haven't experienced any cut-outs, clicks, pops, distortion, underruns, or any other sound issues even when playing multiple audio streams at different sample rates at once under load. This includes heavy games like *Mount & Blade II: Bannerlord*, with hundreds of sounds playing simultaneously, and hundreds of units on the field. But, YMMV. Consider this a starting point. If you find that you can get away with smaller buffers or need larger ones, do what you need to do. If you do need to tune, I'd start by experimenting with the `default.clock.quantum` value.
 
 ### Sample Rates
 
