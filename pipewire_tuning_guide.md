@@ -61,10 +61,10 @@ card 1: HDMI [HDA ATI HDMI], device 9: HDMI 3 [HDMI 3]
 
 *(If I'd wanted to list __recording__ devices, I could use `arecord -l` instead, but I'm focused on optimizing playback in this guide).* 
 
-In my case, I'm using my discrete sound card for playback, which is enumerated as `card 0`, `device 0`. This would typically be exposed to the system as `/proc/asound/card0/stream0`, and this will be the case on the vast majority of sound cards in Linux. Grabbing the sample rates your card supports in hardware is really easy using this interface. For example, here's the output from a sound card in someone else's system:
+In my case, I'm using my discrete sound card for playback, which is enumerated as `card 0`, `device 0`. This would typically be exposed to the system as something like `/proc/asound/card0/stream0` or `/proc/asound/card0/codec#1`. Grabbing the sample rates your card supports in hardware is really easy using this interface. For example, here's the output from a sound card in someone else's system:
 
 ```
-$ cat /proc/asound/card0/stream0 | grep Rates
+$ cat /proc/asound/card0/stream0 | grep -i rates
 
     Rates: 44100, 48000, 96000, 192000
     Rates: 44100, 48000, 96000, 192000
@@ -75,10 +75,23 @@ $ cat /proc/asound/card0/stream0 | grep Rates
     Rates: 44100, 48000, 96000, 192000
     Rates: 44100, 48000, 96000, 192000
 ```
+We can see that this particular card supports 44.1k, 48k, 96k, and 192k. On another system with a CA0132:
+```
+$ cat /proc/asound/card0/codec#1 | grep -i rates
 
-We can see that this particular card supports 44.1k, 48k, 96k, and 192k.
+    rates [0x5f0]: 32000 44100 48000 88200 96000 192000
+    rates [0x7e0]: 44100 48000 88200 96000 176400 192000
+    rates [0x7e0]: 44100 48000 88200 96000 176400 192000
+    rates [0x7e0]: 44100 48000 88200 96000 176400 192000
+    rates [0x7e0]: 44100 48000 88200 96000 176400 192000
+    rates [0x5f0]: 32000 44100 48000 88200 96000 192000
+    rates [0x7e0]: 44100 48000 88200 96000 176400 192000
+    rates [0x7e0]: 44100 48000 88200 96000 176400 192000
+    rates [0x7e0]: 44100 48000 88200 96000 176400 192000
+```
+This one supports a wider spectrum of 32k, 44.1k, 48k, 88.2k, 96k, 176.4k, and 192k.
 
-I have a weird card, however, and it doesn't use this straightforward `/proc` convention. So I had to use a different method (which should also work with any supported card out there):
+I have a weird card, however, and it doesn't use this more common and straightforward `/proc` convention. So I had to use a different method (which should also work with any supported card out there):
 
 ```
 $ aplay -D hw:0,0 --dump-hw-params test.wav
