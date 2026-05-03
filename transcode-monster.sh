@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.15.1"
+SCRIPT_VERSION="1.15.2"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -1047,7 +1047,6 @@ build_vf() {
 	local bit_depth="$3"
 	local vf=""
 	local vf_cpu=""  # CPU-side filters (before hwupload)
-	local vf_gpu=""  # GPU-side filters (after hwupload)
 
     # Get height for later use
     local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input" | head -1)
@@ -1093,7 +1092,11 @@ build_vf() {
 
     if [[ "$encoder_type" == "vaapi" ]]; then
 	    # ────────────────────────────────────────────────────────────
-	    # VAAPI PATH: Minimize CPU processing, use GPU deinterlacer
+	    # VAAPI PATH: Deinterlace on CPU before hwupload
+	    # deinterlace_vaapi is avoided: AMD's VAAPI implementation has
+	    # poor/broken support for it, especially on 10-bit surfaces.
+	    # CPU deinterlacing → progressive frames → hwupload is more
+	    # reliable and respects the user's DEINTERLACER setting.
 	    # ────────────────────────────────────────────────────────────
 
 	# Determine if we should check for telecine
@@ -1120,20 +1123,28 @@ build_vf() {
 		fi
 	fi
 
-	# Check if adaptive deinterlacing is requested (for mixed content)
+	# Deinterlace on CPU before hwupload — deint=1 on yadif processes only
+	# interlaced frames, giving adaptive behavior for mixed content
 	if [[ "$ADAPTIVE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
-		# Force adaptive deinterlacing regardless of detection
-		vf_gpu="deinterlace_vaapi=mode=motion_adaptive:rate=frame"
-		echo "    Added adaptive GPU deinterlacer: deinterlace_vaapi (motion adaptive)" >&2
+		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
+		vf_cpu="${vf_cpu}yadif=mode=0:parity=-1:deint=1"
+		echo "    Added adaptive CPU deinterlacer: yadif (interlaced frames only)" >&2
+	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
+		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
+		local deint_filter=$(apply_deinterlacer "auto")
+		if [[ -n "$deint_filter" ]]; then
+			vf_cpu="${vf_cpu}${deint_filter}"
+		fi
 	elif [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
 		local interlacing=$(detect_interlacing "$input")
 		echo "    Interlacing detected: $interlacing" >&2
-
-	    # Add deinterlacer if interlacing detected
-	    if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
-		    vf_gpu="deinterlace_vaapi=mode=motion_adaptive:rate=frame"
-		    echo "    Using adaptive GPU deinterlacer: deinterlace_vaapi (motion adaptive)" >&2
-	    fi
+		if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
+			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
+			local deint_filter=$(apply_deinterlacer "$interlacing")
+			if [[ -n "$deint_filter" ]]; then
+				vf_cpu="${vf_cpu}${deint_filter}"
+			fi
+		fi
 	fi
 
 	# Check if color space conversion is needed
@@ -1175,8 +1186,7 @@ build_vf() {
 		fi
 	fi
 
-	# Build complete filter chain
-	# Format and upload to GPU
+	# Build complete filter chain: CPU processing → format → hwupload
 	[[ -n "$vf_cpu" ]] && vf="$vf_cpu,"
 	if [[ "$bit_depth" == "12" ]]; then
 		vf="${vf}format=p012le,hwupload"
@@ -1185,9 +1195,6 @@ build_vf() {
 	else
 		vf="${vf}format=nv12,hwupload"
 	fi
-
-	# Add GPU filters if any
-	[[ -n "$vf_gpu" ]] && vf="$vf,$vf_gpu"
 
 else
 	# ────────────────────────────────────────────────────────────
