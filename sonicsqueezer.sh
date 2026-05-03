@@ -39,7 +39,6 @@ NC='\033[0m' # No Color
 
 ## Default Configuration Variables ##
 FFMPEG_PATH="/usr/bin/ffmpeg"
-FLACDECODER="/usr/bin/flac"
 METAFLAC="/usr/bin/metaflac"
 PROCNICE="10" # Nice priority (19 to -20, 19 lowest)
 OUTPUT_FORMAT="mp3" # Options: mp3, aac, ogg, wma, flac, opus, alac
@@ -115,9 +114,6 @@ create_config() {
 # Path to FFmpeg encoder
 # FFMPEG_PATH="/usr/bin/ffmpeg"
 
-# Path to FLAC decoder (required for FLAC input files)
-# FLACDECODER="/usr/bin/flac"
-
 # Path to metaflac (optional, for copying FLAC metadata)
 # METAFLAC="/usr/bin/metaflac"
 
@@ -189,8 +185,8 @@ print_help() {
 	echo ""
 	echo "Dependencies:"
 	echo "  - Bourne Again SHell (bash)"
-	echo "  - FFmpeg (required, includes loudnorm for normalization)"
-	echo "  - For FLAC input: 'flac' (decoder), 'metaflac' (optional for metadata)"
+	echo "  - FFmpeg (required; handles all decoding, encoding, and validation natively)"
+	echo "  - metaflac (optional, for copying FLAC metadata)"
 	echo ""
 	exit 0
 }
@@ -415,54 +411,53 @@ convert_flac() {
 	local fileout
 
 	[[ -r "$file" ]] || { error "Unable to read file: $file"; return 1; }
-	[[ -x "$FLACDECODER" ]] || { error "FLAC decoder not found at $FLACDECODER"; return 1; }
 
-    # Check if the file is a valid FLAC before processing metadata
-    if ! "$FLACDECODER" --test "$file" >/dev/null 2>&1; then
-	    warning "Invalid FLAC file: $file, using original basename"
-	    fileout="${OUTPUT_DIR:-$dir}/${basename}.${OUTPUT_FORMAT}"
-	    info "Processing FLAC: $file"
-	    "$FFMPEG_PATH" -i "$file" $QUALITY_OPTS "$fileout" -y -loglevel error || { error "FFmpeg encoding failed for $file"; return 1; }
-	    if [[ "$DELETE_ORIGINAL" == "true" && -f "$fileout" ]]; then
-		    rm -f "$file" && info "Deleted original file: $file"
-	    fi
-	    success "Converted to: $fileout"
-	    return 0
-    fi
+	# Validate the FLAC file using ffmpeg (no standalone 'flac' binary required)
+	if ! "$FFMPEG_PATH" -v error -i "$file" -f null - 2>/dev/null; then
+		warning "Invalid or unreadable FLAC file: $file, using original basename"
+		fileout="${OUTPUT_DIR:-$dir}/${basename}.${OUTPUT_FORMAT}"
+		info "Processing FLAC: $file"
+		"$FFMPEG_PATH" -i "$file" $QUALITY_OPTS "$fileout" -y -loglevel error || { error "FFmpeg encoding failed for $file"; return 1; }
+		if [[ "$DELETE_ORIGINAL" == "true" && -f "$fileout" ]]; then
+			rm -f "$file" && info "Deleted original file: $file"
+		fi
+		success "Converted to: $fileout"
+		return 0
+	fi
 
-    if [[ "$RENAME_METADATA" == "true" ]]; then
-	    local tracknumber=$("$METAFLAC" --show-tag=TRACKNUMBER "$file" | awk -F= '{print $2}' | head -n1)
-	    local title=$("$METAFLAC" --show-tag=TITLE "$file" | awk -F= '{print $2}' | head -n1)
-	    if [[ -n "$tracknumber" && -n "$title" ]]; then
-		    # Pad tracknumber to two digits
-		    tracknumber=$(printf "%02d" "$tracknumber")
-		    # Sanitize title for filesystem safety
-		    title=$(echo "$title" | tr -d '/:*?"<>|' | tr -s ' ')
-		    fileout="${OUTPUT_DIR:-$dir}/${tracknumber} - ${title}.${OUTPUT_FORMAT}"
-	    else
-		    warning "Missing TRACKNUMBER or TITLE metadata for $file, using original basename"
-		    fileout="${OUTPUT_DIR:-$dir}/${basename}.${OUTPUT_FORMAT}"
-	    fi
-    else
-	    fileout="${OUTPUT_DIR:-$dir}/${basename}.${OUTPUT_FORMAT}"
-    fi
+	if [[ "$RENAME_METADATA" == "true" ]]; then
+		local tracknumber=$("$METAFLAC" --show-tag=TRACKNUMBER "$file" | awk -F= '{print $2}' | head -n1)
+		local title=$("$METAFLAC" --show-tag=TITLE "$file" | awk -F= '{print $2}' | head -n1)
+		if [[ -n "$tracknumber" && -n "$title" ]]; then
+			# Pad tracknumber to two digits
+			tracknumber=$(printf "%02d" "$tracknumber")
+			# Sanitize title for filesystem safety
+			title=$(echo "$title" | tr -d '/:*?"<>|' | tr -s ' ')
+			fileout="${OUTPUT_DIR:-$dir}/${tracknumber} - ${title}.${OUTPUT_FORMAT}"
+		else
+			warning "Missing TRACKNUMBER or TITLE metadata for $file, using original basename"
+			fileout="${OUTPUT_DIR:-$dir}/${basename}.${OUTPUT_FORMAT}"
+		fi
+	else
+		fileout="${OUTPUT_DIR:-$dir}/${basename}.${OUTPUT_FORMAT}"
+	fi
 
-    info "Processing FLAC: $file"
-    local metadata=()
-    if [[ "$COPYMETA" == "true" ]]; then
-	    for tag in TITLE ALBUM ARTIST TRACKNUMBER GENRE COMMENT DATE; do
-		    value=$("$METAFLAC" --show-tag="$tag" "$file" | awk -F= '{print $2}' | head -n1)
-		    [[ -n "$value" ]] && metadata+=(-metadata "${tag,,}=${value}")
-	    done
-    fi
-    local normalize_opts=""
-    [[ "$NORMALIZE" == "true" ]] && normalize_opts="-af loudnorm=I=-16:LRA=11:TP=-1.5"
+	info "Processing FLAC: $file"
+	local metadata=()
+	if [[ "$COPYMETA" == "true" ]]; then
+		for tag in TITLE ALBUM ARTIST TRACKNUMBER GENRE COMMENT DATE; do
+			value=$("$METAFLAC" --show-tag="$tag" "$file" | awk -F= '{print $2}' | head -n1)
+			[[ -n "$value" ]] && metadata+=(-metadata "${tag,,}=${value}")
+		done
+	fi
+	local normalize_opts=""
+	[[ "$NORMALIZE" == "true" ]] && normalize_opts="-af loudnorm=I=-16:LRA=11:TP=-1.5"
 
-    "$FFMPEG_PATH" -i "$file" "${metadata[@]}" $normalize_opts $QUALITY_OPTS "$fileout" -y -loglevel error || { error "FFmpeg encoding failed for $file"; return 1; }
-    if [[ "$DELETE_ORIGINAL" == "true" && -f "$fileout" ]]; then
-	    rm -f "$file" && info "Deleted original file: $file"
-    fi
-    success "Converted to: $fileout"
+	"$FFMPEG_PATH" -i "$file" "${metadata[@]}" $normalize_opts $QUALITY_OPTS "$fileout" -y -loglevel error || { error "FFmpeg encoding failed for $file"; return 1; }
+	if [[ "$DELETE_ORIGINAL" == "true" && -f "$fileout" ]]; then
+		rm -f "$file" && info "Deleted original file: $file"
+	fi
+	success "Converted to: $fileout"
 }
 
 convert_file() {
@@ -503,9 +498,10 @@ else
 	FAIL_COUNT_FILE=$(mktemp)
 	SKIP_COUNT_FILE=$(mktemp)
 fi
-: > "$SUCCESS_COUNT_FILE"
-: > "$FAIL_COUNT_FILE"
-: > "$SKIP_COUNT_FILE"
+# Initialize counters explicitly so cat never reads an empty file
+echo 0 > "$SUCCESS_COUNT_FILE"
+echo 0 > "$FAIL_COUNT_FILE"
+echo 0 > "$SKIP_COUNT_FILE"
 
 # Clean up temp files on exit
 trap 'rm -f "$SUCCESS_COUNT_FILE" "$FAIL_COUNT_FILE" "$SKIP_COUNT_FILE"' EXIT
@@ -555,7 +551,7 @@ info "Processing $TOTAL_FILES files ($SKIPPED_FILES will be skipped)"
 
 # Export variables and functions for parallel processing
 export -f convert_wav convert_flac convert_file error warning info success validate_bool
-export FFMPEG_PATH FLACDECODER METAFLAC QUALITY_OPTS NORMALIZE COPYMETA DELETE_ORIGINAL OUTPUT_FORMAT OUTPUT_DIR RENAME_METADATA
+export FFMPEG_PATH METAFLAC QUALITY_OPTS NORMALIZE COPYMETA DELETE_ORIGINAL OUTPUT_FORMAT OUTPUT_DIR RENAME_METADATA
 export RED YELLOW GREEN BLUE CYAN NC
 export SUCCESS_COUNT_FILE FAIL_COUNT_FILE SKIP_COUNT_FILE TOTAL_FILES
 
