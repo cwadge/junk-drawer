@@ -14,6 +14,7 @@ A collection of miscellaneous resources for Linux gaming and system tasks. Many 
 | Multimedia | [pipewire_tuning_guide.md](pipewire_tuning_guide.md) | Quick & dirty guide to setting up low-latency, multi-rate PipeWire |
 | Multimedia | [sonicsqueezer.sh](sonicsqueezer.sh) | A multi-threaded audio converter for WAV and FLAC to MP3, AAC, OGG, and more | 
 | Multimedia | [transcode-monster.sh](transcode-monster.sh) | Transcode single titles (movies) or series to H.265 with hardware accelleration ([README](transcode-monster.md)) |
+| Multimedia | [yt-music-dl.sh](yt-music-dl.sh) | Download purchased YouTube Music content with the correct structure |
 
 ## Installation
 Clone the whole repo:
@@ -33,6 +34,7 @@ sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/disc-crusher
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/midi2wav.sh -O /usr/local/bin/midi2wav.sh && sudo chmod 755 /usr/local/bin/midi2wav.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/sonicsqueezer.sh -O /usr/local/bin/sonicsqueezer.sh && sudo chmod 755 /usr/local/bin/sonicsqueezer.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/transcode-monster.sh -O /usr/local/bin/transcode-monster.sh && sudo chmod 755 /usr/local/bin/transcode-monster.sh
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/yt-music-dl.sh -O /usr/local/bin/yt-music-dl.sh && sudo chmod 755 /usr/local/bin/yt-music-dl.sh
 ```
 
 On Batocera:
