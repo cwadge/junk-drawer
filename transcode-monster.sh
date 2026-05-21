@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.15.2"
+SCRIPT_VERSION="1.15.3"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -1388,17 +1388,60 @@ get_vaapi_profile() {
 	fi
 }
 
-# Check if a specific audio track is pcm_bluray (incompatible with MKV)
-has_pcm_bluray_audio() {
+# Check if a specific audio track requires conversion rather than copy.
+# Covers container-specific PCM formats that cannot be safely muxed into standard
+# containers: pcm_bluray (BD-specific) and pcm_dvd (DVD-specific).
+needs_audio_remux() {
 	local input="$1"
 	local track_idx="$2"
 	local audio_codec=$(ffprobe -v quiet -select_streams "a:${track_idx}" -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]')
-
-	if [[ "$audio_codec" == "pcm_bluray" ]]; then
-		return 0
-	fi
-	return 1
+	case "$audio_codec" in
+		pcm_bluray|pcm_dvd)
+			return 0 ;;
+		*)
+			return 1 ;;
+	esac
 }
+
+# Return the source codec name for a given audio track (used for display)
+get_audio_codec_name() {
+	local input="$1"
+	local track_idx="$2"
+	ffprobe -v quiet -select_streams "a:${track_idx}" -show_entries stream=codec_name \
+		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]'
+	}
+
+# Determine output codec for a subtitle track when muxing to MKV.
+# Returns "copy" for MKV-compatible codecs, a transcode target (e.g. "srt") for
+# formats that need conversion, or "drop" for codecs that cannot be meaningfully
+# converted (embedded closed captions, binary data streams, etc.).
+get_subtitle_output_codec() {
+	local input="$1"
+	local track_index="$2"
+	local codec
+	codec=$(ffprobe -v quiet -select_streams "s:${track_index}" \
+		-show_entries stream=codec_name \
+		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]')
+			case "$codec" in
+				# MP4/ISOBMFF text subtitles — MKV does not support these; convert to SRT
+				mov_text|ttml)
+				echo "srt" ;;
+				# WebVTT — convert to SRT for broad player compatibility
+				webvtt)
+				echo "srt" ;;
+				# CEA-608/708 closed captions are embedded in the video stream and cannot
+				# be independently muxed as a subtitle stream — drop them
+				eia_608|eia_708|cea_608|cea_708)
+				echo "drop" ;;
+				# Binary data or unrecognized codec — not a real subtitle stream
+				bin_data|"")
+				echo "drop" ;;
+				# All other codecs (ass, srt, hdmv_pgs_subtitle, dvd_subtitle,
+				# dvb_subtitle, etc.) are MKV-compatible
+				*)
+				echo "copy" ;;
+		esac
+	}
 
 # Get duration of a video file in seconds
 get_video_duration() {
@@ -2250,9 +2293,10 @@ build_ffmpeg_command() {
     # Build audio options
     local audio_opts=""
 
-    # Check if default audio track is pcm_bluray (incompatible with MKV)
+    # Check if default audio track uses a container-specific PCM format
+    # (pcm_bluray, pcm_dvd) that cannot be safely copied to a standard muxer
     local has_pcm_bluray=false
-    if has_pcm_bluray_audio "$source_file" "$default_audio_idx"; then
+    if needs_audio_remux "$source_file" "$default_audio_idx"; then
 	    has_pcm_bluray=true
     fi
 
@@ -2294,19 +2338,29 @@ build_ffmpeg_command() {
     local sub_opts=""
     local sub_track_idx=0
     declare -A input_to_output_sub_map
+    declare -a sub_out_codecs  # output codec per output track index
 
     for ((i=0; i<num_subs; i=i+1)); do
 	    # Check if we should include this subtitle track
 	    if [[ "$(should_include_subtitle_track "$source_file" $i)" == "true" ]]; then
+		    local sub_codec
+		    sub_codec=$(get_subtitle_output_codec "$source_file" $i)
+		    if [[ "$sub_codec" == "drop" ]]; then
+			    echo -e "${YELLOW}    Skipping subtitle track $i: codec incompatible with MKV output${RESET}" >&2
+			    continue
+		    fi
 		    sub_opts="$sub_opts -map 0:s:$i"
+		    sub_out_codecs[$sub_track_idx]="$sub_codec"
 		    input_to_output_sub_map[$i]=$sub_track_idx
 		    sub_track_idx=$((sub_track_idx + 1))
 	    fi
     done
 
-    # Add codec if we have any subtitles
+    # Add per-track codec options (converts incompatible formats, e.g. mov_text → srt)
     if [[ $sub_track_idx -gt 0 ]]; then
-	    sub_opts="$sub_opts -c:s copy"
+	    for ((i=0; i<sub_track_idx; i=i+1)); do
+		    sub_opts="$sub_opts -c:s:$i ${sub_out_codecs[$i]}"
+	    done
 
 	# Determine which subtitle should be default based on audio language
 	local sub_default_input_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
@@ -3296,9 +3350,11 @@ else
 
 	    IFS='|' read -r default_audio_idx default_audio_lang <<< "$(get_audio_track_info "$source_file" "$preferred_audio_lang")"
 
-	    # Check if default audio needs pcm_bluray conversion
-	    if has_pcm_bluray_audio "$source_file" "$default_audio_idx"; then
-		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default [pcm_bluray → FLAC]${RESET}"
+	    # Check if default audio needs container-specific PCM conversion
+	    if needs_audio_remux "$source_file" "$default_audio_idx"; then
+		    local src_acodec
+		    src_acodec=$(get_audio_codec_name "$source_file" "$default_audio_idx")
+		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default [${src_acodec} → FLAC]${RESET}"
 	    else
 		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default${RESET}"
 	    fi
