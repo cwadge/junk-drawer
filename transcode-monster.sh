@@ -259,8 +259,10 @@ FFMPEG_PROBESIZE="${FFMPEG_PROBESIZE:-$DEFAULT_FFMPEG_PROBESIZE}"
 
 show_help() {
 	cat << EOF
-${BOLD}Transcode Monster v${SCRIPT_VERSION}${RESET}
-Universal video transcoding script with automatic series/movie detection
+${BOLDBLUE}════════════════════════════════════════════════════════════════════════════${RESET}
+${BOLD}  Transcode Monster v${SCRIPT_VERSION}${RESET}
+  Universal video transcoding script with automatic series/movie detection
+${BOLDBLUE}════════════════════════════════════════════════════════════════════════════${RESET}
 
 ${BOLDBLUE}USAGE${RESET}
   transcode-monster.sh [options] ${YELLOW}<source>${RESET} [${YELLOW}output_dir${RESET}]
@@ -274,7 +276,7 @@ ${BOLDBLUE}GENERAL OPTIONS${RESET}
   ${GREEN}-v${RESET}, ${GREEN}--version${RESET}          Show version information
   ${GREEN}-t${RESET}, ${GREEN}--type${RESET} ${YELLOW}TYPE${RESET}        Override auto-detection: ${CYAN}series${RESET} or ${CYAN}movie${RESET}
   ${GREEN}-n${RESET}, ${GREEN}--name${RESET} ${YELLOW}NAME${RESET}        Set content title (e.g., "Firefly" or "Dune")
-  ${GREEN}-y${RESET}, ${GREEN}--year${RESET} ${YELLOW}YEAR${RESET}        Append year to title
+  ${GREEN}-y${RESET}, ${GREEN}--year${RESET} ${YELLOW}YEAR${RESET}        Append year to title (e.g., 1984 for movies; 1959 for reboots)
   ${GREEN}-s${RESET}, ${GREEN}--season${RESET} ${YELLOW}NUM${RESET}       Process only a specific season (default: all seasons)
   ${GREEN}-e${RESET}, ${GREEN}--episode${RESET} ${YELLOW}NUM${RESET}      Process only a specific episode in series mode
   ${GREEN}-d${RESET}, ${GREEN}--dry-run${RESET}          Show what would be processed without encoding
@@ -282,75 +284,75 @@ ${BOLDBLUE}GENERAL OPTIONS${RESET}
 
 ${BOLDBLUE}VIDEO ENCODING${RESET}
   ${GREEN}-q${RESET}, ${GREEN}--quality${RESET} ${YELLOW}NUM${RESET}      CQP/CRF quality value (default: ${DEFAULT_QUALITY})
-			 Lower = better quality / higher = smaller files
-			 Recommended: 18-20 (8-bit), 20-22 (10-bit), 22-24 (12-bit)
+                         Lower = better quality / higher = smaller files
+                         Recommended: 18-20 (8-bit), 20-22 (10-bit), 22-24 (12-bit)
   ${GREEN}-c${RESET}, ${GREEN}--codec${RESET} ${YELLOW}CODEC${RESET}      Video codec (default: ${DEFAULT_VIDEO_CODEC})
-			 ${CYAN}auto${RESET}       Choose hevc_vaapi or libx265 based on content
-			 ${CYAN}hevc_vaapi${RESET} Hardware encoding — fastest
-			 ${CYAN}libx265${RESET}    Software encoding — maximum quality/compatibility
+                         ${CYAN}auto${RESET}       Choose hevc_vaapi or libx265 based on content
+                         ${CYAN}hevc_vaapi${RESET} Hardware encoding — fastest
+                         ${CYAN}libx265${RESET}    Software encoding — maximum quality/compatibility
   ${GREEN}--preset${RESET} ${YELLOW}PRESET${RESET}         libx265 software encoding preset (default: ${DEFAULT_PRESET})
-			 ultrafast  superfast  veryfast  faster  fast
-			 medium  slow  slower  veryslow  placebo
+                         ultrafast  superfast  veryfast  faster  fast
+                         medium  slow  slower  veryslow  placebo
   ${GREEN}--tune${RESET} ${YELLOW}TUNE${RESET}             libx265 tuning preset (default: none)
-			 ${CYAN}fastdecode${RESET}  Optimize for low-power playback (Pi, smart TVs, older
-				      devices); automatically limits B-frames to 1
-			 ${CYAN}grain${RESET}       Preserve film grain
-			 ${CYAN}animation${RESET}   Optimize for sharp edges and flat colors
-			 ${CYAN}psnr${RESET}  ${CYAN}ssim${RESET}  ${CYAN}zerolatency${RESET}
+                         ${CYAN}fastdecode${RESET}  Optimize for low-power playback (Pi, smart TVs, older
+                                      devices); automatically limits B-frames to 1
+                         ${CYAN}grain${RESET}       Preserve film grain
+                         ${CYAN}animation${RESET}   Optimize for sharp edges and flat colors
+                         ${CYAN}psnr${RESET}  ${CYAN}ssim${RESET}  ${CYAN}zerolatency${RESET}
   ${GREEN}-b${RESET}, ${GREEN}--bframes${RESET} ${YELLOW}NUM${RESET}      B-frame count: 0-4+ (default: ${DEFAULT_BFRAMES})
-			 0 = max compatibility / 1-2 = balanced / 3-4 = best compression
-			 Higher values increase decode complexity on low-power devices
-			 Automatically set to 1 when --tune fastdecode is active
-			 ${YELLOW}NOTE:${RESET} Silently ignored by hevc_vaapi on all AMD GPUs (VCN 1-5);
-			 only effective with libx265 or non-AMD VAAPI hardware
+                         0 = max compatibility / 1-2 = balanced / 3-4 = best compression
+                         Higher values increase decode complexity on low-power devices
+                         Automatically set to 1 when --tune fastdecode is active
+                         ${YELLOW}NOTE:${RESET} Silently ignored by hevc_vaapi on all AMD GPUs (VCN 1-5);
+                         only effective with libx265 or non-AMD VAAPI hardware
 
 ${BOLDBLUE}HARDWARE ACCELERATION${RESET}
   ${GREEN}--device${RESET} ${YELLOW}PATH${RESET}           VAAPI render device (default: ${DEFAULT_VAAPI_DEVICE})
   ${GREEN}--compression-level${RESET} ${YELLOW}N${RESET}  Hardware encoder compression level: 0-7 (default: ${DEFAULT_VAAPI_COMPRESSION_LEVEL})
-			 0 = fastest / largest files
-			 4 = balanced — ~5x faster than software, comparable file sizes
-			 7 = slowest / smallest files (still faster than software)
-			 Intel Arc/11th+ gen specific; safely ignored on AMD/older Intel
+                         0 = fastest / largest files
+                         4 = balanced — ~5x faster than software, comparable file sizes
+                         7 = slowest / smallest files (still faster than software)
+                         Intel Arc/11th+ gen specific; safely ignored on AMD/older Intel
 
 ${BOLDBLUE}BIT DEPTH & COLOR SPACE${RESET}
   ${GREEN}--upgrade-8bit${RESET}         Upgrade 8-bit sources to 10-bit (default: enabled)
-			 Benefits: reduced banding, ~10-15% smaller files, no visible loss
+                         Benefits: reduced banding, ~10-15% smaller files, no visible loss
   ${GREEN}--no-upgrade-8bit${RESET}      Encode at source bit depth (disable 8→10-bit upgrade)
   ${GREEN}--downgrade-12bit${RESET}      Downgrade 12-bit to 10-bit for hardware compat/speed
-			 Benefits: enables GPU encoding, ~20% smaller, minimal quality loss
+                         Benefits: enables GPU encoding, ~20% smaller, minimal quality loss
   ${GREEN}--no-downgrade-12bit${RESET}   Preserve 12-bit sources at native depth (default)
   ${GREEN}--colorspace${RESET} ${YELLOW}SPACE${RESET}      Color space handling (default: auto)
-			 ${CYAN}auto${RESET}   Detect from metadata; preserve HDR automatically
-			 ${CYAN}bt709${RESET}  Force BT.709 (HD standard)
-			 ${CYAN}bt601${RESET}  Force BT.601 (SD standard)
-			 ${CYAN}hdr${RESET}    Preserve HDR metadata (HDR10, HLG, BT.2020)
-			 ${CYAN}none${RESET}   Disable conversion (use source color space as-is)
+                         ${CYAN}auto${RESET}   Detect from metadata; preserve HDR automatically
+                         ${CYAN}bt709${RESET}  Force BT.709 (HD standard)
+                         ${CYAN}bt601${RESET}  Force BT.601 (SD standard)
+                         ${CYAN}hdr${RESET}    Preserve HDR metadata (HDR10, HLG, BT.2020)
+                         ${CYAN}none${RESET}   Disable conversion (use source color space as-is)
 
 ${BOLDBLUE}VIDEO PROCESSING${RESET}
   ${GREEN}--no-crop${RESET}              Disable automatic black bar crop detection
   ${GREEN}--no-deinterlace${RESET}       Disable automatic interlacing detection
   ${GREEN}--force-deinterlace${RESET}    Force deinterlacing even on progressive content
   ${GREEN}--adaptive-deinterlace${RESET} Only deinterlace frames flagged as interlaced
-			 Useful for mixed content: film transfers with interlaced title
-			 cards, or compilations assembled from multiple sources
+                         Useful for mixed content: film transfers with interlaced title
+                         cards, or compilations assembled from multiple sources
   ${GREEN}--deinterlacer${RESET} ${YELLOW}FILTER${RESET}  Deinterlacing filter (default: ${DEFAULT_DEINTERLACER})
-			 ${CYAN}bwdif${RESET}  Bob weaver — best quality for most content
-			 ${CYAN}nnedi${RESET}  Neural network — best for noisy or difficult sources
-			 ${CYAN}yadif${RESET}  Yet another deinterlacer — fast and widely compatible
+                         ${CYAN}bwdif${RESET}  Bob weaver — best quality for most content
+                         ${CYAN}nnedi${RESET}  Neural network — best for noisy or difficult sources
+                         ${CYAN}yadif${RESET}  Yet another deinterlacer — fast and widely compatible
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
   ${GREEN}--force-ivtc${RESET}           Force inverse telecine on HD content
-			 (by default, only runs on SD content ≤576p)
+                         (by default, only runs on SD content ≤576p)
   ${GREEN}--split-chapters${RESET}       Force chapter splitting for multi-episode files
   ${GREEN}--no-split-chapters${RESET}    Process file as a single video (no chapter splitting)
   ${GREEN}--chapters-per-episode${RESET} ${YELLOW}N${RESET}
-			 Group N chapters per episode (default: auto-detect optimal)
+                         Group N chapters per episode (default: auto-detect optimal)
 
 ${BOLDBLUE}AUDIO & LANGUAGE${RESET}
   ${GREEN}--language${RESET} ${YELLOW}LANG${RESET}         Preferred language, ISO 639-2 code (default: ${DEFAULT_LANGUAGE})
-			 Comma-separated for multilingual: ${CYAN}eng,spa,fra${RESET}
-			 First code in the list takes priority for subtitle selection
+                         Comma-separated for multilingual: ${CYAN}eng,spa,fra${RESET}
+                         First code in the list takes priority for subtitle selection
   ${GREEN}--original-lang${RESET} ${YELLOW}LANG${RESET}    Original language mode — original audio + subtitles
-			 in the default language (e.g., ${CYAN}--original-lang jpn${RESET} for anime)
+                         in the default language (e.g., ${CYAN}--original-lang jpn${RESET} for anime)
   ${GREEN}--all-audio${RESET}            Keep all audio tracks (bypass language filtering)
 
   Language filtering (enabled by default) keeps: tracks matching LANGUAGE, commentary
@@ -358,7 +360,7 @@ ${BOLDBLUE}AUDIO & LANGUAGE${RESET}
 
 ${BOLDBLUE}OUTPUT${RESET}
   ${GREEN}--bulk-movies${RESET}          Process all video files in a directory as separate movies
-			 Default movie mode picks the longest file in a directory only
+                         Default movie mode picks the longest file in a directory only
 
 ${BOLDBLUE}ENCODER NOTES${RESET}
   Hybrid encoding uses hardware (hevc_vaapi) when safe for maximum speed, and
@@ -440,14 +442,14 @@ ${BOLDBLUE}CONFIG FILE${RESET}
 
   ${CYAN}FFmpeg verbosity (config file only):${RESET}
     FFMPEG_LOGLEVEL           Output level (default: warning)
-			      quiet  panic  fatal  error  warning  info  verbose  debug
-			      The progress indicator (-stats) is always enabled.
+                              quiet  panic  fatal  error  warning  info  verbose  debug
+                              The progress indicator (-stats) is always enabled.
     FFMPEG_ANALYZEDURATION    Microseconds to analyze input (default: 120000000 = 2 min)
-			      Increase if you see "Could not find codec parameters" on
-			      subtitle streams. Large Blu-ray rips may need 200000000+.
+                              Increase if you see "Could not find codec parameters" on
+                              subtitle streams. Large Blu-ray rips may need 200000000+.
     FFMPEG_PROBESIZE          Bytes to probe for stream info (default: 128000000 = 128 MB)
-			      Raise alongside ANALYZEDURATION for persistent warnings.
-			      Higher values add 3-8 sec to startup but eliminate them.
+                              Raise alongside ANALYZEDURATION for persistent warnings.
+                              Higher values add 3-8 sec to startup but eliminate them.
 
 ${BOLDBLUE}EXAMPLES${RESET}
   ${CYAN}# Auto-detect everything from a disc directory${RESET}
