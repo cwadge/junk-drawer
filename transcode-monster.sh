@@ -155,15 +155,15 @@ trap 'interrupt_handler' INT
 
 # Check if stdout is a terminal
 if [[ -t 1 ]]; then
-	RED='\033[0;31m'
-	YELLOW='\033[1;33m'
-	GREEN='\033[0;32m'
-	BLUE='\033[0;34m'
-	CYAN='\033[0;36m'
-	BOLD='\033[1m'
-	BOLDBLUE='\033[1;34m'
-	BOLDGREEN='\033[1;32m'
-	RESET='\033[0m'
+	RED=$'\033[0;31m'
+	YELLOW=$'\033[1;33m'
+	GREEN=$'\033[0;32m'
+	BLUE=$'\033[0;34m'
+	CYAN=$'\033[0;36m'
+	BOLD=$'\033[1m'
+	BOLDBLUE=$'\033[1;34m'
+	BOLDGREEN=$'\033[1;32m'
+	RESET=$'\033[0m'
 else
 	RED=''
 	YELLOW=''
@@ -259,305 +259,238 @@ FFMPEG_PROBESIZE="${FFMPEG_PROBESIZE:-$DEFAULT_FFMPEG_PROBESIZE}"
 
 show_help() {
 	cat << EOF
-Transcode Monster v${SCRIPT_VERSION}
+${BOLD}Transcode Monster v${SCRIPT_VERSION}${RESET}
 Universal video transcoding script with automatic series/movie detection
 
-USAGE:
-  transcode-monster.sh [options] <source> [output_dir]
+${BOLDBLUE}USAGE${RESET}
+  transcode-monster.sh [options] ${YELLOW}<source>${RESET} [${YELLOW}output_dir${RESET}]
 
-ARGUMENTS:
-  source                 Source directory or file(s) to transcode
-  output_dir             Output directory (default: ${DEFAULT_OUTPUT_DIR})
+${BOLDBLUE}ARGUMENTS${RESET}
+  ${GREEN}source${RESET}                 Source directory or file(s) to transcode
+  ${GREEN}output_dir${RESET}             Output directory (default: ${DEFAULT_OUTPUT_DIR})
 
-OPTIONS:
-  -h, --help             Show this help message
-  -v, --version          Show version information
+${BOLDBLUE}GENERAL OPTIONS${RESET}
+  ${GREEN}-h${RESET}, ${GREEN}--help${RESET}             Show this help message
+  ${GREEN}-v${RESET}, ${GREEN}--version${RESET}          Show version information
+  ${GREEN}-t${RESET}, ${GREEN}--type${RESET} ${YELLOW}TYPE${RESET}        Override auto-detection: ${CYAN}series${RESET} or ${CYAN}movie${RESET}
+  ${GREEN}-n${RESET}, ${GREEN}--name${RESET} ${YELLOW}NAME${RESET}        Set content title (e.g., "Firefly" or "Dune")
+  ${GREEN}-y${RESET}, ${GREEN}--year${RESET} ${YELLOW}YEAR${RESET}        Append year to title
+  ${GREEN}-s${RESET}, ${GREEN}--season${RESET} ${YELLOW}NUM${RESET}       Process only a specific season (default: all seasons)
+  ${GREEN}-e${RESET}, ${GREEN}--episode${RESET} ${YELLOW}NUM${RESET}      Process only a specific episode in series mode
+  ${GREEN}-d${RESET}, ${GREEN}--dry-run${RESET}          Show what would be processed without encoding
+  ${GREEN}-o${RESET}, ${GREEN}--overwrite${RESET}        Overwrite existing output files
 
-  -t, --type TYPE        Override auto-detection: 'series' or 'movie'
-  -n, --name NAME        Set title name (e.g., "Firefly" or "Dune")
-  -s, --season NUM       Process only specific season (default: all seasons)
-  -e, --episode NUM      Process only specific episode in series mode
-  -y, --year YEAR        Add year to title (e.g., 1984 for movies, 1959 for series reboots)
-
-  -q, --quality NUM      Video quality CQP/CRF value (default: ${DEFAULT_QUALITY})
-			 Lower = better quality, higher = smaller files
+${BOLDBLUE}VIDEO ENCODING${RESET}
+  ${GREEN}-q${RESET}, ${GREEN}--quality${RESET} ${YELLOW}NUM${RESET}      CQP/CRF quality value (default: ${DEFAULT_QUALITY})
+			 Lower = better quality / higher = smaller files
 			 Recommended: 18-20 (8-bit), 20-22 (10-bit), 22-24 (12-bit)
-			 Default optimized for 10-bit encoding
-  -c, --codec CODEC      Video codec: 'auto', 'hevc_vaapi', 'libx265' (default: ${DEFAULT_VIDEO_CODEC})
-  --preset PRESET        x265 encoding preset for software encoding (default: ${DEFAULT_PRESET})
-			 Options: ultrafast, superfast, veryfast, faster, fast,
-				  medium, slow, slower, veryslow, placebo
-  --tune TUNE            x265 tuning for software encoding (default: none)
-			 Options: fastdecode (optimize for low-power playback devices),
-				  grain (preserve film grain), psnr, ssim, zerolatency,
-				  animation (optimize for sharp edges and flat colors)
-			 Use 'fastdecode' for content played on Raspberry Pi, smart TVs,
-			 or older devices where decode speed matters
-			 NOTE: fastdecode automatically limits B-frames to 1 for best results
-  -b, --bframes NUM      Number of B-frames: 0-4+ (default: ${DEFAULT_BFRAMES})
-			 0 = max compatibility, 1-2 = balanced, 3-4 = best compression
-			 Higher values increase decode complexity (slower on weak devices)
-			 Automatically adjusted to 1 when using --tune fastdecode
-			 NOTE: Silently ignored by hevc_vaapi on all AMD GPUs (hardware
-			 limitation across all VCN generations). Effective only with
-			 libx265 (software encoding) or non-AMD VAAPI
+  ${GREEN}-c${RESET}, ${GREEN}--codec${RESET} ${YELLOW}CODEC${RESET}      Video codec (default: ${DEFAULT_VIDEO_CODEC})
+			 ${CYAN}auto${RESET}       Choose hevc_vaapi or libx265 based on content
+			 ${CYAN}hevc_vaapi${RESET} Hardware encoding — fastest
+			 ${CYAN}libx265${RESET}    Software encoding — maximum quality/compatibility
+  ${GREEN}--preset${RESET} ${YELLOW}PRESET${RESET}         libx265 software encoding preset (default: ${DEFAULT_PRESET})
+			 ultrafast  superfast  veryfast  faster  fast
+			 medium  slow  slower  veryslow  placebo
+  ${GREEN}--tune${RESET} ${YELLOW}TUNE${RESET}             libx265 tuning preset (default: none)
+			 ${CYAN}fastdecode${RESET}  Optimize for low-power playback (Pi, smart TVs, older
+				      devices); automatically limits B-frames to 1
+			 ${CYAN}grain${RESET}       Preserve film grain
+			 ${CYAN}animation${RESET}   Optimize for sharp edges and flat colors
+			 ${CYAN}psnr${RESET}  ${CYAN}ssim${RESET}  ${CYAN}zerolatency${RESET}
+  ${GREEN}-b${RESET}, ${GREEN}--bframes${RESET} ${YELLOW}NUM${RESET}      B-frame count: 0-4+ (default: ${DEFAULT_BFRAMES})
+			 0 = max compatibility / 1-2 = balanced / 3-4 = best compression
+			 Higher values increase decode complexity on low-power devices
+			 Automatically set to 1 when --tune fastdecode is active
+			 ${YELLOW}NOTE:${RESET} Silently ignored by hevc_vaapi on all AMD GPUs (VCN 1-5);
+			 only effective with libx265 or non-AMD VAAPI hardware
 
-  --no-crop              Disable automatic crop detection
-  --no-deinterlace       Disable automatic deinterlacing
-  --adaptive-deinterlace Force adaptive deinterlacing for mixed progressive/interlaced content
-			 Only processes frames detected as interlaced, leaving progressive
-			 frames untouched. Useful for content like film transfers with
-			 interlaced title cards or mixed-source compilations
-  --force-deinterlace    Force deinterlacing even on content detected as progressive
-  --deinterlacer FILTER  Set deinterlacing filter: bwdif, nnedi, yadif (default: bwdif)
-			 bwdif = bob weaver deinterlacer (default - best for most content)
-			 nnedi = neural network deinterlacer (best for difficult sources
-				 with heavy noise or artifacts that standard filters struggle with)
-			 yadif = yet another deinterlacer (fast, widely compatible)
-  --no-pulldown          Disable 3:2 pulldown detection (inverse telecine)
-  --force-ivtc           Force inverse telecine detection even on HD content
+${BOLDBLUE}HARDWARE ACCELERATION${RESET}
+  ${GREEN}--device${RESET} ${YELLOW}PATH${RESET}           VAAPI render device (default: ${DEFAULT_VAAPI_DEVICE})
+  ${GREEN}--compression-level${RESET} ${YELLOW}N${RESET}  Hardware encoder compression level: 0-7 (default: ${DEFAULT_VAAPI_COMPRESSION_LEVEL})
+			 0 = fastest / largest files
+			 4 = balanced — ~5x faster than software, comparable file sizes
+			 7 = slowest / smallest files (still faster than software)
+			 Intel Arc/11th+ gen specific; safely ignored on AMD/older Intel
+
+${BOLDBLUE}BIT DEPTH & COLOR SPACE${RESET}
+  ${GREEN}--upgrade-8bit${RESET}         Upgrade 8-bit sources to 10-bit (default: enabled)
+			 Benefits: reduced banding, ~10-15% smaller files, no visible loss
+  ${GREEN}--no-upgrade-8bit${RESET}      Encode at source bit depth (disable 8→10-bit upgrade)
+  ${GREEN}--downgrade-12bit${RESET}      Downgrade 12-bit to 10-bit for hardware compat/speed
+			 Benefits: enables GPU encoding, ~20% smaller, minimal quality loss
+  ${GREEN}--no-downgrade-12bit${RESET}   Preserve 12-bit sources at native depth (default)
+  ${GREEN}--colorspace${RESET} ${YELLOW}SPACE${RESET}      Color space handling (default: auto)
+			 ${CYAN}auto${RESET}   Detect from metadata; preserve HDR automatically
+			 ${CYAN}bt709${RESET}  Force BT.709 (HD standard)
+			 ${CYAN}bt601${RESET}  Force BT.601 (SD standard)
+			 ${CYAN}hdr${RESET}    Preserve HDR metadata (HDR10, HLG, BT.2020)
+			 ${CYAN}none${RESET}   Disable conversion (use source color space as-is)
+
+${BOLDBLUE}VIDEO PROCESSING${RESET}
+  ${GREEN}--no-crop${RESET}              Disable automatic black bar crop detection
+  ${GREEN}--no-deinterlace${RESET}       Disable automatic interlacing detection
+  ${GREEN}--force-deinterlace${RESET}    Force deinterlacing even on progressive content
+  ${GREEN}--adaptive-deinterlace${RESET} Only deinterlace frames flagged as interlaced
+			 Useful for mixed content: film transfers with interlaced title
+			 cards, or compilations assembled from multiple sources
+  ${GREEN}--deinterlacer${RESET} ${YELLOW}FILTER${RESET}  Deinterlacing filter (default: ${DEFAULT_DEINTERLACER})
+			 ${CYAN}bwdif${RESET}  Bob weaver — best quality for most content
+			 ${CYAN}nnedi${RESET}  Neural network — best for noisy or difficult sources
+			 ${CYAN}yadif${RESET}  Yet another deinterlacer — fast and widely compatible
+  ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
+  ${GREEN}--force-ivtc${RESET}           Force inverse telecine on HD content
 			 (by default, only runs on SD content ≤576p)
-  --split-chapters       Force chapter splitting for multi-episode files
-  --no-split-chapters    Disable chapter splitting (process file as single video)
-  --chapters-per-episode N
-			 Group N chapters into each episode (default: auto-detect)
-			 Auto-detection finds most uniform episode grouping
+  ${GREEN}--split-chapters${RESET}       Force chapter splitting for multi-episode files
+  ${GREEN}--no-split-chapters${RESET}    Process file as a single video (no chapter splitting)
+  ${GREEN}--chapters-per-episode${RESET} ${YELLOW}N${RESET}
+			 Group N chapters per episode (default: auto-detect optimal)
 
-  --language LANG        Default language (ISO 639-2 code, default: eng)
-  --original-lang LANG   Prefer original language mode (e.g., jpn for anime)
-			 Selects original language audio + default language subs
-  --all-audio            Keep all audio tracks (disables language filtering)
+${BOLDBLUE}AUDIO & LANGUAGE${RESET}
+  ${GREEN}--language${RESET} ${YELLOW}LANG${RESET}         Preferred language, ISO 639-2 code (default: ${DEFAULT_LANGUAGE})
+			 Comma-separated for multilingual: ${CYAN}eng,spa,fra${RESET}
+			 First code in the list takes priority for subtitle selection
+  ${GREEN}--original-lang${RESET} ${YELLOW}LANG${RESET}    Original language mode — original audio + subtitles
+			 in the default language (e.g., ${CYAN}--original-lang jpn${RESET} for anime)
+  ${GREEN}--all-audio${RESET}            Keep all audio tracks (bypass language filtering)
 
-  Hardware Encoding Options:
-  --device PATH          VAAPI device path (default: ${DEFAULT_VAAPI_DEVICE})
-  --compression-level N  Hardware encoder compression level: 0-7 (default: ${DEFAULT_VAAPI_COMPRESSION_LEVEL})
-			 Trade encoding speed for better compression (Intel VAAPI)
-			 0 = fastest/largest files, 7 = slowest/smallest files
-			 Level 4 (default) provides excellent balance - 5x faster than software
-			 Safely ignored on AMD/older Intel GPUs (no error)
+  Language filtering (enabled by default) keeps: tracks matching LANGUAGE, commentary
+  tracks, and 'und' (undetermined). Foreign overdubs are excluded automatically.
 
-  -o, --overwrite        Overwrite existing output files
+${BOLDBLUE}OUTPUT${RESET}
+  ${GREEN}--bulk-movies${RESET}          Process all video files in a directory as separate movies
+			 Default movie mode picks the longest file in a directory only
 
-  Bit Depth Options (default: upgrade 8-bit to 10-bit, preserve 10/12-bit):
-  --upgrade-8bit         Upgrade 8-bit sources to 10-bit (enabled by default)
-  --no-upgrade-8bit      Disable 8-bit to 10-bit upgrade (encode at source bit depth)
-  --downgrade-12bit      Downgrade 12-bit sources to 10-bit for compatibility/speed
-  --no-downgrade-12bit   Preserve 12-bit sources at native depth (default)
+${BOLDBLUE}ENCODER NOTES${RESET}
+  Hybrid encoding uses hardware (hevc_vaapi) when safe for maximum speed, and
+  falls back to software (libx265) for content requiring higher accuracy.
 
-			 Why upgrade 8-bit to 10-bit?
-			 - Better quality with less banding
-			 - Smaller files (~10-15% reduction)
-			 - No visible quality loss
+  ${CYAN}Auto-detection considers:${RESET}
+    Pixel format (yuv420p vs yuv422p/444p), color space metadata, source codec
+    (H.264/HEVC vs MPEG2/DV), field order (progressive vs interlaced), and
+    hardware 10-bit support.
 
-			 Why downgrade 12-bit to 10-bit?
-			 - Enable hardware encoding (most GPUs don't support 12-bit)
-			 - Reduce file size (~20% smaller)
-			 - Better device compatibility (few players support 12-bit)
-			 - Minimal visible quality difference on consumer displays
+  ${CYAN}Software encoding (libx265) provides:${RESET}
+    Comprehensive color space handling, chroma subsampling correction, reduced
+    system priority via nice/ionice, and automatic CPU thread pool maximization.
+    Use --preset to trade encoding speed for quality.
 
-  --colorspace SPACE     Override color space conversion: auto, bt709, bt601, hdr, none
-			 auto = automatic based on source metadata (default)
-			 bt709 = force conversion to BT.709 (HD standard)
-			 bt601 = force conversion to BT.601 (SD standard)
-			 hdr = preserve HDR metadata (HDR10, HLG, BT.2020)
-			 none = disable conversion (use source color space as-is)
-			 Auto mode detects and preserves HDR content automatically
-  --bulk-movies          Process all video files in directory as separate movies
-			 By default, movie mode selects the longest file
-			 Use this to transcode multiple movies in one directory
+  ${CYAN}Color space handling:${RESET}
+    HDR content (HDR10, HLG, BT.2020) is detected and preserved automatically.
+    Dolby Vision enhancement layers are stripped; only the HDR10 base layer is
+    preserved — keep original files if you have DV-capable playback hardware.
+    Legacy color spaces (BT.470BG, SMPTE170M) are converted to BT.709 (HD) or
+    BT.601 (SD ≤576p). Conversion only occurs when source metadata is known;
+    falls back to software for unknown or missing color metadata.
 
-  -d, --dry-run          Show what would be processed without encoding
+  ${CYAN}B-frames:${RESET}
+    Improve compression by referencing both past and future frames. AMD hevc_vaapi
+    silently ignores -bf across all VCN generations (1 through 5, RDNA 4 included).
+    B-frames are only effective with libx265. Higher counts increase decode complexity
+    and may not play smoothly on low-power devices (smart TVs, Raspberry Pi, etc.).
 
-OUTPUT VERBOSITY:
-  The script uses reduced FFmpeg output by default to minimize clutter while
-  preserving essential information (warnings, errors, and encoding progress).
-  These can be configured in ~/.config/transcode-monster.conf:
+${BOLDBLUE}AUDIO ENCODING${RESET}
+  The first audio track is copied as-is (e.g., for passthrough to an A/V receiver).
+  Blu-ray PCM (pcm_bluray) is converted to FLAC, as PCM is unsupported in MKV.
+  All remaining tracks are encoded to HE-AAC at channel-appropriate bitrates:
 
-  FFMPEG_LOGLEVEL        FFmpeg output verbosity (default: warning)
-			 Options: quiet, panic, fatal, error, warning, info, verbose, debug
-			 - warning (default): Shows warnings, errors, and progress bar
-			 - error: Only shows errors and progress bar
-			 - info: Shows detailed stream information (verbose)
-			 The progress indicator (-stats) is always enabled to monitor encoding
+    Mono:     96 kbps    Stereo:  128 kbps
+    5.1:     192 kbps    7.1+:    256 kbps
 
-  FFMPEG_ANALYZEDURATION Microseconds to analyze input (default: 120000000 = 2 minutes)
-			 Increase if you see "Could not find codec parameters" warnings
-			 for subtitle streams (common with PGS/Blu-ray subtitles)
-			 Very large Blu-ray rips may need 200000000 (3.3 minutes) or more
+  Language filtering keeps tracks matching LANGUAGE, commentary tracks, and 'und'.
+  Use --all-audio to disable filtering and keep every track.
 
-  FFMPEG_PROBESIZE       Bytes to probe for stream info (default: 128000000 = 128MB)
-			 Increase along with analyzeduration if input analysis warnings persist
-			 Very large Blu-ray rips may need 200000000 (200MB) or more
-			 Note: Higher values add 3-8 seconds to startup but eliminate warnings
+${BOLDBLUE}INPUT FORMATS${RESET}
+  ${CYAN}Recommended:${RESET}  MKV, MP4, M4V — best metadata support
+  ${CYAN}Legacy:${RESET}       AVI, MPEG, MPG — limited metadata; may pull in extra tracks
+  ${CYAN}Disc/stream:${RESET}  TS, M2TS — Blu-ray transport streams
+  ${CYAN}Other:${RESET}        MOV (QuickTime), WebM, FLV, WMV, ASF, VOB (DVD), OGV
 
-ENCODER:
-  The script uses intelligent hybrid encoding for optimal speed and quality:
-  - Automatically detects problematic content characteristics
-  - Uses hardware (hevc_vaapi) when safe for maximum speed
-  - Falls back to software (libx265) when needed for quality
+  Output is always MKV for maximum compatibility and metadata support.
 
-  Hardware Encoding Quality Tuning (Intel VAAPI):
-  - VAAPI_COMPRESSION_LEVEL: Trade encoding speed for compression efficiency
-    - 0-3: Faster encoding, larger files
-    - 4 (default): Excellent balance - 5x faster than software, comparable file sizes
-    - 5-7: Slower encoding, smaller files (still 2-3x faster than software!)
-    - Note: Intel Arc/11th+ gen specific. Safely ignored on AMD/older GPUs
-    - Configure in ~/.config/transcode-monster.conf or use --compression-level option
-    - Even at level 7, hardware encoding typically beats software encoding speed
+${BOLDBLUE}CONTENT DETECTION${RESET}
+  Series is detected from S#D# directories, _S#_D# naming, or "Season #" paths.
+  Movie mode is used for single files or directories without series markers.
 
-  The default level 4 provides an excellent balance, offering compression comparable
-  to software encoding while still being significantly faster. You can adjust this
-  via config file or command line depending on whether you prioritize speed or file size.
+  ${CYAN}Series naming patterns:${RESET}
+    /path/to/Show/S1D1/    /path/to/Show_S1_D1/    /path/to/Show/Season 1/
 
-  Intelligent Color Space Conversion:
-  - Detects and preserves HDR content (HDR10, HLG, BT.2020) automatically
-  - Warns when Dolby Vision is detected (DV cannot be preserved during transcoding)
-  - Automatically converts legacy color spaces (BT.470BG, SMPTE170M) to modern
-    standards when using hardware encoding
-  - Preserves 10-bit color depth during conversion
-  - Converts to BT.709 for HD content (>576p)
-  - Converts to BT.601 for SD content (≤576p)
-  - Only converts when source color space is known (safe conversion)
-  - Falls back to software for unknown/missing color metadata (unsafe)
-  - Significantly increases hardware encoding compatibility with legacy media
+  ${CYAN}Disc continuation:${RESET}
+    SHOW_S1_D1, SHOW_S1_D2, SHOW_D3, SHOW_D4 — discs without a season number
+    after a numbered season are automatically detected as continuations.
 
-  Note: Dolby Vision enhancement layers and metadata are stripped during any
-  re-encoding process. Only the HDR10 base layer is preserved. Consider keeping
-  original files if you have DV-capable playback devices.
+  ${CYAN}Output naming:${RESET}
+    Series:  Show Name - S01E01.mkv
+    Movie:   Movie Name (1984).mkv
 
-  Auto-detection considers:
-  - Pixel format compatibility (yuv420p vs yuv422p/yuv444p)
-  - Color space metadata (known vs unknown/missing)
-  - Source codec (H.264/HEVC vs MPEG2/DV)
-  - Field order (progressive vs interlaced)
-  - Hardware capabilities (10-bit support)
+${BOLDBLUE}CONFIG FILE${RESET}
+  ${CYAN}${CONFIG_FILE}${RESET}
 
-  For software encoding (problematic content):
-  - Comprehensive color space handling for maximum accuracy
-  - Performs color correction to avoid chroma subsampling errors
-  - Runs with reduced priority (nice/ionice) to lessen system impact
-  - Maximizes CPU utilization with automatic thread pooling
-  - You can adjust preset with --preset for speed/quality tradeoff
+  All settings use bash variable syntax. Priority: defaults < config < CLI args.
 
-  B-frames (Bidirectional frames):
-  - Improve compression by referencing both past and future frames
-  - Default: 0 (disabled) for maximum hardware compatibility
-	   1-2 = balanced efficiency with minimal overhead
-	   3-4 = best compression for archiving (higher decode complexity)
-  - IMPORTANT: AMD hevc_vaapi silently ignores -bf at the hardware level
-	  across current VCN generations (VCN 1 through 5 / RDNA 4). B-frames
-	  are only effective with libx265 (software encoding). Setting
-	  BFRAMES > 0 has no effect on AMD HEVC hardware encodes.
-  - Note: Higher B-frame values increase decode complexity; may not play
-	  smoothly on older/low-power devices (smart TVs, older phones, etc.)
-  - Configure via BFRAMES in config file or --bframes option
-
-AUDIO ENCODING:
-  The script copies the first audio track and encodes others to HE-AAC:
-  - First track: Copied as-is (e.g. for passthrough to an A/V receiver)
-  - Other tracks: HE-AAC with channel-appropriate, transparent bitrates
-    - Mono: 96 kbps
-    - Stereo: 128 kbps
-    - 5.1 surround: 192 kbps
-    - 7.1+ surround: 256 kbps
-
-  Language filtering (enabled by default):
-  - Keeps audio tracks matching your default language (LANGUAGE setting)
-  - When using --original-lang, also keeps that language (e.g., jpn for anime)
-  - Always keeps commentary tracks (regardless of language)
-  - Always keeps 'und' (undetermined language) tracks
-  - Skips foreign overdubs (e.g., French/German/Spanish dubs on English content)
-  - Disable filtering with --all-audio to keep all tracks
-
-INPUT FORMATS:
-  Supports multiple video container formats for maximum flexibility:
-  - MKV, MP4, M4V (recommended - best metadata support)
-  - AVI, MPEG, MPG (older formats - may have limited metadata)
-  - TS, M2TS (Blu-ray transport streams)
-  - MOV (QuickTime)
-  - WebM (modern web video - VP9/VP8)
-  - FLV (Flash video)
-  - WMV, ASF (Windows Media)
-  - VOB (DVD video objects)
-  - OGV (Ogg video)
-
-  Note: Output is always MKV for maximum compatibility and metadata support.
-  Some older containers (AVI, FLV, VOB) may have limited language/subtitle
-  metadata, which may result in including extra tracks.
-
-CONTENT DETECTION:
-  - Series: Multiple files in S#D# directories or sequential files
-  - Movie: Single file or directory without series markers
-
-  Series naming patterns detected:
-    /path/to/Show/S1D1/, /path/to/Show_S1_D1/, /path/to/Show/Season 1/
-
-  Disc continuation detection:
-    If discs are numbered SHOW_S1_D1, SHOW_S1_D2, SHOW_S1_D3, SHOW_D4, SHOW_D5...
-    the script will automatically detect D4, D5, etc. as continuations of Season 1
-
-  Output examples:
-    Series: "Firefly - S01E01.mkv"
-    Movie:  "Dune (1984).mkv"
-
-CONFIG FILE:
-  ${CONFIG_FILE}
-
-  All settings can be configured in this file using bash variable syntax:
-    QUALITY="20.6"  # Default optimized for 10-bit encoding
+  ${CYAN}Common settings:${RESET}
+    QUALITY="20.6"                         # Default optimized for 10-bit
     VIDEO_CODEC="hevc_vaapi"
     PRESET="medium"
-    X265_TUNE="fastdecode"  # For low-power playback devices
+    X265_TUNE="fastdecode"                 # For low-power playback devices
     OUTPUT_DIR="/path/to/videos"
     AUDIO_BITRATE_STEREO="128k"
     AUDIO_BITRATE_SURROUND="192k"
     ADAPTIVE_DEINTERLACE="true"
-    INPUT_VIDEO_EXTENSIONS="mkv mp4 m4v avi"  # Customize supported input formats
+    INPUT_VIDEO_EXTENSIONS="mkv mp4 m4v avi"
 
-  Priority: Built-in defaults < Config file < Command line arguments
+  ${CYAN}FFmpeg verbosity (config file only):${RESET}
+    FFMPEG_LOGLEVEL           Output level (default: warning)
+			      quiet  panic  fatal  error  warning  info  verbose  debug
+			      The progress indicator (-stats) is always enabled.
+    FFMPEG_ANALYZEDURATION    Microseconds to analyze input (default: 120000000 = 2 min)
+			      Increase if you see "Could not find codec parameters" on
+			      subtitle streams. Large Blu-ray rips may need 200000000+.
+    FFMPEG_PROBESIZE          Bytes to probe for stream info (default: 128000000 = 128 MB)
+			      Raise alongside ANALYZEDURATION for persistent warnings.
+			      Higher values add 3-8 sec to startup but eliminate them.
 
-EXAMPLES:
-  # Auto-detect everything from directory
+${BOLDBLUE}EXAMPLES${RESET}
+  ${CYAN}# Auto-detect everything from a disc directory${RESET}
   transcode-monster.sh "/path/to/Firefly/S1D1"
 
-  # Transcode specific file(s)
+  ${CYAN}# Transcode a specific file or glob${RESET}
   transcode-monster.sh "/path/to/rips/movie.mkv" "/path/to/movies"
   transcode-monster.sh "/path/to/rips/episode_*.mkv" "/path/to/tv"
 
-  # Specify series name and output
+  ${CYAN}# Explicit series name and output directory${RESET}
   transcode-monster.sh -n "Firefly" "/path/to/rips/S1D1" "/path/to/tv/Firefly"
 
-  # Transcode a movie with year
+  ${CYAN}# Movie with year${RESET}
   transcode-monster.sh -t movie -n "Dune" -y 1984 "/path/to/rips/dune"
 
-  # Transcode a series with year (for reboots/disambiguation)
+  ${CYAN}# Series with year (reboots/disambiguation)${RESET}
   transcode-monster.sh -n "The Twilight Zone" -y 1959 "/path/to/rips/twilight/"
 
-  # Override season detection to only process a particular season
+  ${CYAN}# Only transcode a specific season${RESET}
   transcode-monster.sh -s 2 "/path/to/rips/disc1" "/path/to/tv/House"
 
-  # Process only episode 3 of season 1
+  ${CYAN}# Only transcode a specific episode${RESET}
   transcode-monster.sh -s 1 -e 3 "/path/to/tv/Show/"
 
-  # Custom quality and disable crop detection
+  ${CYAN}# Custom quality, disable crop detection${RESET}
   transcode-monster.sh -q 21 --no-crop "/path/to/rips"
 
-  # Mixed progressive/interlaced content (film with interlaced titles)
+  ${CYAN}# Mixed progressive/interlaced content (film with interlaced title cards)${RESET}
   transcode-monster.sh --adaptive-deinterlace "/path/to/rips/ctd.mkv"
 
-  # Noisy broadcast source - use nnedi for best quality
+  ${CYAN}# Noisy broadcast source — neural network deinterlacer${RESET}
   transcode-monster.sh --deinterlacer nnedi "/path/to/The Maxx/"
 
-  # "Anime mode": prefer foreign audio with subs in our default language
+  ${CYAN}# Anime: original audio with subtitles in the default language${RESET}
   transcode-monster.sh --original-lang jpn "/path/to/anime/Cowboy Bebop/"
 
-  # Default language override: Spanish audio for native speakers
+  ${CYAN}# Default language override${RESET}
   transcode-monster.sh --language spa "/path/to/series/La Casa de Papel/"
 
-  # Process multiple movies in a directory (bulk mode)
+  ${CYAN}# Bulk movie transcoding from a directory${RESET}
   transcode-monster.sh --bulk-movies "/path/to/movies/rips/" "/path/to/output/"
 
-  # UHD/HDR content (automatically detected and preserved)
+  ${CYAN}# UHD/HDR content (HDR detected and preserved automatically)${RESET}
   transcode-monster.sh "/path/to/uhd/Ghost in the Shell/" "/path/to/movies/"
 
 EOF
