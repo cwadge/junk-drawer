@@ -7,7 +7,7 @@ A collection of miscellaneous resources for Linux gaming and system tasks. Many 
 | Emulation | [network_tune_batocera](network_tune_batocera) | Sets custom network interface parameters (e.g., MTU, speed) at Batocera startup |
 | Emulation | [nfs_mount_batocera](nfs_mount_batocera) | Mounts NFS exports locally as a client on Batocera Linux, e.g. for Kodi |
 | Emulation | [disc-crusher.sh](disc-crusher.sh) | Compresses DVD or CD-ROM-based console images to CHD, auto-creates M3U for multi-disc games |
-| Utility | kea-show-leases.sh | Display active Kea DHCP lease records (v4, v6, or both) with human-readable output |
+| Utility | [kea-show-leases.sh] | Display active Kea DHCP lease records (v4, v6, or both) with human-readable output |
 | Utility | [net-core-status.sh](net-core-status.sh) | Monitors the status of `unbound`, `kea`, and `chrony` on a core network services box |
 | Utility | [fs-status.sh](fs-status.sh) | Monitors the status of ZFS, `mdadm`, storage devices, volumes, networks, NFS and Samba |
 | Hardware | [set-rdna-oc-fan.sh](set-rdna-oc-fan.sh) | Creates and applies overclocking / fan profiles for AMD RDNA GPUs |
