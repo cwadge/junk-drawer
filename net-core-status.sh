@@ -500,7 +500,8 @@ section_kea() {
 									# Kea has no explicit expired count; remainder of pool = expired/available.
 									local exp4=$(( tot4 - asgn4 - decl4 ))
 									(( exp4 < 0 )) && exp4=0
-									leases4_line="Total: ${FG_BWHITE}$(printf '%4d' "$tot4")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$asgn4")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$exp4")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$decl4")${RESET}"
+									local decl4_c; (( decl4 > 0 )) && decl4_c="$FG_BRED" || decl4_c="$FG_BGREEN"
+									leases4_line="Total: ${FG_BWHITE}$(printf '%4d' "$tot4")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$asgn4")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$exp4")${RESET}   Declined: ${decl4_c}$(printf '%4d' "$decl4")${RESET}"
 							fi
 		fi
 		if [[ -z "$leases4_line" ]]; then
@@ -528,7 +529,8 @@ section_kea() {
 				printf "%d %d %d %d\n", t+0, a+0, ex+0, d+0
 			}
 			' "$lease4")
-			leases4_line="Total: ${FG_BWHITE}$(printf '%4d' "$t4")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a4")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e4")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$d4")${RESET}  ${DIM}(≈ csv)${RESET}"
+			local d4_c; (( d4 > 0 )) && d4_c="$FG_BRED" || d4_c="$FG_BGREEN"
+			leases4_line="Total: ${FG_BWHITE}$(printf '%4d' "$t4")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a4")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e4")${RESET}   Declined: ${d4_c}$(printf '%4d' "$d4")${RESET}  ${DIM}(≈ csv)${RESET}"
 		else
 			leases4_line="${FG_YELLOW}socket unavailable · lease file not readable${RESET}"
 			fi
@@ -562,7 +564,8 @@ section_kea() {
 									' <<< "$raw6")
 									local exp_na=$(( tna - ana - dna ))
 									(( exp_na < 0 )) && exp_na=0
-									leases6_line="NA — Total: ${FG_BWHITE}$(printf '%3d' "$tna")${RESET}  Active: ${FG_BGREEN}$(printf '%3d' "$ana")${RESET}  Expired: ${FG_YELLOW}$(printf '%3d' "$exp_na")${RESET}  Declined: ${FG_BRED}$(printf '%3d' "$dna")${RESET}   PD: ${FG_BGREEN}$(printf '%3d' "$apd")${RESET}${DIM}/${RESET}${FG_BWHITE}$(printf '%3d' "$tpd")${RESET}"
+									local dna_c; (( dna > 0 )) && dna_c="$FG_BRED" || dna_c="$FG_BGREEN"
+									leases6_line="NA — Total: ${FG_BWHITE}$(printf '%3d' "$tna")${RESET}  Active: ${FG_BGREEN}$(printf '%3d' "$ana")${RESET}  Expired: ${FG_YELLOW}$(printf '%3d' "$exp_na")${RESET}  Declined: ${dna_c}$(printf '%3d' "$dna")${RESET}   PD: ${FG_BGREEN}$(printf '%3d' "$apd")${RESET}${DIM}/${RESET}${FG_BWHITE}$(printf '%3d' "$tpd")${RESET}"
 							fi
 		fi
 		if [[ -z "$leases6_line" ]]; then
@@ -589,7 +592,8 @@ section_kea() {
 				printf "%d %d %d %d\n", t+0, a+0, ex+0, d+0
 			}
 			' "$lease6")
-			leases6_line="Total: ${FG_BWHITE}$(printf '%4d' "$t6")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a6")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e6")${RESET}   Declined: ${FG_BRED}$(printf '%4d' "$d6")${RESET}  ${DIM}(≈ csv)${RESET}"
+			local d6_c; (( d6 > 0 )) && d6_c="$FG_BRED" || d6_c="$FG_BGREEN"
+			leases6_line="Total: ${FG_BWHITE}$(printf '%4d' "$t6")${RESET}   Active: ${FG_BGREEN}$(printf '%4d' "$a6")${RESET}   Expired: ${FG_YELLOW}$(printf '%4d' "$e6")${RESET}   Declined: ${d6_c}$(printf '%4d' "$d6")${RESET}  ${DIM}(≈ csv)${RESET}"
 		else
 			leases6_line="${FG_YELLOW}socket unavailable · lease file not readable${RESET}"
 			fi
@@ -615,8 +619,9 @@ section_kea() {
 					/"pkt4-receive-drop":/ { drop=getval($0) }
 					END { printf "%d %d %d\n", rcv+0, sent+0, drop+0 }
 					' <<< "$raw")
+					local drop_c; (( drop > 0 )) && drop_c="$FG_BRED" || drop_c="$FG_BGREEN"
 					kv_line "DHCPv4 pkts  " \
-						"Rcvd : ${FG_BWHITE}$(printf '%4d' "${rcv:-0}")${RESET}   Sent  : ${FG_BGREEN}$(printf '%4d' "${sent:-0}")${RESET}   Dropped: ${FG_BRED}$(printf '%4d' "${drop:-0}")${RESET}"
+						"Rcvd : ${FG_BWHITE}$(printf '%4d' "${rcv:-0}")${RESET}   Sent  : ${FG_BGREEN}$(printf '%4d' "${sent:-0}")${RESET}   Dropped: ${drop_c}$(printf '%4d' "${drop:-0}")${RESET}"
 					fi
 	fi
 
