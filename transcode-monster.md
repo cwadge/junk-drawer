@@ -27,6 +27,7 @@ A universal video transcoding script with intelligent automatic detection for se
 - `bc` - For doing advanced things like automatically calculating whether or not a series is broken up by chapter or by file
 - `ffmpeg` - The latest version available to you, e.g. with a rolling distro like `arch` or utilizing the [deb-multimedia](https://www.deb-multimedia.org/) repository for Debian.
 - `VA-API`_(optional)_ -  Use your GPU to give you a massive encoding speedup (usually available through packages like `mesa-va-drivers` or `va-driver-all`)
+- Adequate permissions - The user you're leveraging for transcoding needs the correct privileges. Typically this means membership in the `video` or `render` group.
 
 ## Quick Start
 
