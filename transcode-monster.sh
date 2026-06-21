@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.0"
+SCRIPT_VERSION="1.17.1"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -2587,59 +2587,51 @@ build_ffmpeg_command() {
 	fi
     fi
 
-    # Build command based on encoder type
-    local cmd=""
+    # Assemble the ffmpeg invocation as an argument array and execute it
+    # directly (see the call sites) instead of building a string for eval. eval
+    # re-parses its argument as shell source, so a backtick, $, or quote in a
+    # filename becomes live syntax (a stray backtick in an episode title is what
+    # exposed this). An array passes every argument through literally. The option
+    # groups spliced in with read -ra (priority prefix, input options, audio and
+    # subtitle maps) are script-generated tokens with no embedded spaces, so
+    # word-splitting them is safe; only the file paths carry arbitrary
+    # characters, and those are added as single elements.
     local priority_prefix=$(build_priority_prefix)
+    local -a prefix_arr=() input_arr=() audio_arr=() subs_arr=()
+    [[ -n "$priority_prefix" ]] && read -ra prefix_arr <<< "$priority_prefix"
+    [[ -n "$input_opts" ]] && read -ra input_arr <<< "$input_opts"
+    [[ -n "$audio_opts" ]] && read -ra audio_arr <<< "$audio_opts"
+    [[ -n "$sub_opts" ]] && read -ra subs_arr <<< "$sub_opts"
+
+    FFMPEG_CMD=("${prefix_arr[@]}" ffmpeg -hide_banner -loglevel "$FFMPEG_LOGLEVEL" -stats)
+    FFMPEG_CMD+=(-analyzeduration "$FFMPEG_ANALYZEDURATION" -probesize "$FFMPEG_PROBESIZE")
+    FFMPEG_CMD+=("${input_arr[@]}" -i "$source_file" -map 0:v:0)
+    FFMPEG_CMD+=("${audio_arr[@]}" "${subs_arr[@]}")
 
     if [[ "$COPY_ONLY" == "true" ]]; then
 	    # Remux: keep the video stream verbatim. Track mapping, audio/subtitle
 	    # codecs, dispositions, and chapters are already resolved above exactly
-	    # as they would be for an encode — only the video codec changes to copy.
-	    cmd="$priority_prefix ffmpeg -hide_banner -loglevel \"$FFMPEG_LOGLEVEL\" -stats"
-	    cmd="$cmd -analyzeduration \"$FFMPEG_ANALYZEDURATION\" -probesize \"$FFMPEG_PROBESIZE\""
-	    cmd="$cmd${input_opts:+ $input_opts} -i \"$source_file\""
-	    cmd="$cmd -map 0:v:0"
-	    cmd="$cmd $audio_opts"
-	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
-	    cmd="$cmd -c:v copy"
-	    cmd="$cmd -map_chapters 0"
-	    cmd="$cmd -f \"$CONTAINER\" \"$output_file\" -y"
+	    # as they would be for an encode; only the video codec changes to copy.
+	    FFMPEG_CMD+=(-c:v copy)
     elif [[ "$encoder_type" == "vaapi" ]]; then
 	    local vaapi_profile=$(get_vaapi_profile "$bit_depth")
-
-	    cmd="$priority_prefix ffmpeg -hide_banner -loglevel \"$FFMPEG_LOGLEVEL\" -stats"
-	    cmd="$cmd -analyzeduration \"$FFMPEG_ANALYZEDURATION\" -probesize \"$FFMPEG_PROBESIZE\""
-	    cmd="$cmd${input_opts:+ $input_opts} -i \"$source_file\""
-	    cmd="$cmd -map 0:v:0"
-	    cmd="$cmd $audio_opts"
-	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
-	    cmd="$cmd -c:v \"$actual_codec\" -vaapi_device \"$VAAPI_DEVICE\" -rc_mode CQP -qp \"$QUALITY\""
-	    [[ -n "$VAAPI_COMPRESSION_LEVEL" ]] && cmd="$cmd -compression_level \"$VAAPI_COMPRESSION_LEVEL\""
-	    cmd="$cmd -g \"$GOP_SIZE\" -keyint_min \"$MIN_KEYINT\" -bf \"$BFRAMES\" -low_power false"  # -bf ignored by hevc_vaapi on AMD (all VCN); effective on libx265/h264_vaapi only
-	    cmd="$cmd -refs \"$REFS\" -profile:v \"$vaapi_profile\""
-	    [[ -n "$vf" ]] && cmd="$cmd -vf \"$vf\""
-	    cmd="$cmd -map_chapters 0"
-	    cmd="$cmd -f \"$CONTAINER\" \"$output_file\" -y"
+	    FFMPEG_CMD+=(-c:v "$actual_codec" -vaapi_device "$VAAPI_DEVICE" -rc_mode CQP -qp "$QUALITY")
+	    [[ -n "$VAAPI_COMPRESSION_LEVEL" ]] && FFMPEG_CMD+=(-compression_level "$VAAPI_COMPRESSION_LEVEL")
+	    # -bf is ignored by hevc_vaapi on AMD (all VCN); effective on libx265/h264_vaapi only
+	    FFMPEG_CMD+=(-g "$GOP_SIZE" -keyint_min "$MIN_KEYINT" -bf "$BFRAMES" -low_power false)
+	    FFMPEG_CMD+=(-refs "$REFS" -profile:v "$vaapi_profile")
+	    [[ -n "$vf" ]] && FFMPEG_CMD+=(-vf "$vf")
     else
 	    local x265_profile pix_fmt x265_params
 	    IFS='|' read -r x265_profile pix_fmt x265_params <<< "$(build_x265_params "$bit_depth" "$height")"
-
-	    cmd="$priority_prefix ffmpeg -hide_banner -loglevel \"$FFMPEG_LOGLEVEL\" -stats"
-	    cmd="$cmd -analyzeduration \"$FFMPEG_ANALYZEDURATION\" -probesize \"$FFMPEG_PROBESIZE\""
-	    cmd="$cmd${input_opts:+ $input_opts} -i \"$source_file\""
-	    cmd="$cmd -map 0:v:0"
-	    cmd="$cmd $audio_opts"
-	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
-	    cmd="$cmd -c:v $actual_codec -preset $PRESET"
-	    [[ -n "$X265_TUNE" ]] && cmd="$cmd -tune $X265_TUNE"
-	    cmd="$cmd -crf $QUALITY -pix_fmt $pix_fmt"
-	    [[ -n "$vf" ]] && cmd="$cmd -vf \"$vf\""
-	    cmd="$cmd -x265-params \"$x265_params\""
-	    cmd="$cmd -map_chapters 0"
-	    cmd="$cmd -f \"$CONTAINER\" \"$output_file\" -y"
+	    FFMPEG_CMD+=(-c:v "$actual_codec" -preset "$PRESET")
+	    [[ -n "$X265_TUNE" ]] && FFMPEG_CMD+=(-tune "$X265_TUNE")
+	    FFMPEG_CMD+=(-crf "$QUALITY" -pix_fmt "$pix_fmt")
+	    [[ -n "$vf" ]] && FFMPEG_CMD+=(-vf "$vf")
+	    FFMPEG_CMD+=(-x265-params "$x265_params")
     fi
 
-    echo "$cmd"
+    FFMPEG_CMD+=(-map_chapters 0 -f "$CONTAINER" "$output_file" -y)
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3076,15 +3068,15 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 		echo -e "${BOLD}Processing:${RESET} $video_file"
 		echo -e "${BOLD}Output:${RESET} $output_file"
 
-		# Build the ffmpeg command
-		ffmpeg_cmd=$(build_ffmpeg_command "$video_file" "$output_file")
+		# Build the ffmpeg command (populates the FFMPEG_CMD array)
+		build_ffmpeg_command "$video_file" "$output_file"
 
 		if [[ "$DRY_RUN" == true ]]; then
 			echo -e "${YELLOW}[DRY RUN] Would transcode to: $output_file${RESET}"
 			echo ""
 			echo -e "${CYAN}Command that would be executed:${RESET}"
 			echo ""
-			echo "$ffmpeg_cmd"
+			printf '%q ' "${FFMPEG_CMD[@]}"; echo
 			echo ""
 			continue
 		fi
@@ -3136,8 +3128,8 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 			CURRENT_OPERATION="Encoding"
 		fi
 
-		# Execute the ffmpeg command
-		eval $ffmpeg_cmd
+		# Execute the ffmpeg command (array form, no eval — paths pass through literally)
+		"${FFMPEG_CMD[@]}"
 
 		CURRENT_OPERATION=""
 		CURRENT_FILE=""
@@ -3491,9 +3483,9 @@ else
 		    fi
 	    fi
 
-	    ffmpeg_cmd=$(build_ffmpeg_command "$source_file" "$output_file" "$input_opts")
+	    build_ffmpeg_command "$source_file" "$output_file" "$input_opts"
 	    echo ""
-	    echo "$ffmpeg_cmd"
+	    printf '%q ' "${FFMPEG_CMD[@]}"; echo
 	    echo ""
 
 	    continue
@@ -3646,9 +3638,9 @@ else
 					CURRENT_OPERATION="Encoding episode $ep_index"
 				fi
 
-	    # Build and execute the ffmpeg command
-	    ffmpeg_cmd=$(build_ffmpeg_command "$source_file" "$output_file" "$input_opts")
-	    eval $ffmpeg_cmd
+	    # Build and execute the ffmpeg command (array form, no eval)
+	    build_ffmpeg_command "$source_file" "$output_file" "$input_opts"
+	    "${FFMPEG_CMD[@]}"
 
 	    echo "    Complete!"
 	    echo ""
