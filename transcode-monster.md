@@ -20,6 +20,7 @@ A universal video transcoding script with intelligent automatic detection for se
 - **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD)
 - **Multi-episode files**: Automatically splits by chapters for disc rips with multiple episodes
 - **Audio/subtitle management**: Language filtering, format conversion, disposition handling
+- **Copy-only (remux) mode**: Restructure track selection, dispositions, and naming without re-encoding, for sources that are already well-encoded but badly mastered or named
 - **Configurable**: Config file + CLI arguments for full control
 
 ## Dependencies
@@ -160,6 +161,31 @@ Preview what will be processed without encoding:
 transcode-monster.sh -d "/path/to/source/" "/output/"
 ```
 
+### Copy-Only (Remux) Mode
+
+When the source is already encoded the way you want it but is badly mastered or
+named, `--copy-only` keeps the video and audio streams byte-for-byte and only
+restructures the container: it selects the right audio and subtitle tracks,
+filters by language, sets the default/forced subtitle dispositions, maps
+chapters, and names the output exactly as a normal run would.
+
+```bash
+# Remux a badly-named series into clean Show - S01E01.mkv files, no re-encode
+transcode-monster.sh -t series -n "Darkwing Duck" --copy-only "/rips/darkwing/" "/output/"
+
+# Fix track selection/dispositions on a single film without touching quality
+transcode-monster.sh -t movie -n "Revolver" --copy-only "/rips/revolver.mkv" "/output/"
+```
+
+Because nothing is re-encoded, this runs at copy speed and is lossless. All the
+video-analysis steps (crop, interlacing, telecine, bit-depth, encoder choice)
+are skipped. Audio is copied as-is; a track is only converted when it genuinely
+cannot be muxed verbatim (for example `pcm_bluray`, which is remapped losslessly
+to FLAC). Subtitle text formats that the target container can't carry directly
+are converted losslessly, the same as in encode mode. Note that chapter-based
+episode splitting in copy mode cuts on the nearest keyframe rather than the exact
+frame, since the video isn't being re-encoded.
+
 ## Understanding Automatic Detection
 
 ### Interlacing Detection
@@ -291,8 +317,7 @@ correctly:
 Recognized filename tags include `S02E05`, `S02_E05`, `S02.E05`, `2x05`, and
 `Season 2` / `Series 2`. The season and episode may be written together
 (`S02E05`) or split by a space, underscore, dot, or hyphen (`S02_E05`); both
-parse identically, and single-digit forms like `S2E5` work too. Guards prevent
-resolutions like `1920x1080` from being misread as a season.
+parse identically, and single-digit forms like `S2E5` work too.
 
 **Mixed layouts** are handled in a single pass: some seasons can live as a flat
 pool of files while others are split across `S#D#` disc directories. Each file is

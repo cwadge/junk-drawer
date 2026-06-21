@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.16.0"
+SCRIPT_VERSION="1.17.0"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -100,6 +100,7 @@ DEFAULT_SUBTITLE_FORCED_DETECT_DENSITY="true"  # If the forced flag and title ar
 DEFAULT_SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="3"  # Density threshold: fewer cues/min than this => forced/signs, more => full
 
 # Processing options
+DEFAULT_COPY_ONLY="false"  # Remux mode: copy the source video and audio streams instead of re-encoding, while still selecting the right tracks, setting dispositions, and naming the output. For sources that are already well-encoded but badly mastered/named.
 DEFAULT_DETECT_INTERLACING="true"
 DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Force adaptive deinterlacing for mixed content
 DEFAULT_FORCE_DEINTERLACE="false"  # Force deinterlacing even on progressive content
@@ -247,6 +248,7 @@ FORCED_SUBS_ON_NATIVE_AUDIO="${FORCED_SUBS_ON_NATIVE_AUDIO:-$DEFAULT_FORCED_SUBS
 SUBTITLE_FORCED_DETECT_DENSITY="${SUBTITLE_FORCED_DETECT_DENSITY:-$DEFAULT_SUBTITLE_FORCED_DETECT_DENSITY}"
 SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="${SUBTITLE_FORCED_MAX_EVENTS_PER_MIN:-$DEFAULT_SUBTITLE_FORCED_MAX_EVENTS_PER_MIN}"
 
+COPY_ONLY="${COPY_ONLY:-$DEFAULT_COPY_ONLY}"
 DETECT_INTERLACING="${DETECT_INTERLACING:-$DEFAULT_DETECT_INTERLACING}"
 ADAPTIVE_DEINTERLACE="${ADAPTIVE_DEINTERLACE:-$DEFAULT_ADAPTIVE_DEINTERLACE}"
 FORCE_DEINTERLACE="${FORCE_DEINTERLACE:-$DEFAULT_FORCE_DEINTERLACE}"
@@ -298,6 +300,10 @@ ${BOLDBLUE}GENERAL OPTIONS${RESET}
   ${GREEN}-s${RESET}, ${GREEN}--season${RESET} ${YELLOW}NUM${RESET}       Process only a specific season (default: all seasons)
   ${GREEN}-e${RESET}, ${GREEN}--episode${RESET} ${YELLOW}NUM${RESET}      Process only a specific episode in series mode
   ${GREEN}-d${RESET}, ${GREEN}--dry-run${RESET}          Show what would be processed without encoding
+      ${GREEN}--copy-only${RESET}        Remux instead of encode: copy the source video and audio
+			 streams as-is, but still pick the right tracks, set
+			 dispositions, and name the output. For sources that are
+			 already well-encoded but badly mastered or named.
   ${GREEN}-o${RESET}, ${GREEN}--overwrite${RESET}        Overwrite existing output files
 
 ${BOLDBLUE}VIDEO ENCODING${RESET}
@@ -2412,40 +2418,45 @@ build_ffmpeg_command() {
 	local output_file="$2"
 	local input_opts="${3:-}"  # Optional, for chapter extraction (default to empty)
 
-    # Detect bit depth and height
-    local bit_depth=$(detect_bit_depth "$source_file")
-    local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" | head -1)
-    height=${height//,/}
+    # Video analysis (bit depth, encoder choice, filter chain) is only needed
+    # when we're actually re-encoding. Copy-only mode keeps the source video
+    # stream verbatim, so we skip all of this — including the crop/interlace
+    # detection passes inside build_vf, which would otherwise spawn ffmpeg.
+    local bit_depth="" height="" actual_codec="" encoder_type="" vf=""
+    if [[ "$COPY_ONLY" != "true" ]]; then
+	    # Detect bit depth and height
+	    bit_depth=$(detect_bit_depth "$source_file")
+	    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" | head -1)
+	    height=${height//,/}
 
-    # Adjust bit depth based on user preferences
-    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
-	    bit_depth="10"
-    fi
-    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
-	    bit_depth="10"
-    fi
-
-    # Determine encoder
-    local actual_codec=""
-    local encoder_type=""
-    if [[ "$VIDEO_CODEC" == "auto" ]]; then
-	    actual_codec=$(should_use_software_encoder "$source_file")
-	    if [[ "$actual_codec" == "libx265" ]]; then
-		    encoder_type="software"
-	    else
-		    encoder_type="vaapi"
+	    # Adjust bit depth based on user preferences
+	    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
+		    bit_depth="10"
 	    fi
-    else
-	    actual_codec="$VIDEO_CODEC"
-	    if [[ "$actual_codec" == "hevc_vaapi" ]]; then
-		    encoder_type="vaapi"
-	    else
-		    encoder_type="software"
+	    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
+		    bit_depth="10"
 	    fi
-    fi
 
-    # Build filter chain
-    local vf=$(build_vf "$source_file" "$encoder_type" "$bit_depth")
+	    # Determine encoder
+	    if [[ "$VIDEO_CODEC" == "auto" ]]; then
+		    actual_codec=$(should_use_software_encoder "$source_file")
+		    if [[ "$actual_codec" == "libx265" ]]; then
+			    encoder_type="software"
+		    else
+			    encoder_type="vaapi"
+		    fi
+	    else
+		    actual_codec="$VIDEO_CODEC"
+		    if [[ "$actual_codec" == "hevc_vaapi" ]]; then
+			    encoder_type="vaapi"
+		    else
+			    encoder_type="software"
+		    fi
+	    fi
+
+	    # Build filter chain
+	    vf=$(build_vf "$source_file" "$encoder_type" "$bit_depth")
+    fi
 
     # Count audio tracks
     local num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
@@ -2473,7 +2484,7 @@ build_ffmpeg_command() {
     if [[ "$has_pcm_bluray" == "true" ]]; then
 	    # pcm_bluray must be converted - use FLAC for lossless preservation
 	    audio_opts="-map 0:a:$default_audio_idx -c:a:0 flac"
-    elif [[ "$AUDIO_COPY_FIRST" == "true" && $num_audio -gt 0 ]]; then
+    elif [[ "$COPY_ONLY" == "true" || "$AUDIO_COPY_FIRST" == "true" ]] && [[ $num_audio -gt 0 ]]; then
 	    audio_opts="-map 0:a:$default_audio_idx -c:a:0 copy"
     else
 	    local bitrate=$(get_audio_bitrate "$source_file" $default_audio_idx)
@@ -2496,8 +2507,15 @@ build_ffmpeg_command() {
 	    # Tracks already in an efficient lossy format (Opus, AAC, ...) are
 	    # copied as-is: re-encoding them to HE-AAC only compounds generational
 	    # loss for negligible space savings. Everything else is encoded to
-	    # HE-AAC at a channel-appropriate bitrate.
-	    if audio_track_is_passthrough "$source_file" $i; then
+	    # HE-AAC at a channel-appropriate bitrate. In copy-only mode every track
+	    # is copied (FLAC only where a stream can't be muxed verbatim).
+	    if [[ "$COPY_ONLY" == "true" ]]; then
+		    if needs_audio_remux "$source_file" "$i"; then
+			    audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx flac"
+		    else
+			    audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx copy"
+		    fi
+	    elif audio_track_is_passthrough "$source_file" $i; then
 		    audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx copy"
 	    else
 		    local bitrate=$(get_audio_bitrate "$source_file" $i)
@@ -2572,7 +2590,20 @@ build_ffmpeg_command() {
     local cmd=""
     local priority_prefix=$(build_priority_prefix)
 
-    if [[ "$encoder_type" == "vaapi" ]]; then
+    if [[ "$COPY_ONLY" == "true" ]]; then
+	    # Remux: keep the video stream verbatim. Track mapping, audio/subtitle
+	    # codecs, dispositions, and chapters are already resolved above exactly
+	    # as they would be for an encode — only the video codec changes to copy.
+	    cmd="$priority_prefix ffmpeg -hide_banner -loglevel \"$FFMPEG_LOGLEVEL\" -stats"
+	    cmd="$cmd -analyzeduration \"$FFMPEG_ANALYZEDURATION\" -probesize \"$FFMPEG_PROBESIZE\""
+	    cmd="$cmd${input_opts:+ $input_opts} -i \"$source_file\""
+	    cmd="$cmd -map 0:v:0"
+	    cmd="$cmd $audio_opts"
+	    [[ -n "$sub_opts" ]] && cmd="$cmd $sub_opts"
+	    cmd="$cmd -c:v copy"
+	    cmd="$cmd -map_chapters 0"
+	    cmd="$cmd -f \"$CONTAINER\" \"$output_file\" -y"
+    elif [[ "$encoder_type" == "vaapi" ]]; then
 	    local vaapi_profile=$(get_vaapi_profile "$bit_depth")
 
 	    cmd="$priority_prefix ffmpeg -hide_banner -loglevel \"$FFMPEG_LOGLEVEL\" -stats"
@@ -2764,6 +2795,10 @@ while [[ $# -gt 0 ]]; do
 			DRY_RUN=true
 			shift
 			;;
+		--copy-only)
+			COPY_ONLY=true
+			shift
+			;;
 		-*)
 			echo "Error: Unknown option $1"
 			echo "Use -h or --help for usage information"
@@ -2939,12 +2974,16 @@ echo -e "${BOLD}Name:${RESET}         $CONTENT_NAME"
 [[ "$CONTENT_TYPE" == "series" ]] && echo -e "${BOLD}Seasons:${RESET}      ${SEASONS_TO_PROCESS[*]}"
 [[ "$CONTENT_TYPE" == "series" && -n "$EPISODE_NUM" ]] && echo -e "${BOLD}Episode:${RESET}      $EPISODE_NUM"
 [[ "$CONTENT_TYPE" == "movie" && "$BULK_MOVIES" == "true" ]] && echo -e "${BOLD}Bulk Mode:${RESET}    enabled"
-echo -e "${BOLD}Quality:${RESET}      $QUALITY (CQP)"
-echo -e "${BOLD}Codec:${RESET}        $VIDEO_CODEC"
-echo -e "${BOLD}Crop:${RESET}         $DETECT_CROP"
-echo -e "${BOLD}Deinterlace:${RESET}  $DETECT_INTERLACING"
-[[ "$ADAPTIVE_DEINTERLACE" == "true" ]] && echo -e "${BOLD}Adaptive:${RESET}     $ADAPTIVE_DEINTERLACE"
-echo -e "${BOLD}Pulldown:${RESET}     $DETECT_PULLDOWN"
+if [[ "$COPY_ONLY" == "true" ]]; then
+	echo -e "${BOLD}Mode:${RESET}         ${BOLDGREEN}COPY-ONLY (remux, no re-encode)${RESET}"
+else
+	echo -e "${BOLD}Quality:${RESET}      $QUALITY (CQP)"
+	echo -e "${BOLD}Codec:${RESET}        $VIDEO_CODEC"
+	echo -e "${BOLD}Crop:${RESET}         $DETECT_CROP"
+	echo -e "${BOLD}Deinterlace:${RESET}  $DETECT_INTERLACING"
+	[[ "$ADAPTIVE_DEINTERLACE" == "true" ]] && echo -e "${BOLD}Adaptive:${RESET}     $ADAPTIVE_DEINTERLACE"
+	echo -e "${BOLD}Pulldown:${RESET}     $DETECT_PULLDOWN"
+fi
 echo -e "${BOLD}Split Chapters:${RESET} $SPLIT_CHAPTERS"
 [[ "$DRY_RUN" == true ]] && echo -e "${YELLOW}Mode:         DRY RUN${RESET}"
 echo -e "${BLUE}════════════════════════════════════════════${RESET}"
@@ -3049,47 +3088,52 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 			continue
 		fi
 
-		CURRENT_OPERATION="Detecting video properties"
+		if [[ "$COPY_ONLY" == "true" ]]; then
+			echo -e "${CYAN}Remuxing (stream copy, no re-encode)${RESET}"
+			CURRENT_OPERATION="Remuxing"
+		else
+			CURRENT_OPERATION="Detecting video properties"
 
-		# Detect bit depth and height for informational output
-		bit_depth=$(detect_bit_depth "$video_file")
-		height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file")
-		height=${height//,/}
+			# Detect bit depth and height for informational output
+			bit_depth=$(detect_bit_depth "$video_file")
+			height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file")
+			height=${height//,/}
 
-		# Adjust bit depth based on user preferences
-		if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
-			bit_depth="10"
-		fi
-		if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
-			bit_depth="10"
-		fi
-
-		# Determine encoder for informational output
-		actual_codec=""
-		if [[ "$VIDEO_CODEC" == "auto" ]]; then
-			actual_codec=$(should_use_software_encoder "$video_file")
-			if [[ "$actual_codec" == "libx265" ]]; then
-				echo "Using libx265 (software) - content characteristics require software encoding"
-			else
-				echo "Using hevc_vaapi (hardware) - fast encoding with good quality"
+			# Adjust bit depth based on user preferences
+			if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
+				bit_depth="10"
 			fi
-		else
-			actual_codec="$VIDEO_CODEC"
-			echo "Using $actual_codec (manual override)"
+			if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
+				bit_depth="10"
+			fi
+
+			# Determine encoder for informational output
+			actual_codec=""
+			if [[ "$VIDEO_CODEC" == "auto" ]]; then
+				actual_codec=$(should_use_software_encoder "$video_file")
+				if [[ "$actual_codec" == "libx265" ]]; then
+					echo "Using libx265 (software) - content characteristics require software encoding"
+				else
+					echo "Using hevc_vaapi (hardware) - fast encoding with good quality"
+				fi
+			else
+				actual_codec="$VIDEO_CODEC"
+				echo "Using $actual_codec (manual override)"
+			fi
+
+			# Determine profile based on bit depth
+			if [[ "$bit_depth" == "12" ]]; then
+				detected_profile="main12"
+			elif [[ "$bit_depth" == "10" ]]; then
+				detected_profile="main10"
+			else
+				detected_profile="main"
+			fi
+
+			echo -e "${CYAN}Bit depth: ${bit_depth}-bit, Height: ${height}p, Profile: $detected_profile${RESET}"
+
+			CURRENT_OPERATION="Encoding"
 		fi
-
-		# Determine profile based on bit depth
-		if [[ "$bit_depth" == "12" ]]; then
-			detected_profile="main12"
-		elif [[ "$bit_depth" == "10" ]]; then
-			detected_profile="main10"
-		else
-			detected_profile="main"
-		fi
-
-		echo -e "${CYAN}Bit depth: ${bit_depth}-bit, Height: ${height}p, Profile: $detected_profile${RESET}"
-
-		CURRENT_OPERATION="Encoding"
 
 		# Execute the ffmpeg command
 		eval $ffmpeg_cmd
@@ -3595,7 +3639,11 @@ else
 					fi
 				fi
 
-				CURRENT_OPERATION="Encoding episode $ep_index"
+				if [[ "$COPY_ONLY" == "true" ]]; then
+					CURRENT_OPERATION="Remuxing episode $ep_index"
+				else
+					CURRENT_OPERATION="Encoding episode $ep_index"
+				fi
 
 	    # Build and execute the ffmpeg command
 	    ffmpeg_cmd=$(build_ffmpeg_command "$source_file" "$output_file" "$input_opts")
