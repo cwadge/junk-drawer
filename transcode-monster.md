@@ -164,10 +164,10 @@ transcode-monster.sh -d "/path/to/source/" "/output/"
 ### Copy-Only (Remux) Mode
 
 When the source is already encoded the way you want it but is badly mastered or
-named, `--copy-only` keeps the video and audio streams byte-for-byte and only
-restructures the container: it selects the right audio and subtitle tracks,
-filters by language, sets the default/forced subtitle dispositions, maps
-chapters, and names the output exactly as a normal run would.
+named, `--copy-only` (also available as `--remux`) keeps the video and audio
+streams byte-for-byte and only restructures the container: it selects the right
+audio and subtitle tracks, filters by language, sets the default/forced subtitle
+dispositions, maps chapters, and names the output exactly as a normal run would.
 
 ```bash
 # Remux a badly-named series into clean Show - S01E01.mkv files, no re-encode

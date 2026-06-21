@@ -300,7 +300,8 @@ ${BOLDBLUE}GENERAL OPTIONS${RESET}
   ${GREEN}-s${RESET}, ${GREEN}--season${RESET} ${YELLOW}NUM${RESET}       Process only a specific season (default: all seasons)
   ${GREEN}-e${RESET}, ${GREEN}--episode${RESET} ${YELLOW}NUM${RESET}      Process only a specific episode in series mode
   ${GREEN}-d${RESET}, ${GREEN}--dry-run${RESET}          Show what would be processed without encoding
-      ${GREEN}--copy-only${RESET}        Remux instead of encode: copy the source video and audio
+      ${GREEN}--copy-only${RESET}, ${GREEN}--remux${RESET}
+			 Remux instead of encode: copy the source video and audio
 			 streams as-is, but still pick the right tracks, set
 			 dispositions, and name the output. For sources that are
 			 already well-encoded but badly mastered or named.
@@ -2795,7 +2796,7 @@ while [[ $# -gt 0 ]]; do
 			DRY_RUN=true
 			shift
 			;;
-		--copy-only)
+		--copy-only|--remux)
 			COPY_ONLY=true
 			shift
 			;;
