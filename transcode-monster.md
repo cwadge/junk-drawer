@@ -70,7 +70,7 @@ Create `~/.config/transcode-monster.conf` for persistent settings. Here is my ow
 
 ```bash
 # Max bframes for compression. Playback even works great on Raspberry Pi4
-# NOTE: Has no effect when VIDEO_CODEC="hevc_vaapi" on AMD GPUs — B-frames
+# NOTE: Has no effect when VIDEO_CODEC="hevc_vaapi" on AMD GPUs, since B-frames
 # are unsupported in AMD HEVC hardware encoding across all VCN generations.
 # Only takes effect with libx265 (software encoding).
 BFRAMES="4"
@@ -275,6 +275,30 @@ For optimal automatic detection, organize ripped discs using this structure:
 └── Season 2/Disc 2/
 ```
 
+**Flat directories (season in the filename)**:
+
+A folder with no disc/season subdirectories is fine too; the season and episode
+are read from the filenames, so a single pool of mixed-season files is split
+correctly:
+```
+/path/to/Darkwing Duck/
+├── Darkwing_Duck_S01_E01.mkv   # → S01E01
+├── ...
+├── Darkwing_Duck_S01_E28.mkv   # → S01E28
+├── Darkwing_Duck_S02_E01.mkv   # → S02E01   (not lumped into season 1)
+└── Darkwing_Duck_S02_E27.mkv   # → S02E27
+```
+Recognized filename tags include `S02E05`, `S02_E05`, `S02.E05`, `2x05`, and
+`Season 2` / `Series 2`. The season and episode may be written together
+(`S02E05`) or split by a space, underscore, dot, or hyphen (`S02_E05`); both
+parse identically, and single-digit forms like `S2E5` work too. Guards prevent
+resolutions like `1920x1080` from being misread as a season.
+
+**Mixed layouts** are handled in a single pass: some seasons can live as a flat
+pool of files while others are split across `S#D#` disc directories. Each file is
+assigned to a season by its own name first, then its containing directory, then
+the season being processed.
+
 **Inside Each Disc Directory**:
 ```
 S1D1/
@@ -285,9 +309,12 @@ S1D1/
 ```
 
 The script automatically:
-- Detects season/disc numbers from directory names
-- Sorts episodes by filename
-- Numbers episodes sequentially across all discs
+- Detects season numbers from filenames, then disc/season directory names
+- Sorts episodes by disc, then by episode number
+- Numbers episodes by their parsed value when those are unambiguous (so a season
+  with a missing episode keeps its canonical numbering), falling back to
+  sequential position when numbers are absent, duplicated, or synthetic (e.g.
+  several chapter-split discs that each restart at 1)
 
 ### Output Naming
 
@@ -409,6 +436,55 @@ This selects:
 - Original language audio (jpn) as default
 - Default language (eng) subtitles
 - Skips foreign dubs
+
+### Secondary Track Passthrough
+
+The primary audio track is always copied as-is. For secondary tracks, anything
+already in an efficient lossy format is copied untouched rather than re-encoded
+to HE-AAC; re-encoding lossy audio into another lossy codec compounds
+generational quality loss while saving little or no space. By default this
+covers Opus, AAC, MP3, and Vorbis:
+
+```bash
+AUDIO_PASSTHROUGH_CODECS="opus aac mp3 vorbis"
+```
+
+Values are ffprobe `codec_name` strings, space-separated. Space-heavy lossy
+formats (`ac3`, `eac3`, `dts`) are deliberately omitted so they still get
+downsized to HE-AAC; add them to the list if you'd rather keep them bit-for-bit.
+Lossless secondary tracks (FLAC, TrueHD, DTS-HD, PCM) are intentionally absent:
+they're meant to be re-encoded.
+
+### Subtitle Selection
+
+Subtitles in `LANGUAGE` are kept and converted to MKV-compatible formats. Which
+track gets enabled by default depends on the audio language of the file:
+
+- **Foreign audio** (e.g. a Japanese film, or `--original-lang` mode): a *full*
+  subtitle track is enabled by default so all dialogue is translated. A
+  forced-only track is used only as a fallback if no full track exists.
+- **Native audio** (audio already in `LANGUAGE`): full subtitles are *not*
+  auto-enabled, but a *forced/signs* track is (with disposition `default+forced`)
+  so compliant players show it even when subtitles are otherwise off. This keeps
+  intentional foreign-language scenes and on-screen signage legible. A good
+  example is the film *Revolver*, which has whole scenes in Mandarin that were
+  meant to be translated; without the forced track those scenes play untranslated.
+  Disable with `FORCED_SUBS_ON_NATIVE_AUDIO="false"`.
+
+A track is classified as forced, cheapest check first:
+
+1. The `forced` disposition flag (authoritative when the muxer set it).
+2. The title tag matching `forced`, `signs`, or `songs` (case-insensitive).
+3. Cue density: forced tracks light up only a handful of times per film, full
+   tracks run continuously. This fallback only runs when steps 1-2 are silent and
+   `SUBTITLE_FORCED_DETECT_DENSITY="true"`. It adds one quick demux pass over the
+   ambiguous track. Tune the boundary with `SUBTITLE_FORCED_MAX_EVENTS_PER_MIN`
+   (default `3`).
+
+Note: the forced track must be tagged in `LANGUAGE` (or matched by the language
+filter) to be picked up. Properly authored discs tag forced tracks with the
+correct language; a forced track tagged `und` with no flag/title won't be
+detected.
 
 ## Advanced Options
 
@@ -569,11 +645,17 @@ DOWNGRADE_12BIT_TO_10BIT="false"
 AUDIO_CODEC="libfdk_aac"
 AUDIO_PROFILE="aac_he"
 AUDIO_FILTER_LANGUAGES="true"
+AUDIO_PASSTHROUGH_CODECS="opus aac mp3 vorbis"  # Secondary tracks in these formats are copied, not re-encoded
 
 # Language
 LANGUAGE="eng"
 PREFER_ORIGINAL="false"
 ORIGINAL_LANGUAGE=""            # e.g., "jpn" for anime
+
+# Subtitles
+FORCED_SUBS_ON_NATIVE_AUDIO="true"      # Auto-enable forced/signs subs when audio is already native
+SUBTITLE_FORCED_DETECT_DENSITY="true"   # Use cue-density fallback when the forced flag/title are absent
+SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="3"  # Below this cues/min => treated as forced/signs
 
 # Processing
 DETECT_INTERLACING="true"

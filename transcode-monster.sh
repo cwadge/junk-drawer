@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.15.3"
+SCRIPT_VERSION="1.16.0"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -78,12 +78,26 @@ DEFAULT_AUDIO_BITRATE_STEREO="128k"  # HE-AAC transparent for stereo
 DEFAULT_AUDIO_BITRATE_SURROUND="192k" # HE-AAC for 5.1
 DEFAULT_AUDIO_BITRATE_SURROUND_PLUS="256k" # HE-AAC for 7.1+
 DEFAULT_AUDIO_FILTER_LANGUAGES="true"  # Filter audio by language (skip foreign overdubs)
+# Secondary audio tracks already in one of these efficient lossy formats are copied
+# through untouched rather than re-encoded to HE-AAC. Re-encoding lossy->lossy only
+# compounds generational loss while saving little or no space. Space-heavy lossy
+# formats (ac3, eac3, dts) are deliberately left off so they still get downsized;
+# add them here if you'd rather keep those bit-for-bit. Lossless sources (flac,
+# truehd, dts-hd, pcm) are never on this list — they're meant to be re-encoded.
+DEFAULT_AUDIO_PASSTHROUGH_CODECS="opus aac mp3 vorbis"  # Space-separated ffprobe codec_name values
 
 # Language and subtitle settings
 DEFAULT_LANGUAGE="eng"  # ISO 639-2 code(s), comma-separated for multilingual (e.g., "eng,spa,fra")
 # First language in list has priority for subtitle selection
 DEFAULT_PREFER_ORIGINAL="false"  # When true, prefer original audio + native subs over dubs
 DEFAULT_ORIGINAL_LANGUAGE=""  # Set this for original language mode (e.g., "jpn" for anime)
+# Forced/signs subtitle handling. When the default audio is already in the viewer's
+# language we don't want full subtitles, but films like "Revolver" have intentional
+# foreign-language scenes (Mandarin) that were meant to be translated. Auto-enabling a
+# forced/signs track keeps those scenes and on-screen signage legible.
+DEFAULT_FORCED_SUBS_ON_NATIVE_AUDIO="true"  # Auto-enable a forced/signs sub when audio is already native
+DEFAULT_SUBTITLE_FORCED_DETECT_DENSITY="true"  # If the forced flag and title are inconclusive, fall back to cue-density analysis (adds one quick demux pass per ambiguous track)
+DEFAULT_SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="3"  # Density threshold: fewer cues/min than this => forced/signs, more => full
 
 # Processing options
 DEFAULT_DETECT_INTERLACING="true"
@@ -224,10 +238,14 @@ AUDIO_BITRATE_STEREO="${AUDIO_BITRATE_STEREO:-$DEFAULT_AUDIO_BITRATE_STEREO}"
 AUDIO_BITRATE_SURROUND="${AUDIO_BITRATE_SURROUND:-$DEFAULT_AUDIO_BITRATE_SURROUND}"
 AUDIO_BITRATE_SURROUND_PLUS="${AUDIO_BITRATE_SURROUND_PLUS:-$DEFAULT_AUDIO_BITRATE_SURROUND_PLUS}"
 AUDIO_FILTER_LANGUAGES="${AUDIO_FILTER_LANGUAGES:-$DEFAULT_AUDIO_FILTER_LANGUAGES}"
+AUDIO_PASSTHROUGH_CODECS="${AUDIO_PASSTHROUGH_CODECS:-$DEFAULT_AUDIO_PASSTHROUGH_CODECS}"
 
 LANGUAGE="${LANGUAGE:-$DEFAULT_LANGUAGE}"
 PREFER_ORIGINAL="${PREFER_ORIGINAL:-$DEFAULT_PREFER_ORIGINAL}"
 ORIGINAL_LANGUAGE="${ORIGINAL_LANGUAGE:-$DEFAULT_ORIGINAL_LANGUAGE}"
+FORCED_SUBS_ON_NATIVE_AUDIO="${FORCED_SUBS_ON_NATIVE_AUDIO:-$DEFAULT_FORCED_SUBS_ON_NATIVE_AUDIO}"
+SUBTITLE_FORCED_DETECT_DENSITY="${SUBTITLE_FORCED_DETECT_DENSITY:-$DEFAULT_SUBTITLE_FORCED_DETECT_DENSITY}"
+SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="${SUBTITLE_FORCED_MAX_EVENTS_PER_MIN:-$DEFAULT_SUBTITLE_FORCED_MAX_EVENTS_PER_MIN}"
 
 DETECT_INTERLACING="${DETECT_INTERLACING:-$DEFAULT_DETECT_INTERLACING}"
 ADAPTIVE_DEINTERLACE="${ADAPTIVE_DEINTERLACE:-$DEFAULT_ADAPTIVE_DEINTERLACE}"
@@ -284,75 +302,75 @@ ${BOLDBLUE}GENERAL OPTIONS${RESET}
 
 ${BOLDBLUE}VIDEO ENCODING${RESET}
   ${GREEN}-q${RESET}, ${GREEN}--quality${RESET} ${YELLOW}NUM${RESET}      CQP/CRF quality value (default: ${DEFAULT_QUALITY})
-                         Lower = better quality / higher = smaller files
-                         Recommended: 18-20 (8-bit), 20-22 (10-bit), 22-24 (12-bit)
+			 Lower = better quality / higher = smaller files
+			 Recommended: 18-20 (8-bit), 20-22 (10-bit), 22-24 (12-bit)
   ${GREEN}-c${RESET}, ${GREEN}--codec${RESET} ${YELLOW}CODEC${RESET}      Video codec (default: ${DEFAULT_VIDEO_CODEC})
-                         ${CYAN}auto${RESET}       Choose hevc_vaapi or libx265 based on content
-                         ${CYAN}hevc_vaapi${RESET} Hardware encoding — fastest
-                         ${CYAN}libx265${RESET}    Software encoding — maximum quality/compatibility
+			 ${CYAN}auto${RESET}       Choose hevc_vaapi or libx265 based on content
+			 ${CYAN}hevc_vaapi${RESET} Hardware encoding — fastest
+			 ${CYAN}libx265${RESET}    Software encoding — maximum quality/compatibility
   ${GREEN}--preset${RESET} ${YELLOW}PRESET${RESET}         libx265 software encoding preset (default: ${DEFAULT_PRESET})
-                         ultrafast  superfast  veryfast  faster  fast
-                         medium  slow  slower  veryslow  placebo
+			 ultrafast  superfast  veryfast  faster  fast
+			 medium  slow  slower  veryslow  placebo
   ${GREEN}--tune${RESET} ${YELLOW}TUNE${RESET}             libx265 tuning preset (default: none)
-                         ${CYAN}fastdecode${RESET}  Optimize for low-power playback (Pi, smart TVs, older
-                                      devices); automatically limits B-frames to 1
-                         ${CYAN}grain${RESET}       Preserve film grain
-                         ${CYAN}animation${RESET}   Optimize for sharp edges and flat colors
-                         ${CYAN}psnr${RESET}  ${CYAN}ssim${RESET}  ${CYAN}zerolatency${RESET}
+			 ${CYAN}fastdecode${RESET}  Optimize for low-power playback (Pi, smart TVs, older
+				      devices); automatically limits B-frames to 1
+			 ${CYAN}grain${RESET}       Preserve film grain
+			 ${CYAN}animation${RESET}   Optimize for sharp edges and flat colors
+			 ${CYAN}psnr${RESET}  ${CYAN}ssim${RESET}  ${CYAN}zerolatency${RESET}
   ${GREEN}-b${RESET}, ${GREEN}--bframes${RESET} ${YELLOW}NUM${RESET}      B-frame count: 0-4+ (default: ${DEFAULT_BFRAMES})
-                         0 = max compatibility / 1-2 = balanced / 3-4 = best compression
-                         Higher values increase decode complexity on low-power devices
-                         Automatically set to 1 when --tune fastdecode is active
-                         ${YELLOW}NOTE:${RESET} Silently ignored by hevc_vaapi on all AMD GPUs (VCN 1-5);
-                         only effective with libx265 or non-AMD VAAPI hardware
+			 0 = max compatibility / 1-2 = balanced / 3-4 = best compression
+			 Higher values increase decode complexity on low-power devices
+			 Automatically set to 1 when --tune fastdecode is active
+			 ${YELLOW}NOTE:${RESET} Silently ignored by hevc_vaapi on all AMD GPUs (VCN 1-5);
+			 only effective with libx265 or non-AMD VAAPI hardware
 
 ${BOLDBLUE}HARDWARE ACCELERATION${RESET}
   ${GREEN}--device${RESET} ${YELLOW}PATH${RESET}           VAAPI render device (default: ${DEFAULT_VAAPI_DEVICE})
   ${GREEN}--compression-level${RESET} ${YELLOW}N${RESET}  Hardware encoder compression level: 0-7 (default: ${DEFAULT_VAAPI_COMPRESSION_LEVEL})
-                         0 = fastest / largest files
-                         4 = balanced — ~5x faster than software, comparable file sizes
-                         7 = slowest / smallest files (still faster than software)
-                         Intel Arc/11th+ gen specific; safely ignored on AMD/older Intel
+			 0 = fastest / largest files
+			 4 = balanced — ~5x faster than software, comparable file sizes
+			 7 = slowest / smallest files (still faster than software)
+			 Intel Arc/11th+ gen specific; safely ignored on AMD/older Intel
 
 ${BOLDBLUE}BIT DEPTH & COLOR SPACE${RESET}
   ${GREEN}--upgrade-8bit${RESET}         Upgrade 8-bit sources to 10-bit (default: enabled)
-                         Benefits: reduced banding, ~10-15% smaller files, no visible loss
+			 Benefits: reduced banding, ~10-15% smaller files, no visible loss
   ${GREEN}--no-upgrade-8bit${RESET}      Encode at source bit depth (disable 8→10-bit upgrade)
   ${GREEN}--downgrade-12bit${RESET}      Downgrade 12-bit to 10-bit for hardware compat/speed
-                         Benefits: enables GPU encoding, ~20% smaller, minimal quality loss
+			 Benefits: enables GPU encoding, ~20% smaller, minimal quality loss
   ${GREEN}--no-downgrade-12bit${RESET}   Preserve 12-bit sources at native depth (default)
   ${GREEN}--colorspace${RESET} ${YELLOW}SPACE${RESET}      Color space handling (default: auto)
-                         ${CYAN}auto${RESET}   Detect from metadata; preserve HDR automatically
-                         ${CYAN}bt709${RESET}  Force BT.709 (HD standard)
-                         ${CYAN}bt601${RESET}  Force BT.601 (SD standard)
-                         ${CYAN}hdr${RESET}    Preserve HDR metadata (HDR10, HLG, BT.2020)
-                         ${CYAN}none${RESET}   Disable conversion (use source color space as-is)
+			 ${CYAN}auto${RESET}   Detect from metadata; preserve HDR automatically
+			 ${CYAN}bt709${RESET}  Force BT.709 (HD standard)
+			 ${CYAN}bt601${RESET}  Force BT.601 (SD standard)
+			 ${CYAN}hdr${RESET}    Preserve HDR metadata (HDR10, HLG, BT.2020)
+			 ${CYAN}none${RESET}   Disable conversion (use source color space as-is)
 
 ${BOLDBLUE}VIDEO PROCESSING${RESET}
   ${GREEN}--no-crop${RESET}              Disable automatic black bar crop detection
   ${GREEN}--no-deinterlace${RESET}       Disable automatic interlacing detection
   ${GREEN}--force-deinterlace${RESET}    Force deinterlacing even on progressive content
   ${GREEN}--adaptive-deinterlace${RESET} Only deinterlace frames flagged as interlaced
-                         Useful for mixed content: film transfers with interlaced title
-                         cards, or compilations assembled from multiple sources
+			 Useful for mixed content: film transfers with interlaced title
+			 cards, or compilations assembled from multiple sources
   ${GREEN}--deinterlacer${RESET} ${YELLOW}FILTER${RESET}  Deinterlacing filter (default: ${DEFAULT_DEINTERLACER})
-                         ${CYAN}bwdif${RESET}  Bob weaver — best quality for most content
-                         ${CYAN}nnedi${RESET}  Neural network — best for noisy or difficult sources
-                         ${CYAN}yadif${RESET}  Yet another deinterlacer — fast and widely compatible
+			 ${CYAN}bwdif${RESET}  Bob weaver — best quality for most content
+			 ${CYAN}nnedi${RESET}  Neural network — best for noisy or difficult sources
+			 ${CYAN}yadif${RESET}  Yet another deinterlacer — fast and widely compatible
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
   ${GREEN}--force-ivtc${RESET}           Force inverse telecine on HD content
-                         (by default, only runs on SD content ≤576p)
+			 (by default, only runs on SD content ≤576p)
   ${GREEN}--split-chapters${RESET}       Force chapter splitting for multi-episode files
   ${GREEN}--no-split-chapters${RESET}    Process file as a single video (no chapter splitting)
   ${GREEN}--chapters-per-episode${RESET} ${YELLOW}N${RESET}
-                         Group N chapters per episode (default: auto-detect optimal)
+			 Group N chapters per episode (default: auto-detect optimal)
 
 ${BOLDBLUE}AUDIO & LANGUAGE${RESET}
   ${GREEN}--language${RESET} ${YELLOW}LANG${RESET}         Preferred language, ISO 639-2 code (default: ${DEFAULT_LANGUAGE})
-                         Comma-separated for multilingual: ${CYAN}eng,spa,fra${RESET}
-                         First code in the list takes priority for subtitle selection
+			 Comma-separated for multilingual: ${CYAN}eng,spa,fra${RESET}
+			 First code in the list takes priority for subtitle selection
   ${GREEN}--original-lang${RESET} ${YELLOW}LANG${RESET}    Original language mode — original audio + subtitles
-                         in the default language (e.g., ${CYAN}--original-lang jpn${RESET} for anime)
+			 in the default language (e.g., ${CYAN}--original-lang jpn${RESET} for anime)
   ${GREEN}--all-audio${RESET}            Keep all audio tracks (bypass language filtering)
 
   Language filtering (enabled by default) keeps: tracks matching LANGUAGE, commentary
@@ -360,7 +378,7 @@ ${BOLDBLUE}AUDIO & LANGUAGE${RESET}
 
 ${BOLDBLUE}OUTPUT${RESET}
   ${GREEN}--bulk-movies${RESET}          Process all video files in a directory as separate movies
-                         Default movie mode picks the longest file in a directory only
+			 Default movie mode picks the longest file in a directory only
 
 ${BOLDBLUE}ENCODER NOTES${RESET}
   Hybrid encoding uses hardware (hevc_vaapi) when safe for maximum speed, and
@@ -393,13 +411,34 @@ ${BOLDBLUE}ENCODER NOTES${RESET}
 ${BOLDBLUE}AUDIO ENCODING${RESET}
   The first audio track is copied as-is (e.g., for passthrough to an A/V receiver).
   Blu-ray PCM (pcm_bluray) is converted to FLAC, as PCM is unsupported in MKV.
-  All remaining tracks are encoded to HE-AAC at channel-appropriate bitrates:
+  Secondary tracks already in an efficient lossy format (Opus, AAC, MP3, Vorbis)
+  are copied untouched to avoid generational quality loss. All other secondary
+  tracks are encoded to HE-AAC at channel-appropriate bitrates:
 
     Mono:     96 kbps    Stereo:  128 kbps
     5.1:     192 kbps    7.1+:    256 kbps
 
+  Set AUDIO_PASSTHROUGH_CODECS in the config to change which formats are copied
+  (e.g., add ac3/eac3/dts to keep them bit-for-bit instead of downsizing them).
   Language filtering keeps tracks matching LANGUAGE, commentary tracks, and 'und'.
   Use --all-audio to disable filtering and keep every track.
+
+${BOLDBLUE}SUBTITLE HANDLING${RESET}
+  Subtitles in LANGUAGE are kept and converted to MKV-compatible formats. Which
+  track is enabled by default depends on the audio:
+
+    ${CYAN}Foreign audio${RESET}  A full subtitle track is enabled by default so all dialogue
+		   is translated (forced-only tracks are used only as a fallback).
+    ${CYAN}Native audio${RESET}   A forced/signs track is enabled (disposition default+forced)
+		   so intentional foreign-language scenes and on-screen signage
+		   still get translated — e.g. the Mandarin scenes in "Revolver".
+		   Full subtitles are not auto-enabled. Disable via
+		   FORCED_SUBS_ON_NATIVE_AUDIO="false".
+
+  Forced tracks are detected by the 'forced' disposition flag, then by title
+  (forced/signs/songs), then — if still ambiguous — by cue density (few cues per
+  minute = forced). Density analysis can be tuned or disabled via
+  SUBTITLE_FORCED_DETECT_DENSITY and SUBTITLE_FORCED_MAX_EVENTS_PER_MIN.
 
 ${BOLDBLUE}INPUT FORMATS${RESET}
   ${CYAN}Recommended:${RESET}  MKV, MP4, M4V — best metadata support
@@ -415,6 +454,17 @@ ${BOLDBLUE}CONTENT DETECTION${RESET}
 
   ${CYAN}Series naming patterns:${RESET}
     /path/to/Show/S1D1/    /path/to/Show_S1_D1/    /path/to/Show/Season 1/
+
+  ${CYAN}Season & episode detection:${RESET}
+    Season and episode are read from the most specific source available: the
+    file's own name first (S02E05, S02_E05, 2x05, "Season 2"), then its disc/
+    season directory, then context. This means a flat folder whose season lives
+    only in the filenames (Show_S01_E01 … Show_S02_E27) is split into the right
+    seasons instead of being lumped together, and mixed layouts — some seasons
+    pooled in one folder, others in S#D# disc dirs — are handled in one pass.
+    Episodes are numbered by their parsed value when those are unambiguous, so a
+    set with a missing episode keeps canonical numbering rather than renumbering;
+    unparseable or duplicated sets fall back to sorted position.
 
   ${CYAN}Disc continuation:${RESET}
     SHOW_S1_D1, SHOW_S1_D2, SHOW_D3, SHOW_D4 — discs without a season number
@@ -437,19 +487,21 @@ ${BOLDBLUE}CONFIG FILE${RESET}
     OUTPUT_DIR="/path/to/videos"
     AUDIO_BITRATE_STEREO="128k"
     AUDIO_BITRATE_SURROUND="192k"
+    AUDIO_PASSTHROUGH_CODECS="opus aac mp3 vorbis"  # Copy these secondary tracks as-is
+    FORCED_SUBS_ON_NATIVE_AUDIO="true"     # Auto-enable forced/signs subs on native-audio films
     ADAPTIVE_DEINTERLACE="true"
     INPUT_VIDEO_EXTENSIONS="mkv mp4 m4v avi"
 
   ${CYAN}FFmpeg verbosity (config file only):${RESET}
     FFMPEG_LOGLEVEL           Output level (default: warning)
-                              quiet  panic  fatal  error  warning  info  verbose  debug
-                              The progress indicator (-stats) is always enabled.
+			      quiet  panic  fatal  error  warning  info  verbose  debug
+			      The progress indicator (-stats) is always enabled.
     FFMPEG_ANALYZEDURATION    Microseconds to analyze input (default: 120000000 = 2 min)
-                              Increase if you see "Could not find codec parameters" on
-                              subtitle streams. Large Blu-ray rips may need 200000000+.
+			      Increase if you see "Could not find codec parameters" on
+			      subtitle streams. Large Blu-ray rips may need 200000000+.
     FFMPEG_PROBESIZE          Bytes to probe for stream info (default: 128000000 = 128 MB)
-                              Raise alongside ANALYZEDURATION for persistent warnings.
-                              Higher values add 3-8 sec to startup but eliminate them.
+			      Raise alongside ANALYZEDURATION for persistent warnings.
+			      Higher values add 3-8 sec to startup but eliminate them.
 
 ${BOLDBLUE}EXAMPLES${RESET}
   ${CYAN}# Auto-detect everything from a disc directory${RESET}
@@ -513,8 +565,9 @@ get_episode_num() {
 		[[ -n "$ep_num" ]] && { echo $((10#$ep_num - 1000)); return; }
 	fi
 
-	# 1. Standard SxxExx / sxxexx
-	ep_num=$(echo "$filename" | grep -oP '[Ss]\d{2}[Ee]\K\d{2,3}' | head -1)
+	# 1. Standard SxxExx / sxx.exx / S1E1 — allow a separator between season and
+	#    episode (S01_E06, S01.E06, S01 E06) and 1-or-2 digit season/episode.
+	ep_num=$(echo "$filename" | grep -oP '[Ss]\d{1,2}[\s._-]*[Ee]\K\d{1,3}' | head -1)
 	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
 
 	# 2. NxNN / NNxNN (e.g. 2x07)
@@ -544,6 +597,30 @@ get_episode_num() {
 	ep_num=$(echo "$filename" | grep -oP '(?<=[\s.\-])\d{2,3}(?=[\s.\-])' | head -1)
 	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
 
+	echo "UNKNOWN"
+}
+
+# Extract a SEASON number from a filename. Echoes the number (no leading zeros)
+# or "UNKNOWN". Deliberately conservative — only high-confidence patterns, with
+# guards so resolutions (1920x1080), years, and codec tags don't masquerade as
+# seasons. This lets a flat directory of "Show_S02_E01.mkv" files be grouped by
+# their real season even when the directory layout gives no season hint.
+get_season_num() {
+	local filename="$1"
+	# 1. SxxExx / sxx.exx / S1E1 — season and episode together (highest confidence)
+	if [[ "$filename" =~ [Ss]([0-9]{1,2})[[:space:]._-]*[Ee][0-9]{1,3} ]]; then
+		echo "$((10#${BASH_REMATCH[1]}))"; return
+	fi
+	# 2. "Season N" / "Series N" (British), any common separator
+	if [[ "$filename" =~ [Ss](eason|eries)[[:space:]._-]*([0-9]{1,2}) ]]; then
+		echo "$((10#${BASH_REMATCH[2]}))"; return
+	fi
+	# 3. NxNN (e.g. 2x07). Guarded: the season digits must not be preceded by a
+	#    digit or x, and the episode digits must not be followed by a digit, so
+	#    "1920x1080" and similar can't be misread as a season.
+	if [[ "$filename" =~ (^|[^0-9xX])([0-9]{1,2})[xX]([0-9]{2,3})($|[^0-9]) ]]; then
+		echo "$((10#${BASH_REMATCH[2]}))"; return
+	fi
 	echo "UNKNOWN"
 }
 
@@ -1346,6 +1423,25 @@ get_audio_codec_name() {
 		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]'
 	}
 
+# Check whether an audio track is already in an efficient lossy format that we
+# should copy through rather than re-encode. Re-encoding an already-lossy codec
+# to HE-AAC compounds generational loss while saving little or no space, so for
+# the formats listed in AUDIO_PASSTHROUGH_CODECS we pass the track through
+# untouched. Returns 0 (true) on a match, 1 otherwise.
+audio_track_is_passthrough() {
+	local input="$1"
+	local track_idx="$2"
+	local codec
+	codec=$(get_audio_codec_name "$input" "$track_idx")
+	local candidate
+	for candidate in $AUDIO_PASSTHROUGH_CODECS; do
+		if [[ "$codec" == "$candidate" ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
 # Determine output codec for a subtitle track when muxing to MKV.
 # Returns "copy" for MKV-compatible codecs, a transcode target (e.g. "srt") for
 # formats that need conversion, or "drop" for codecs that cannot be meaningfully
@@ -1744,42 +1840,147 @@ should_include_subtitle_track() {
     echo "false"
 }
 
-# Determine subtitle disposition based on audio/subtitle languages
-get_subtitle_disposition() {
+# Count subtitle events (cues) in a track. Works across both text and image
+# codecs by counting demuxed packets — one packet per displayed cue for SRT/ASS,
+# and per display-set for PGS/VobSub. Echoes an integer (0 if undeterminable).
+# Note: this demuxes the subtitle stream, so it's only called as a fallback.
+count_subtitle_events() {
+	local input="$1"
+	local sub_idx="$2"
+	ffprobe -v quiet -select_streams "s:${sub_idx}" -show_entries packet=pts \
+		-of csv=p=0 "$input" 2>/dev/null | grep -c .
+	}
+
+# Classify a subtitle track as "forced" (signs/songs/foreign-dialogue only) or
+# "full" (complete dialogue). Strategy, cheapest-first:
+#   1. The 'forced' disposition flag — authoritative when the muxer set it.
+#   2. The title tag — "forced", "signs", or "songs" (case-insensitive).
+#   3. Cue density — forced tracks light up only a handful of times per film,
+#      full tracks run continuously. Only consulted when 1 and 2 are silent and
+#      SUBTITLE_FORCED_DETECT_DENSITY is enabled.
+# Echoes "forced" or "full".
+classify_subtitle_track() {
+	local input="$1"
+	local sub_idx="$2"
+
+	# 1. Disposition flag
+	local forced_flag
+	forced_flag=$(ffprobe -v quiet -select_streams "s:${sub_idx}" \
+		-show_entries stream_disposition=forced \
+		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]')
+			if [[ "$forced_flag" == "1" ]]; then
+				echo "forced"
+				return
+			fi
+
+	# 2. Title tag
+	local title
+	title=$(ffprobe -v quiet -select_streams "s:${sub_idx}" \
+		-show_entries stream_tags=title \
+		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1)
+			if [[ "$title" =~ [Ff]orced|[Ss]igns|[Ss]ongs ]]; then
+				echo "forced"
+				return
+			fi
+
+	# 3. Cue-density fallback (opt-in; metadata was inconclusive)
+	if [[ "$SUBTITLE_FORCED_DETECT_DENSITY" == "true" ]]; then
+		local duration events
+		duration=$(ffprobe -v quiet -show_entries format=duration \
+			-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | tr -d '[:space:]')
+					events=$(count_subtitle_events "$input" "$sub_idx")
+					# Need a sane duration and a non-trivial event count to judge density
+					if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$duration > 0" | bc -l 2>/dev/null || echo 0) )); then
+						local per_min
+						per_min=$(echo "scale=4; ($events * 60) / $duration" | bc -l 2>/dev/null || echo "999")
+						if (( $(echo "$per_min < $SUBTITLE_FORCED_MAX_EVENTS_PER_MIN" | bc -l 2>/dev/null || echo 0) )); then
+							echo "forced"
+							return
+						fi
+					fi
+	fi
+
+	echo "full"
+}
+
+# Choose which subtitle track (if any) to enable by default, and whether it is a
+# forced track. Two situations drive the decision:
+#
+#   * Default audio is NOT in the viewer's language (foreign film, or
+#     original-language mode): we want a FULL track to translate all dialogue, so
+#     pick the first full preferred-language track. If only a forced track
+#     exists, fall back to it rather than leaving the viewer with nothing.
+#
+#   * Default audio IS already in the viewer's language (e.g. "Revolver", an
+#     English film with untranslated Mandarin scenes): we don't want full subs,
+#     but we DO want a forced/signs track so those scenes and on-screen signage
+#     get translated automatically. Controlled by FORCED_SUBS_ON_NATIVE_AUDIO.
+#
+# Echoes "INPUT_SUB_INDEX|forced", "INPUT_SUB_INDEX|full", or "-1|none".
+select_default_subtitle() {
 	local input="$1"
 	local audio_lang="$2"      # Language of the default audio track
-	local native_langs="$3"    # User's native language(s) - comma-separated (e.g., "eng" or "eng,spa")
+	local native_langs="$3"    # Viewer's language(s), comma-separated (e.g. "eng" or "eng,spa")
 
-    # Get all subtitle tracks with their language
-    local sub_info=$(ffprobe -v quiet -select_streams s -show_entries stream_tags=language -of csv=p=0 "$input" 2>/dev/null)
+	local sub_info
+	sub_info=$(ffprobe -v quiet -select_streams s -show_entries stream_tags=language -of csv=p=0 "$input" 2>/dev/null)
 
-    # Parse native languages into array
-    IFS=',' read -ra NATIVE_LANGS <<< "$native_langs"
+	IFS=',' read -ra NATIVE_LANGS <<< "$native_langs"
 
-    # If audio is already in one of the native languages, no default subtitle needed
-    for native in "${NATIVE_LANGS[@]}"; do
-	    native=$(echo "$native" | xargs)  # Trim whitespace
-	    if [[ "$audio_lang" == "$native" ]]; then
-		    echo "-1"
-		    return
-	    fi
-    done
+	# Is the default audio already in one of the viewer's languages?
+	local audio_is_native=false
+	local native
+	for native in "${NATIVE_LANGS[@]}"; do
+		native=$(echo "$native" | xargs)
+		if [[ "$audio_lang" == "$native" ]]; then
+			audio_is_native=true
+			break
+		fi
+	done
 
-    # Audio is NOT in native language, find first matching native language subtitle
-    local track_index=0
-    while IFS=',' read -r lang; do
-	    for native in "${NATIVE_LANGS[@]}"; do
-		    native=$(echo "$native" | xargs)  # Trim whitespace
-		    if [[ "$lang" == "$native" ]]; then
-			    echo "$track_index"
-			    return
-		    fi
-	    done
-	    track_index=$((track_index + 1))
-    done <<< "$sub_info"
+	# Walk preferred-language subtitle tracks, recording the first forced and the
+	# first full track we encounter.
+	local track_index=0
+	local first_forced=-1
+	local first_full=-1
+	while IFS=',' read -r lang; do
+		local match=false
+		for native in "${NATIVE_LANGS[@]}"; do
+			native=$(echo "$native" | xargs)
+			if [[ "$lang" == "$native" ]]; then
+				match=true
+				break
+			fi
+		done
+		if [[ "$match" == "true" ]]; then
+			local kind
+			kind=$(classify_subtitle_track "$input" "$track_index")
+			if [[ "$kind" == "forced" && $first_forced -eq -1 ]]; then
+				first_forced=$track_index
+			elif [[ "$kind" == "full" && $first_full -eq -1 ]]; then
+				first_full=$track_index
+			fi
+		fi
+		track_index=$((track_index + 1))
+	done <<< "$sub_info"
 
-    # No native language subtitle found
-    echo "-1"
+	if [[ "$audio_is_native" == "true" ]]; then
+		# Native audio: only a forced/signs track is wanted, and only if enabled
+		if [[ "$FORCED_SUBS_ON_NATIVE_AUDIO" == "true" && $first_forced -ne -1 ]]; then
+			echo "${first_forced}|forced"
+		else
+			echo "-1|none"
+		fi
+	else
+		# Foreign audio: prefer a full track, fall back to forced if that's all
+		if [[ $first_full -ne -1 ]]; then
+			echo "${first_full}|full"
+		elif [[ $first_forced -ne -1 ]]; then
+			echo "${first_forced}|forced"
+		else
+			echo "-1|none"
+		fi
+	fi
 }
 
 # Check if file should be split by chapters
@@ -1973,29 +2174,53 @@ infer_type() {
     echo "movie"
 }
 
-# Get all seasons present in directory
+# Extract a SEASON number from a single path component (directory or file name).
+# Echoes the number (no leading zeros) or "UNKNOWN". Used both for directory
+# layouts (S02D1, "Season 2") and as the dirname half of season detection.
+season_from_path() {
+	local s="$1"
+	# S#D# disc directory (e.g. S02D1, Show.S2.D1)
+	if [[ "$s" =~ [Ss]([0-9]+)[^0-9]*[Dd][0-9]+ ]]; then echo "$((10#${BASH_REMATCH[1]}))"; return; fi
+	# "Season N" / "Series N"
+	if [[ "$s" =~ [Ss](eason|eries)[[:space:]._-]*([0-9]+) ]]; then echo "$((10#${BASH_REMATCH[2]}))"; return; fi
+	# Bare zero-padded S## token
+	if [[ "$s" =~ [Ss]([0-9]{2}) ]]; then echo "$((10#${BASH_REMATCH[1]}))"; return; fi
+	echo "UNKNOWN"
+}
+
+# Get all seasons present under a source directory. Unions three signals so that
+# disc-based layouts, "Season N" folders, and flat directories whose season
+# lives only in the filenames are all detected:
+#   1. S#D# disc subdirectories
+#   2. "Season N" / "Series N" subdirectories
+#   3. Season tags in the video filenames themselves (top level + one level deep)
+# Echoes the unique season numbers, one per line, sorted ascending.
 get_all_seasons() {
 	local source="$1"
-	local seasons=()
+	local -A season_set=()
 
 	shopt -s nullglob nocaseglob
-	local season_dirs=("$source"/*[Ss][0-9]*[Dd][0-9]*)
+	# 1 + 2: season-bearing subdirectories
+	local dir b s
+	for dir in "$source"/*[Ss][0-9]*[Dd][0-9]* "$source"/*[Ss]eason* "$source"/*[Ss]eries*; do
+		[[ -d "$dir" ]] || continue
+		s=$(season_from_path "$(basename "$dir")")
+		[[ "$s" != "UNKNOWN" ]] && season_set["$s"]=1
+	done
 	shopt -u nullglob nocaseglob
 
-	for dir in "${season_dirs[@]}"; do
-		local basename=$(basename "$dir")
-		if [[ "$basename" =~ [Ss]([0-9]+)[^0-9]*[Dd][0-9]+ ]]; then
-			local season_num="${BASH_REMATCH[1]}"
-			# Remove leading zeros
-			season_num=$((10#$season_num))
-			seasons+=("$season_num")
-		fi
+	# 3: season tags in filenames (handles flat multi-season dirs and mixed layouts)
+	local ext f
+	for ext in $INPUT_VIDEO_EXTENSIONS; do
+		while IFS= read -r -d '' f; do
+			s=$(get_season_num "$(basename "$f")")
+			[[ "$s" != "UNKNOWN" ]] && season_set["$s"]=1
+		done < <(find "$source" -maxdepth 2 -type f -iname "*.$ext" -print0 2>/dev/null)
 	done
 
-    # Remove duplicates and sort
-    if [[ ${#seasons[@]} -gt 0 ]]; then
-	    printf '%s\n' "${seasons[@]}" | sort -nu
-    fi
+	if [[ ${#season_set[@]} -gt 0 ]]; then
+		printf '%s\n' "${!season_set[@]}" | sort -n
+	fi
 }
 
 # Find video files in directory using configured extensions
@@ -2025,29 +2250,38 @@ count_video_files() {
 	echo "$count"
 }
 
-# Extract season number from path
+# Extract season number from a full path, defaulting to 1 when nothing matches.
+# Scans path components from the most specific (the item itself) outward so a
+# disc/season folder anywhere in the path is honored.
 extract_season() {
 	local source="$1"
+	local component s
+	# Walk path components leaf-first
+	while [[ -n "$source" && "$source" != "." && "$source" != "/" ]]; do
+		component=$(basename "$source")
+		s=$(season_from_path "$component")
+		[[ "$s" != "UNKNOWN" ]] && { echo "$s"; return; }
+		source=$(dirname "$source")
+	done
+	echo "1"  # Default to season 1
+}
 
-    # Try S#D# pattern (case-insensitive, allow separator between S# and D#)
-    if [[ "$source" =~ [Ss]([0-9]+)[^0-9]*[Dd][0-9]+ ]]; then
-	    echo "${BASH_REMATCH[1]}"
-	    return
-    fi
-
-    # Try "Season #" pattern (case-insensitive)
-    if [[ "$source" =~ [Ss]eason[[:space:]]*([0-9]+) ]]; then
-	    echo "${BASH_REMATCH[1]}"
-	    return
-    fi
-
-    # Try S## pattern (case-insensitive)
-    if [[ "$source" =~ [Ss]([0-9]{2}) ]]; then
-	    echo "${BASH_REMATCH[1]}"
-	    return
-    fi
-
-    echo "1"  # Default to season 1
+# Decide which season a file belongs to, most specific signal first:
+#   1. the file's own name (e.g. Show_S02_E01.mkv)
+#   2. its containing directory (S02D1, "Season 2")
+#   3. the season currently being processed (context fallback)
+# This is what lets a flat directory of mixed-season files split correctly while
+# leaving path-separated disc/season layouts working exactly as before.
+get_effective_season() {
+	local file="$1"
+	local container="$2"
+	local ctx_season="$3"
+	local s
+	s=$(get_season_num "$(basename "$file")")
+	[[ "$s" != "UNKNOWN" ]] && { echo "$s"; return; }
+	s=$(season_from_path "$(basename "$container")")
+	[[ "$s" != "UNKNOWN" ]] && { echo "$s"; return; }
+	echo "$ctx_season"
 }
 
 # Extract show/movie name from path
@@ -2259,8 +2493,16 @@ build_ffmpeg_command() {
 		    continue
 	    fi
 
-	    local bitrate=$(get_audio_bitrate "$source_file" $i)
-	    audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx $AUDIO_CODEC -profile:a:$track_idx $AUDIO_PROFILE -b:a:$track_idx $bitrate"
+	    # Tracks already in an efficient lossy format (Opus, AAC, ...) are
+	    # copied as-is: re-encoding them to HE-AAC only compounds generational
+	    # loss for negligible space savings. Everything else is encoded to
+	    # HE-AAC at a channel-appropriate bitrate.
+	    if audio_track_is_passthrough "$source_file" $i; then
+		    audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx copy"
+	    else
+		    local bitrate=$(get_audio_bitrate "$source_file" $i)
+		    audio_opts="$audio_opts -map 0:a:$i -c:a:$track_idx $AUDIO_CODEC -profile:a:$track_idx $AUDIO_PROFILE -b:a:$track_idx $bitrate"
+	    fi
 	    track_idx=$((track_idx + 1))
     done
     fi
@@ -2297,17 +2539,23 @@ build_ffmpeg_command() {
 		    sub_opts="$sub_opts -c:s:$i ${sub_out_codecs[$i]}"
 	    done
 
-	# Determine which subtitle should be default based on audio language
-	local sub_default_input_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
+	# Determine which subtitle should be enabled by default, and whether it is
+	# a forced/signs track (forced tracks get both 'default' and 'forced' so
+	# compliant players show them even with subtitles otherwise turned off).
+	local sub_default_input_idx sub_default_kind
+	IFS='|' read -r sub_default_input_idx sub_default_kind \
+		<<< "$(select_default_subtitle "$source_file" "$default_audio_lang" "$LANGUAGE")"
 
-	# Check if the default subtitle exists in our filtered set
+	# Check if the chosen subtitle exists in our filtered set
 	if [[ "$sub_default_input_idx" != "-1" ]] && [[ -v input_to_output_sub_map[$sub_default_input_idx] ]]; then
 		# Map input index to output index
 		local sub_default_output_idx="${input_to_output_sub_map[$sub_default_input_idx]}"
-		# Set dispositions: default for one stream, 0 for all others
+		# Forced tracks: default+forced. Full tracks: default. Everything else: cleared.
+		local default_disposition="default"
+		[[ "$sub_default_kind" == "forced" ]] && default_disposition="default+forced"
 		for ((i=0; i<sub_track_idx; i=i+1)); do
 			if [[ $i -eq $sub_default_output_idx ]]; then
-				sub_opts="$sub_opts -disposition:s:$i default"
+				sub_opts="$sub_opts -disposition:s:$i $default_disposition"
 			else
 				sub_opts="$sub_opts -disposition:s:$i 0"
 			fi
@@ -2862,6 +3110,9 @@ else
 
     # Process each season
     for SEASON_NUM in "${SEASONS_TO_PROCESS[@]}"; do
+	    # Normalize to a bare integer: avoids octal printf errors on "08"/"09"
+	    # and keeps season comparisons consistent regardless of zero-padding.
+	    [[ "$SEASON_NUM" =~ ^[0-9]+$ ]] && SEASON_NUM=$((10#$SEASON_NUM))
 	    echo -e "${BLUE}────────────────────────────────────────${RESET}"
 	    echo -e "${BOLDBLUE}PROCESSING SEASON $SEASON_NUM${RESET}"
 	    echo -e "${BLUE}────────────────────────────────────────${RESET}"
@@ -2874,6 +3125,11 @@ else
 		    echo -e "${CYAN}Processing ${#SOURCE_FILES[@]} specified file(s)${RESET}"
 
 		    for source_file in "${SOURCE_FILES[@]}"; do
+			    # Skip files that belong to a different season (explicit file
+			    # lists can span seasons; honor each file's own season tag)
+			    if [[ "$(get_effective_season "$source_file" "$(dirname "$source_file")" "$SEASON_NUM")" != "$SEASON_NUM" ]]; then
+				    continue
+			    fi
 			    echo "Processing: $(basename "$source_file")"
 
 		# Check if this file should be split by chapters
@@ -2933,23 +3189,25 @@ else
 		fi
 	done
 else
-	# Directory mode: use existing disc directory logic
-	# Find all S#D# directories for this season
-	shopt -s nullglob nocaseglob
-	disc_dirs=("$SOURCE_DIR"/*[Ss]${SEASON_NUM}*[Dd]*)
-	shopt -u nullglob nocaseglob
-
-	# Find the highest disc number from explicit S#D# directories for this season
+	# Directory mode: gather this season's disc/segment subdirectories. Match by
+	# parsed season (robust to zero-padding — S01D1, S1D1, "Season 1" all work)
+	# instead of a literal glob, and read each disc number from its name.
+	disc_dirs=()
 	max_explicit_disc=0
-	for dir in "${disc_dirs[@]}"; do
+	shopt -s nullglob nocaseglob
+	for dir in "$SOURCE_DIR"/*/; do
+		dir="${dir%/}"
+		[[ -d "$dir" ]] || continue
 		dir_basename=$(basename "$dir")
-		if [[ "$dir_basename" =~ [Ss]${SEASON_NUM}[^0-9]*[Dd]([0-9]+) ]]; then
-			disc_num=$((10#${BASH_REMATCH[1]}))
-			if [[ $disc_num -gt $max_explicit_disc ]]; then
-				max_explicit_disc=$disc_num
+		if [[ "$(season_from_path "$dir_basename")" == "$SEASON_NUM" ]]; then
+			disc_dirs+=("$dir")
+			if [[ "$dir_basename" =~ [Dd]([0-9]+) ]]; then
+				disc_num=$((10#${BASH_REMATCH[1]}))
+				[[ $disc_num -gt $max_explicit_disc ]] && max_explicit_disc=$disc_num
 			fi
 		fi
 	done
+	shopt -u nullglob nocaseglob
 
 	# If we found explicit discs, look for implicit continuation (_D# without S# prefix)
 	if [[ $max_explicit_disc -gt 0 ]]; then
@@ -3017,6 +3275,12 @@ else
 		    echo "  Found ${#video_files[@]} file(s)"
 
 		    for source_file in "${video_files[@]}"; do
+			    # Skip files whose own season tag puts them in a different
+			    # season than the one we're processing (lets a flat or mixed
+			    # directory hold multiple seasons without cross-contamination).
+			    if [[ "$(get_effective_season "$source_file" "$disc_dir" "$SEASON_NUM")" != "$SEASON_NUM" ]]; then
+				    continue
+			    fi
 			    # Check if this file should be split by chapters
 			    should_split=$(should_split_by_chapters "$source_file" "$CONTENT_TYPE")
 
@@ -3075,7 +3339,26 @@ else
 	done | sort -t'|' -k1,1n -k3,3n
 )
 
-	# Now display with sequential episode numbers
+	# Decide how to label episodes. When every regular episode carries a
+	# distinct, positive parsed number we honor those numbers directly, so a
+	# season with gaps (a missing episode, a set that starts at E03) keeps its
+	# canonical numbering. When numbers are missing, duplicated, or synthetic
+	# (e.g. several chapter-split discs each starting at 1), we fall back to
+	# sequential position, which is collision-free.
+	season_label_by_parsed=true
+	declare -A _seen_epnum=()
+	for sorted_line in "${sorted_files[@]}"; do
+		IFS='|' read -r _ _ _pen _ _ _ <<< "$sorted_line"
+		[[ "$_pen" -lt 0 ]] && continue  # OVAs are labeled separately
+		if [[ "$_pen" -lt 1 || -n "${_seen_epnum[$_pen]:-}" ]]; then
+			season_label_by_parsed=false
+			break
+		fi
+		_seen_epnum[$_pen]=1
+	done
+	unset _seen_epnum
+
+	# Now display the episode mapping
 	echo ""
 	echo -e "${CYAN}Episode mapping:${RESET}"
 	ep_index=1
@@ -3085,7 +3368,8 @@ else
 			ova_num=$((parsed_ep_num + 1000))
 			episode_label="OVA $(printf "%02d" $ova_num)"
 		else
-			episode_label="Episode $ep_index"
+			if [[ "$season_label_by_parsed" == "true" ]]; then epn=$parsed_ep_num; else epn=$ep_index; fi
+			episode_label="Episode $epn"
 		fi
 		if [[ "$start_ch" == "-1" ]]; then
 			echo "    $(basename "$source_file") -> $episode_label"
@@ -3111,7 +3395,8 @@ else
 				ova_num=$((parsed_ep_num + 1000))
 				episode_num="OVA $(printf "%02d" $ova_num)"
 			else
-				episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
+				if [[ "$season_label_by_parsed" == "true" ]]; then epn=$parsed_ep_num; else epn=$ep_index; fi
+				episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $epn)"
 			fi
 			output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 			if [[ "$start_ch" == "-1" ]]; then
@@ -3134,7 +3419,8 @@ else
 		    ova_num=$((parsed_ep_num + 1000))
 		    episode_num="OVA $(printf "%02d" $ova_num)"
 	    else
-		    episode_num="S$(printf "%02d" $SEASON_NUM)E01"
+		    if [[ "$season_label_by_parsed" == "true" ]]; then epn=$parsed_ep_num; else epn=1; fi
+		    episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $epn)"
 	    fi
 	    output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 
@@ -3178,12 +3464,14 @@ else
 			ova_num=$((parsed_ep_num + 1000))
 			episode_num="OVA $(printf "%02d" $ova_num)"
 		else
-			# Skip if user specified a specific episode and this isn't it
-			if [[ -n "$EPISODE_NUM" ]] && [[ "$ep_index" -ne "$EPISODE_NUM" ]]; then
+			# Determine this episode's label number (parsed when reliable, else positional)
+			if [[ "$season_label_by_parsed" == "true" ]]; then epn=$parsed_ep_num; else epn=$ep_index; fi
+			# Skip if user specified a specific episode and this label isn't it
+			if [[ -n "$EPISODE_NUM" ]] && [[ "$epn" -ne "$EPISODE_NUM" ]]; then
 				ep_index=$((ep_index + 1))
 				continue
 			fi
-			episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $ep_index)"
+			episode_num="S$(printf "%02d" $SEASON_NUM)E$(printf "%02d" $epn)"
 		fi
 		output_file="${OUTPUT_DIR%/}/${CONTENT_NAME} - ${episode_num}.mkv"
 
@@ -3295,12 +3583,19 @@ else
 	    fi
 
 	    # Check subtitle disposition
-	    sub_default_idx=$(get_subtitle_disposition "$source_file" "$default_audio_lang" "$LANGUAGE")
-	    if [[ "$sub_default_idx" != "-1" ]]; then
-		    echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) default${RESET}"
-	    fi
+	    sub_default_idx=""
+	    sub_default_kind=""
+	    IFS='|' read -r sub_default_idx sub_default_kind \
+		    <<< "$(select_default_subtitle "$source_file" "$default_audio_lang" "$LANGUAGE")"
+				if [[ "$sub_default_idx" != "-1" ]]; then
+					if [[ "$sub_default_kind" == "forced" ]]; then
+						echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) forced${RESET}"
+					else
+						echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) default${RESET}"
+					fi
+				fi
 
-	    CURRENT_OPERATION="Encoding episode $ep_index"
+				CURRENT_OPERATION="Encoding episode $ep_index"
 
 	    # Build and execute the ffmpeg command
 	    ffmpeg_cmd=$(build_ffmpeg_command "$source_file" "$output_file" "$input_opts")
