@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.2"
+SCRIPT_VERSION="1.17.3"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -2474,18 +2474,23 @@ build_ffmpeg_command() {
     # Build audio options
     local audio_opts=""
 
-    # Check if default audio track uses a container-specific PCM format
-    # (pcm_bluray, pcm_dvd) that cannot be safely copied to a standard muxer
+    # Check whether the default audio track uses a container-specific PCM format
+    # (pcm_bluray, pcm_dvd) that cannot be safely copied to a standard muxer.
     local has_pcm_bluray=false
-    if needs_audio_remux "$source_file" "$default_audio_idx"; then
+    if [[ $num_audio -gt 0 ]] && needs_audio_remux "$source_file" "$default_audio_idx"; then
 	    has_pcm_bluray=true
     fi
 
-    # Map the preferred audio track first
-    if [[ "$has_pcm_bluray" == "true" ]]; then
+    # Map the preferred audio track first. A file may legitimately have no audio
+    # (silent films, or audio stripped in a prior edit); in that case we map no
+    # audio at all rather than emitting a -map for a stream that doesn't exist,
+    # which would make ffmpeg abort.
+    if [[ $num_audio -eq 0 ]]; then
+	    echo -e "${YELLOW}    No audio tracks found; output will have no audio${RESET}" >&2
+    elif [[ "$has_pcm_bluray" == "true" ]]; then
 	    # pcm_bluray must be converted - use FLAC for lossless preservation
 	    audio_opts="-map 0:a:$default_audio_idx -c:a:0 flac"
-    elif [[ "$COPY_ONLY" == "true" || "$AUDIO_COPY_FIRST" == "true" ]] && [[ $num_audio -gt 0 ]]; then
+    elif [[ "$COPY_ONLY" == "true" || "$AUDIO_COPY_FIRST" == "true" ]]; then
 	    audio_opts="-map 0:a:$default_audio_idx -c:a:0 copy"
     else
 	    local bitrate=$(get_audio_bitrate "$source_file" $default_audio_idx)
@@ -2525,7 +2530,7 @@ build_ffmpeg_command() {
 	    track_idx=$((track_idx + 1))
     done
     fi
-    audio_opts="$audio_opts -disposition:a:0 default"
+    [[ $num_audio -gt 0 ]] && audio_opts="$audio_opts -disposition:a:0 default"
 
     # Smart subtitle handling with language filtering
     local num_subs=$(ffprobe -v quiet -select_streams s -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
@@ -3616,10 +3621,12 @@ else
 	    IFS='|' read -r default_audio_idx default_audio_lang <<< "$(get_audio_track_info "$source_file" "$preferred_audio_lang")"
 
 	    # Check if default audio needs container-specific PCM conversion
-	    if needs_audio_remux "$source_file" "$default_audio_idx"; then
-		    local src_acodec
-		    src_acodec=$(get_audio_codec_name "$source_file" "$default_audio_idx")
-		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default [${src_acodec} → FLAC]${RESET}"
+	    disp_num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
+	    if [[ $disp_num_audio -eq 0 ]]; then
+		    echo -e "${YELLOW}    Audio: none${RESET}"
+	    elif needs_audio_remux "$source_file" "$default_audio_idx"; then
+		    disp_src_acodec=$(get_audio_codec_name "$source_file" "$default_audio_idx")
+		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default [${disp_src_acodec} → FLAC]${RESET}"
 	    else
 		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default${RESET}"
 	    fi
