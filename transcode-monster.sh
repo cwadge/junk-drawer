@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.1"
+SCRIPT_VERSION="1.17.2"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -3566,39 +3566,44 @@ else
 		fi
 	    fi
 
-	    CURRENT_OPERATION="Detecting video properties"
-
-	    # Detect bit depth and height
-	    bit_depth=$(detect_bit_depth "$source_file")
-	    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
-	    height=${height//,/}
-
-	    # Adjust bit depth based on user preferences
-	    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
-		    bit_depth="10"
-	    fi
-	    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
-		    bit_depth="10"
-	    fi
-
-	    # Choose encoder based on video characteristics
-	    actual_codec=""
-	    if [[ "$VIDEO_CODEC" == "auto" ]]; then
-		    actual_codec=$(should_use_software_encoder "$source_file")
+	    if [[ "$COPY_ONLY" == "true" ]]; then
+		    CURRENT_OPERATION="Remuxing"
+		    echo "    Remuxing (stream copy, no re-encode)"
 	    else
-		    actual_codec="$VIDEO_CODEC"
-	    fi
+		    CURRENT_OPERATION="Detecting video properties"
 
-	    # Determine profile based on bit depth
-	    if [[ "$bit_depth" == "12" ]]; then
-		    detected_profile="main12"
-	    elif [[ "$bit_depth" == "10" ]]; then
-		    detected_profile="main10"
-	    else
-		    detected_profile="main"
-	    fi
+		    # Detect bit depth and height
+		    bit_depth=$(detect_bit_depth "$source_file")
+		    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
+		    height=${height//,/}
 
-	    echo "    Bit depth: ${bit_depth}-bit, Encoder: $actual_codec, Profile: $detected_profile"
+		    # Adjust bit depth based on user preferences
+		    if [[ "$DOWNGRADE_12BIT_TO_10BIT" == "true" && "$bit_depth" == "12" ]]; then
+			    bit_depth="10"
+		    fi
+		    if [[ "$UPGRADE_8BIT_TO_10BIT" == "true" && "$bit_depth" == "8" ]]; then
+			    bit_depth="10"
+		    fi
+
+		    # Choose encoder based on video characteristics
+		    actual_codec=""
+		    if [[ "$VIDEO_CODEC" == "auto" ]]; then
+			    actual_codec=$(should_use_software_encoder "$source_file")
+		    else
+			    actual_codec="$VIDEO_CODEC"
+		    fi
+
+		    # Determine profile based on bit depth
+		    if [[ "$bit_depth" == "12" ]]; then
+			    detected_profile="main12"
+		    elif [[ "$bit_depth" == "10" ]]; then
+			    detected_profile="main10"
+		    else
+			    detected_profile="main"
+		    fi
+
+		    echo "    Bit depth: ${bit_depth}-bit, Encoder: $actual_codec, Profile: $detected_profile"
+	    fi
 
 	    CURRENT_OPERATION="Analyzing audio and subtitles"
 
