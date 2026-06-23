@@ -317,7 +317,8 @@ correctly:
 Recognized filename tags include `S02E05`, `S02_E05`, `S02.E05`, `2x05`, and
 `Season 2` / `Series 2`. The season and episode may be written together
 (`S02E05`) or split by a space, underscore, dot, or hyphen (`S02_E05`); both
-parse identically, and single-digit forms like `S2E5` work too.
+parse identically, and single-digit forms like `S2E5` work too. Guards prevent
+resolutions like `1920x1080` from being misread as a season.
 
 **Mixed layouts** are handled in a single pass: some seasons can live as a flat
 pool of files while others are split across `S#D#` disc directories. Each file is
@@ -502,9 +503,14 @@ A track is classified as forced, cheapest check first:
 2. The title tag matching `forced`, `signs`, or `songs` (case-insensitive).
 3. Cue density: forced tracks light up only a handful of times per film, full
    tracks run continuously. This fallback only runs when steps 1-2 are silent and
-   `SUBTITLE_FORCED_DETECT_DENSITY="true"`. It adds one quick demux pass over the
-   ambiguous track. Tune the boundary with `SUBTITLE_FORCED_MAX_EVENTS_PER_MIN`
-   (default `3`).
+   `SUBTITLE_FORCED_DETECT_DENSITY="true"`. It reads the container's cue-count
+   metadata (the `NUMBER_OF_FRAMES` statistics tag that mkvmerge and MakeMKV
+   write), so it is instant and adds no measurable cost to a normal run. Tune the
+   boundary with `SUBTITLE_FORCED_MAX_EVENTS_PER_MIN` (default `3`). For the rare
+   long file that lacks cue-count metadata, density is skipped by default rather
+   than demuxing a multi-gigabyte stream; set `SUBTITLE_FORCED_DEEP_SCAN="true"`
+   to count cues by demuxing instead (accurate, but slow on large network sources,
+   and it prints a heads-up while it works).
 
 Note: the forced track must be tagged in `LANGUAGE` (or matched by the language
 filter) to be picked up. Properly authored discs tag forced tracks with the
@@ -681,6 +687,7 @@ ORIGINAL_LANGUAGE=""            # e.g., "jpn" for anime
 FORCED_SUBS_ON_NATIVE_AUDIO="true"      # Auto-enable forced/signs subs when audio is already native
 SUBTITLE_FORCED_DETECT_DENSITY="true"   # Use cue-density fallback when the forced flag/title are absent
 SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="3"  # Below this cues/min => treated as forced/signs
+SUBTITLE_FORCED_DEEP_SCAN="false"       # Demux long files lacking cue-count metadata to count cues (slow; off by default)
 
 # Processing
 DETECT_INTERLACING="true"

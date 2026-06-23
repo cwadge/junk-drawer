@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.4"
+SCRIPT_VERSION="1.17.5"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -96,8 +96,9 @@ DEFAULT_ORIGINAL_LANGUAGE=""  # Set this for original language mode (e.g., "jpn"
 # foreign-language scenes (Mandarin) that were meant to be translated. Auto-enabling a
 # forced/signs track keeps those scenes and on-screen signage legible.
 DEFAULT_FORCED_SUBS_ON_NATIVE_AUDIO="true"  # Auto-enable a forced/signs sub when audio is already native
-DEFAULT_SUBTITLE_FORCED_DETECT_DENSITY="true"  # If the forced flag and title are inconclusive, fall back to cue-density analysis (adds one quick demux pass per ambiguous track)
+DEFAULT_SUBTITLE_FORCED_DETECT_DENSITY="true"  # If the forced flag and title are inconclusive, judge forced-vs-full by cue density. Uses the container's cue-count metadata (instant) when present; see DEEP_SCAN for files that lack it
 DEFAULT_SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="3"  # Density threshold: fewer cues/min than this => forced/signs, more => full
+DEFAULT_SUBTITLE_FORCED_DEEP_SCAN="false"  # When a long file has no cue-count metadata, demux the whole subtitle stream to count cues. Accurate but slow on large files over a network share, so off by default
 
 # Processing options
 DEFAULT_COPY_ONLY="false"  # Remux mode: copy the source video and audio streams instead of re-encoding, while still selecting the right tracks, setting dispositions, and naming the output. For sources that are already well-encoded but badly mastered/named.
@@ -247,6 +248,7 @@ ORIGINAL_LANGUAGE="${ORIGINAL_LANGUAGE:-$DEFAULT_ORIGINAL_LANGUAGE}"
 FORCED_SUBS_ON_NATIVE_AUDIO="${FORCED_SUBS_ON_NATIVE_AUDIO:-$DEFAULT_FORCED_SUBS_ON_NATIVE_AUDIO}"
 SUBTITLE_FORCED_DETECT_DENSITY="${SUBTITLE_FORCED_DETECT_DENSITY:-$DEFAULT_SUBTITLE_FORCED_DETECT_DENSITY}"
 SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="${SUBTITLE_FORCED_MAX_EVENTS_PER_MIN:-$DEFAULT_SUBTITLE_FORCED_MAX_EVENTS_PER_MIN}"
+SUBTITLE_FORCED_DEEP_SCAN="${SUBTITLE_FORCED_DEEP_SCAN:-$DEFAULT_SUBTITLE_FORCED_DEEP_SCAN}"
 
 COPY_ONLY="${COPY_ONLY:-$DEFAULT_COPY_ONLY}"
 DETECT_INTERLACING="${DETECT_INTERLACING:-$DEFAULT_DETECT_INTERLACING}"
@@ -443,9 +445,12 @@ ${BOLDBLUE}SUBTITLE HANDLING${RESET}
 		   FORCED_SUBS_ON_NATIVE_AUDIO="false".
 
   Forced tracks are detected by the 'forced' disposition flag, then by title
-  (forced/signs/songs), then — if still ambiguous — by cue density (few cues per
-  minute = forced). Density analysis can be tuned or disabled via
-  SUBTITLE_FORCED_DETECT_DENSITY and SUBTITLE_FORCED_MAX_EVENTS_PER_MIN.
+  (forced/signs/songs), then, if still ambiguous, by cue density (few cues per
+  minute = forced). Density reads the container's cue-count metadata when present
+  (instant), so it adds no measurable cost to a normal run. Tune or disable via
+  SUBTITLE_FORCED_DETECT_DENSITY and SUBTITLE_FORCED_MAX_EVENTS_PER_MIN. For the
+  rare long file with no such metadata, set SUBTITLE_FORCED_DEEP_SCAN="true" to
+  count cues by demuxing the stream (accurate but slow on large network sources).
 
 ${BOLDBLUE}INPUT FORMATS${RESET}
   ${CYAN}Recommended:${RESET}  MKV, MP4, M4V — best metadata support
@@ -1847,12 +1852,34 @@ should_include_subtitle_track() {
     echo "false"
 }
 
-# Estimate subtitle cue density (cues per minute) for a track. To stay fast on
-# feature-length files and network shares, this samples a few short windows
-# spread across the runtime via -read_intervals instead of demuxing the entire
-# file, which on a multi-GB remux over NFS can take minutes. Short files are
-# scanned whole, since that's already cheap. Echoes a float (999 when it cannot
-# tell, which classifies as "full" so dialogue is never auto-hidden).
+# Read a subtitle track's cue count from container metadata, with no demux.
+# mkvmerge/MakeMKV write a per-track NUMBER_OF_FRAMES statistics tag (the cue
+# count for subtitle tracks); some files expose nb_frames instead. Echoes an
+# integer, or nothing if no such metadata exists.
+get_subtitle_cue_count() {
+	local input="$1"
+	local sub_idx="$2"
+	local count
+	# Statistics tag (may be plain or language-suffixed, e.g. NUMBER_OF_FRAMES-eng)
+	count=$(ffprobe -v quiet -select_streams "s:${sub_idx}" -show_entries stream_tags \
+		-of default=noprint_wrappers=1 "$input" 2>/dev/null \
+		| grep -iE 'NUMBER_OF_FRAMES' | head -1 | sed 's/.*=//' | tr -dc '0-9')
+		if [[ -n "$count" ]]; then echo "$count"; return; fi
+		# Container-provided frame count, when present (often N/A for subtitles)
+		count=$(ffprobe -v quiet -select_streams "s:${sub_idx}" -show_entries stream=nb_frames \
+			-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | tr -dc '0-9')
+					[[ -n "$count" ]] && echo "$count"
+				}
+
+# Estimate subtitle cue density (cues per minute) for a track. Strategy:
+#   1. Read the cue count from container metadata (instant, no demux) — this
+#      covers virtually all mkvmerge/MakeMKV output.
+#   2. If there's no such metadata, an exact count requires demuxing the whole
+#      subtitle stream, which is expensive on a large file over a network share.
+#      We do that only for short files (cheap) or when SUBTITLE_FORCED_DEEP_SCAN
+#      is enabled, printing a heads-up first. Otherwise we report nothing, and
+#      the caller falls back to flag/title (treating the track as full).
+# Echoes a float, or nothing when undeterminable.
 subtitle_cues_per_min() {
 	local input="$1"
 	local sub_idx="$2"
@@ -1860,32 +1887,31 @@ subtitle_cues_per_min() {
 	local duration
 	duration=$(ffprobe -v quiet -show_entries format=duration \
 		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | tr -d '[:space:]')
-			[[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] || { echo "999"; return; }
-			(( $(echo "$duration > 0" | bc -l 2>/dev/null || echo 0) )) || { echo "999"; return; }
+			[[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] || return
+			(( $(echo "$duration > 0" | bc -l 2>/dev/null || echo 0) )) || return
 
-			local events
-			# Files up to 15 minutes are cheap to scan in full.
-			if (( $(echo "$duration <= 900" | bc -l 2>/dev/null || echo 0) )); then
-				events=$(ffprobe -v quiet -select_streams "s:${sub_idx}" \
-					-show_entries packet=pts -of csv=p=0 "$input" 2>/dev/null | grep -c .)
-									echo "$(echo "scale=4; ($events * 60) / $duration" | bc -l 2>/dev/null || echo 999)"
-									return
-			fi
+	# 1. Instant: cue count from metadata.
+	local count
+	count=$(get_subtitle_cue_count "$input" "$sub_idx")
+	if [[ -n "$count" ]]; then
+		echo "$(echo "scale=4; ($count * 60) / $duration" | bc -l 2>/dev/null)"
+		return
+	fi
 
-	# Longer files: sample four 120-second windows spread across the runtime and
-	# measure density over just those. Forced tracks (a handful of cues across the
-	# whole film) and full tracks (continuous dialogue) differ by ~100x, so even a
-	# sparse sample separates them cleanly.
-	local span=120 scanned=0 intervals="" frac start
-	for frac in 15 40 65 85; do
-		start=$(printf '%.0f' "$(echo "$duration * $frac / 100" | bc -l)")
-		intervals+="${start}%+${span},"
-		scanned=$((scanned + span))
-	done
-	intervals="${intervals%,}"
-	events=$(ffprobe -v quiet -read_intervals "$intervals" -select_streams "s:${sub_idx}" \
-		-show_entries packet=pts -of csv=p=0 "$input" 2>/dev/null | grep -c .)
-			echo "$(echo "scale=4; ($events * 60) / $scanned" | bc -l 2>/dev/null || echo 999)"
+	# 2. No metadata: full demux, gated on cost.
+	local do_scan=false
+	(( $(echo "$duration <= 900" | bc -l 2>/dev/null || echo 0) )) && do_scan=true
+	[[ "$SUBTITLE_FORCED_DEEP_SCAN" == "true" ]] && do_scan=true
+	if [[ "$do_scan" != "true" ]]; then
+		return  # undeterminable cheaply; caller treats as full
+	fi
+	if (( $(echo "$duration > 900" | bc -l 2>/dev/null || echo 0) )); then
+		echo -e "${YELLOW}    Scanning subtitle cues (no count metadata; may take a moment over network)...${RESET}" >&2
+	fi
+	local events
+	events=$(ffprobe -v quiet -select_streams "s:${sub_idx}" -show_entries packet=pts \
+		-of csv=p=0 "$input" 2>/dev/null | grep -c .)
+			echo "$(echo "scale=4; ($events * 60) / $duration" | bc -l 2>/dev/null)"
 		}
 
 # Classify a subtitle track as "forced" (signs/songs/foreign-dialogue only) or
@@ -1920,12 +1946,12 @@ classify_subtitle_track() {
 				return
 			fi
 
-	# 3. Cue-density fallback (opt-in; metadata was inconclusive). Sampled, so it
-	#    stays fast even on long files over a network share.
+	# 3. Cue-density fallback (opt-in; metadata flag and title were inconclusive).
+	#    Cheap when the file carries cue-count metadata; see subtitle_cues_per_min.
 	if [[ "$SUBTITLE_FORCED_DETECT_DENSITY" == "true" ]]; then
 		local per_min
 		per_min=$(subtitle_cues_per_min "$input" "$sub_idx")
-		if (( $(echo "$per_min < $SUBTITLE_FORCED_MAX_EVENTS_PER_MIN" | bc -l 2>/dev/null || echo 0) )); then
+		if [[ -n "$per_min" ]] && (( $(echo "$per_min < $SUBTITLE_FORCED_MAX_EVENTS_PER_MIN" | bc -l 2>/dev/null || echo 0) )); then
 			echo "forced"
 			return
 		fi
