@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.3"
+SCRIPT_VERSION="1.17.4"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -1847,16 +1847,46 @@ should_include_subtitle_track() {
     echo "false"
 }
 
-# Count subtitle events (cues) in a track. Works across both text and image
-# codecs by counting demuxed packets — one packet per displayed cue for SRT/ASS,
-# and per display-set for PGS/VobSub. Echoes an integer (0 if undeterminable).
-# Note: this demuxes the subtitle stream, so it's only called as a fallback.
-count_subtitle_events() {
+# Estimate subtitle cue density (cues per minute) for a track. To stay fast on
+# feature-length files and network shares, this samples a few short windows
+# spread across the runtime via -read_intervals instead of demuxing the entire
+# file, which on a multi-GB remux over NFS can take minutes. Short files are
+# scanned whole, since that's already cheap. Echoes a float (999 when it cannot
+# tell, which classifies as "full" so dialogue is never auto-hidden).
+subtitle_cues_per_min() {
 	local input="$1"
 	local sub_idx="$2"
-	ffprobe -v quiet -select_streams "s:${sub_idx}" -show_entries packet=pts \
-		-of csv=p=0 "$input" 2>/dev/null | grep -c .
-	}
+
+	local duration
+	duration=$(ffprobe -v quiet -show_entries format=duration \
+		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | tr -d '[:space:]')
+			[[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] || { echo "999"; return; }
+			(( $(echo "$duration > 0" | bc -l 2>/dev/null || echo 0) )) || { echo "999"; return; }
+
+			local events
+			# Files up to 15 minutes are cheap to scan in full.
+			if (( $(echo "$duration <= 900" | bc -l 2>/dev/null || echo 0) )); then
+				events=$(ffprobe -v quiet -select_streams "s:${sub_idx}" \
+					-show_entries packet=pts -of csv=p=0 "$input" 2>/dev/null | grep -c .)
+									echo "$(echo "scale=4; ($events * 60) / $duration" | bc -l 2>/dev/null || echo 999)"
+									return
+			fi
+
+	# Longer files: sample four 120-second windows spread across the runtime and
+	# measure density over just those. Forced tracks (a handful of cues across the
+	# whole film) and full tracks (continuous dialogue) differ by ~100x, so even a
+	# sparse sample separates them cleanly.
+	local span=120 scanned=0 intervals="" frac start
+	for frac in 15 40 65 85; do
+		start=$(printf '%.0f' "$(echo "$duration * $frac / 100" | bc -l)")
+		intervals+="${start}%+${span},"
+		scanned=$((scanned + span))
+	done
+	intervals="${intervals%,}"
+	events=$(ffprobe -v quiet -read_intervals "$intervals" -select_streams "s:${sub_idx}" \
+		-show_entries packet=pts -of csv=p=0 "$input" 2>/dev/null | grep -c .)
+			echo "$(echo "scale=4; ($events * 60) / $scanned" | bc -l 2>/dev/null || echo 999)"
+		}
 
 # Classify a subtitle track as "forced" (signs/songs/foreign-dialogue only) or
 # "full" (complete dialogue). Strategy, cheapest-first:
@@ -1890,21 +1920,15 @@ classify_subtitle_track() {
 				return
 			fi
 
-	# 3. Cue-density fallback (opt-in; metadata was inconclusive)
+	# 3. Cue-density fallback (opt-in; metadata was inconclusive). Sampled, so it
+	#    stays fast even on long files over a network share.
 	if [[ "$SUBTITLE_FORCED_DETECT_DENSITY" == "true" ]]; then
-		local duration events
-		duration=$(ffprobe -v quiet -show_entries format=duration \
-			-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | tr -d '[:space:]')
-					events=$(count_subtitle_events "$input" "$sub_idx")
-					# Need a sane duration and a non-trivial event count to judge density
-					if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$duration > 0" | bc -l 2>/dev/null || echo 0) )); then
-						local per_min
-						per_min=$(echo "scale=4; ($events * 60) / $duration" | bc -l 2>/dev/null || echo "999")
-						if (( $(echo "$per_min < $SUBTITLE_FORCED_MAX_EVENTS_PER_MIN" | bc -l 2>/dev/null || echo 0) )); then
-							echo "forced"
-							return
-						fi
-					fi
+		local per_min
+		per_min=$(subtitle_cues_per_min "$input" "$sub_idx")
+		if (( $(echo "$per_min < $SUBTITLE_FORCED_MAX_EVENTS_PER_MIN" | bc -l 2>/dev/null || echo 0) )); then
+			echo "forced"
+			return
+		fi
 	fi
 
 	echo "full"
@@ -2418,6 +2442,11 @@ build_ffmpeg_command() {
 	local source_file="$1"
 	local output_file="$2"
 	local input_opts="${3:-}"  # Optional, for chapter extraction (default to empty)
+	# Optional: a precomputed "idx|kind" subtitle decision from select_default_subtitle.
+	# The series path resolves this once for its display line and passes it back here
+	# so we don't classify (and re-sample) the subtitle tracks a second time. Empty
+	# means compute it ourselves (movie path, dry-run).
+	local precomputed_sub_spec="${4:-}"
 
     # Video analysis (bit depth, encoder choice, filter chain) is only needed
     # when we're actually re-encoding. Copy-only mode keeps the source video
@@ -2567,8 +2596,12 @@ build_ffmpeg_command() {
 	# a forced/signs track (forced tracks get both 'default' and 'forced' so
 	# compliant players show them even with subtitles otherwise turned off).
 	local sub_default_input_idx sub_default_kind
-	IFS='|' read -r sub_default_input_idx sub_default_kind \
-		<<< "$(select_default_subtitle "$source_file" "$default_audio_lang" "$LANGUAGE")"
+	if [[ -n "$precomputed_sub_spec" ]]; then
+		IFS='|' read -r sub_default_input_idx sub_default_kind <<< "$precomputed_sub_spec"
+	else
+		IFS='|' read -r sub_default_input_idx sub_default_kind \
+			<<< "$(select_default_subtitle "$source_file" "$default_audio_lang" "$LANGUAGE")"
+	fi
 
 	# Check if the chosen subtitle exists in our filtered set
 	if [[ "$sub_default_input_idx" != "-1" ]] && [[ -v input_to_output_sub_map[$sub_default_input_idx] ]]; then
@@ -3631,27 +3664,27 @@ else
 		    echo -e "${CYAN}    Audio: Track $default_audio_idx ($default_audio_lang) default${RESET}"
 	    fi
 
-	    # Check subtitle disposition
-	    sub_default_idx=""
-	    sub_default_kind=""
-	    IFS='|' read -r sub_default_idx sub_default_kind \
-		    <<< "$(select_default_subtitle "$source_file" "$default_audio_lang" "$LANGUAGE")"
-				if [[ "$sub_default_idx" != "-1" ]]; then
-					if [[ "$sub_default_kind" == "forced" ]]; then
-						echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) forced${RESET}"
-					else
-						echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) default${RESET}"
-					fi
-				fi
+	    # Resolve the default subtitle once here, for both the line below and the
+	    # build call (so the tracks aren't classified/sampled twice per episode).
+	    sub_default_spec=$(select_default_subtitle "$source_file" "$default_audio_lang" "$LANGUAGE")
+	    IFS='|' read -r sub_default_idx sub_default_kind <<< "$sub_default_spec"
+	    if [[ "$sub_default_idx" != "-1" ]]; then
+		    if [[ "$sub_default_kind" == "forced" ]]; then
+			    echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) forced${RESET}"
+		    else
+			    echo -e "${CYAN}    Subs: Track $sub_default_idx ($LANGUAGE) default${RESET}"
+		    fi
+	    fi
 
-				if [[ "$COPY_ONLY" == "true" ]]; then
-					CURRENT_OPERATION="Remuxing episode $ep_index"
-				else
-					CURRENT_OPERATION="Encoding episode $ep_index"
-				fi
+	    if [[ "$COPY_ONLY" == "true" ]]; then
+		    CURRENT_OPERATION="Remuxing episode $ep_index"
+	    else
+		    CURRENT_OPERATION="Encoding episode $ep_index"
+	    fi
 
-	    # Build and execute the ffmpeg command (array form, no eval)
-	    build_ffmpeg_command "$source_file" "$output_file" "$input_opts"
+	    # Build and execute the ffmpeg command (array form, no eval). Pass the
+	    # subtitle decision we already resolved so build doesn't redo it.
+	    build_ffmpeg_command "$source_file" "$output_file" "$input_opts" "$sub_default_spec"
 	    "${FFMPEG_CMD[@]}"
 
 	    echo "    Complete!"
