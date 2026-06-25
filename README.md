@@ -7,10 +7,10 @@ A collection of miscellaneous resources for Linux gaming and system tasks. Many 
 | Emulation | [network_tune_batocera](network_tune_batocera) | Sets custom network interface parameters (e.g., MTU, speed) at Batocera startup |
 | Emulation | [nfs_mount_batocera](nfs_mount_batocera) | Mounts NFS exports locally as a client on Batocera Linux, e.g. for Kodi |
 | Emulation | [disc-crusher.sh](disc-crusher.sh) | Compresses DVD or CD-ROM-based console images to CHD, auto-creates M3U for multi-disc games |
+| Utility | [dirloot.sh](dirloot.sh) | Download files matching a glob pattern from an HTML directory index with smart resumption |
 | Utility | [kea-show-leases.sh](kea-show-leases.sh) | Display active Kea DHCP lease records (v4, v6, or both) with human-readable output |
 | Utility | [net-core-status.sh](net-core-status.sh) | Monitors the status of `unbound`, `kea`, and `chrony` on a core network services box |
 | Utility | [fs-status.sh](fs-status.sh) | Monitors the status of ZFS, `mdadm`, storage devices, volumes, networks, NFS and Samba |
-| Hardware | [set-rdna-oc-fan.sh](set-rdna-oc-fan.sh) | Creates and applies overclocking / fan profiles for AMD RDNA GPUs |
 | Multimedia | [midi2wav.sh](midi2wav.sh) | Convert MIDI file(s) to digital audio like WAV, FLAC, AAC or MP3 |
 | Multimedia | [pipewire_tuning_guide.md](pipewire_tuning_guide.md) | Quick & dirty guide to setting up low-latency, multi-rate PipeWire |
 | Multimedia | [sonicsqueezer.sh](sonicsqueezer.sh) | A multi-threaded audio converter for WAV and FLAC to MP3, AAC, OGG, and more | 
@@ -30,7 +30,7 @@ wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.s
 
 You could also download & install with a one-liner:
 ```bash
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.sh -O /usr/local/sbin/set-rdna-oc-fan.sh && sudo chmod 755 /usr/local/sbin/set-rdna-oc-fan.sh
+sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/dirloot.sh -O /usr/local/bin/dirloot.sh && sudo chmod 755 /usr/local/bin/dirloot.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/disc-crusher.sh -O /usr/local/bin/disc-crusher.sh && sudo chmod 755 /usr/local/bin/disc-crusher.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/midi2wav.sh -O /usr/local/bin/midi2wav.sh && sudo chmod 755 /usr/local/bin/midi2wav.sh
 sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/sonicsqueezer.sh -O /usr/local/bin/sonicsqueezer.sh && sudo chmod 755 /usr/local/bin/sonicsqueezer.sh
