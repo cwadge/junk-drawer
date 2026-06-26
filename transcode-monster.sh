@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.5"
+SCRIPT_VERSION="1.17.6"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -2552,9 +2552,11 @@ build_ffmpeg_command() {
 	    audio_opts="-map 0:a:$default_audio_idx -c:a:0 $AUDIO_CODEC -profile:a:0 $AUDIO_PROFILE -b:a:0 $bitrate"
     fi
 
-    # Map remaining audio tracks
+    # Map remaining audio tracks. track_idx doubles as the running count of
+    # output audio tracks; it starts at 1 because the preferred track above is
+    # output audio 0.
+    local track_idx=1
     if [[ $num_audio -gt 1 ]]; then
-	    local track_idx=1
 	    for ((i=0; i<num_audio; i=i+1)); do
 		    if [[ $i -eq $default_audio_idx ]]; then
 			    continue
@@ -2585,7 +2587,19 @@ build_ffmpeg_command() {
 	    track_idx=$((track_idx + 1))
     done
     fi
-    [[ $num_audio -gt 0 ]] && audio_opts="$audio_opts -disposition:a:0 default"
+    # Exactly one audio track may carry the default/enabled flag. Make the
+    # preferred track (output a:0) default and strip the flag from every other
+    # output audio track, so a source that shipped more than one "default" audio
+    # track (e.g. an English dub flagged alongside the Japanese original) doesn't
+    # leave the container with two enabled tracks and ambiguous player behavior.
+    # Relative +/-default is used so other flags (commentary, original, ...) survive.
+    if [[ $num_audio -gt 0 ]]; then
+	    audio_opts="$audio_opts -disposition:a:0 +default"
+	    local extra_a
+	    for ((extra_a=1; extra_a<track_idx; extra_a=extra_a+1)); do
+		    audio_opts="$audio_opts -disposition:a:$extra_a -default"
+	    done
+    fi
 
     # Smart subtitle handling with language filtering
     local num_subs=$(ffprobe -v quiet -select_streams s -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
