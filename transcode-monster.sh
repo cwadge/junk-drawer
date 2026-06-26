@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.6"
+SCRIPT_VERSION="1.17.8"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -134,12 +134,19 @@ CURRENT_FILE=""
 error_handler() {
 	local exit_code=$?
 	local line_number=$1
+	local failed_command="${2:-}"
 
 	echo ""
 	echo -e "${RED}════════════════════════════════════════════${RESET}"
 	echo -e "${RED}ERROR: Script failed with exit code $exit_code${RESET}"
 	echo -e "${RED}════════════════════════════════════════════${RESET}"
 	echo -e "${RED}Line number: $line_number${RESET}"
+
+	# Show the command that actually tripped the trap; turns a bare line number
+	# into something diagnosable for failures we didn't anticipate.
+	if [[ -n "$failed_command" ]]; then
+		echo -e "${RED}Failed command: $failed_command${RESET}"
+	fi
 
 	if [[ -n "$CURRENT_OPERATION" ]]; then
 		echo -e "${RED}Operation: $CURRENT_OPERATION${RESET}"
@@ -162,7 +169,7 @@ interrupt_handler() {
 }
 
 # Set up traps
-trap 'error_handler ${LINENO}' ERR
+trap 'error_handler ${LINENO} "$BASH_COMMAND"' ERR
 trap 'interrupt_handler' INT
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2046,7 +2053,7 @@ should_split_by_chapters() {
 	local content_type="$2"
 
     # Get chapter count and duration
-    local chapter_count=$(ffprobe -v quiet -show_chapters "$input" 2>/dev/null | grep -c "^\[CHAPTER\]")
+    local chapter_count=$(ffprobe -v quiet -show_chapters "$input" 2>/dev/null | grep -c "^\[CHAPTER\]" || true)
     local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
 
     # Clean duration value
@@ -2929,10 +2936,15 @@ SOURCE_FILES=()
 SOURCE_DIR=""
 
 # Normalize source - handles files, directories, and globs (pre-expanded by shell)
-if [[ ${#SOURCE_ARGS[@]} -gt 0 ]]; then
-	normalize_source "${SOURCE_ARGS[@]}"
-else
+if [[ ${#SOURCE_ARGS[@]} -eq 0 ]]; then
 	echo -e "${RED}Error: No source files or directories specified${RESET}"
+	exit 1
+fi
+# Call in a condition so a "not found" return is handled here with a clear
+# message, rather than tripping set -e and reporting a bare line number.
+if ! normalize_source "${SOURCE_ARGS[@]}"; then
+	echo -e "${RED}Error: Could not find a usable source: ${SOURCE_ARGS[*]}${RESET}"
+	echo -e "${YELLOW}Relative paths are resolved from the current directory ($(pwd)).${RESET}"
 	exit 1
 fi
 
@@ -3262,7 +3274,7 @@ else
 			fi
 
 		    # Get chapter count
-		    chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]")
+		    chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]" || true)
 		    episode_count=$((chapter_count / chapters_per_ep))
 		    echo "  File has $chapter_count chapters - will split into $episode_count episodes"
 
@@ -3411,7 +3423,7 @@ else
 				    fi
 
 			# Get chapter count
-			chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]")
+			chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]" || true)
 			episode_count=$((chapter_count / chapters_per_ep))
 			echo "  File has $chapter_count chapters - will split into $episode_count episodes"
 
@@ -3694,7 +3706,7 @@ else
 	    IFS='|' read -r default_audio_idx default_audio_lang <<< "$(get_audio_track_info "$source_file" "$preferred_audio_lang")"
 
 	    # Check if default audio needs container-specific PCM conversion
-	    disp_num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
+	    disp_num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l || true)
 	    if [[ $disp_num_audio -eq 0 ]]; then
 		    echo -e "${YELLOW}    Audio: none${RESET}"
 	    elif needs_audio_remux "$source_file" "$default_audio_idx"; then
