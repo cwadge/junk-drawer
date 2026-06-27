@@ -2350,51 +2350,52 @@ detect_chapters_per_episode() {
 		durations+=("$d")
 	done
 
-	local best_grouping=1 best_sd="" grouping
-	for grouping in 1 2 3 4 5 6; do
-		local full_eps=$(( chapter_count / grouping ))
-		# Need at least two full episodes to judge uniformity meaningfully
-		(( full_eps < 2 )) && continue
+	# Structural-period detection. Disc-authored episodes repeat a chapter layout
+	# that includes at least one recurring marker (OP, recap, title card, next-
+	# episode preview), so the true chapters-per-episode is the smallest grouping
+	# g at which the duration sequence repeats: a low mean relative difference
+	# between chapter i and chapter i+g. This keys on repeating structure rather
+	# than absolute length, so it works identically for ~11-minute cartoons and
+	# ~50-minute dramas — unlike a fixed episode-length window, which can't bound
+	# both. One awk pass scores every candidate grouping.
+	local thresh="0.18"    # mean relative diff at/below this == episode-aligned
+	local min_ep_sec=120   # ignore groupings implying sub-2-minute episodes
 
-		# Sum each full episode's chapter durations
-		local epd=() ep ch
-		for ((ep=0; ep<full_eps; ep++)); do
-			local sum=0
-			for ((ch=0; ch<grouping; ch++)); do
-				sum=$(echo "$sum + ${durations[$((ep*grouping+ch))]}" | bc 2>/dev/null)
-			done
-			epd+=("$sum")
-		done
+	local scores
+	scores=$(printf '%s\n' "${durations[@]}" | awk -v gmax=8 '
+	{ d[NR]=$1+0; n=NR }
+	END {
+	for (g=1; g<=gmax; g++) {
+		if (int(n/g) < 2) continue
+			sum=0; cnt=0
+			for (i=1; i+g<=n; i++) {
+				a=d[i]; b=d[i+g]; mx=(a>b)?a:b
+				if (mx<=0) continue
+					diff=a-b; if (diff<0) diff=-diff
+					sum+=diff/mx; cnt++
+				}
+				if (cnt>0) printf "%d %.4f\n", g, sum/cnt
+				}
+			}')
 
-		# Mean episode length, gated to a sane 15-35 min window
-		local tot=0 d
-		for d in "${epd[@]}"; do tot=$(echo "$tot + $d" | bc 2>/dev/null); done
-		local mean=$(echo "scale=3; $tot / ${#epd[@]}" | bc -l 2>/dev/null)
-		is_numeric "$mean" || continue
-		local mean_int=$(printf "%.0f" "$mean" 2>/dev/null)
-		{ [[ -z "$mean_int" ]] || (( mean_int < 900 )) || (( mean_int > 2100 )); } && continue
-
-		# Standard deviation of full-episode durations
-		local var=0 diff sq
-		for d in "${epd[@]}"; do
-			diff=$(echo "scale=3; $d - $mean" | bc 2>/dev/null)
-			sq=$(echo "scale=3; $diff * $diff" | bc 2>/dev/null)
-			var=$(echo "scale=3; $var + $sq" | bc 2>/dev/null)
-		done
-		var=$(echo "scale=3; $var / ${#epd[@]}" | bc -l 2>/dev/null)
-		local stddev=$(echo "scale=3; sqrt($var)" | bc -l 2>/dev/null)
-		is_numeric "$stddev" || continue
-
-		# Lowest stddev wins; compare as integer milliseconds to avoid bc float compares
-		local sd_milli=$(echo "$stddev * 1000 / 1" | bc 2>/dev/null)
-		is_numeric "$sd_milli" || continue
-		if [[ -z "$best_sd" ]] || (( sd_milli < best_sd )); then
-			best_sd=$sd_milli
-			best_grouping=$grouping
+	# Smallest grouping at/below threshold wins (the base period, not a multiple);
+	# otherwise fall back to the most-repeating grouping for unusual sources.
+	local best_g="" best_score="" g score
+	while read -r g score; do
+		[[ -z "$g" ]] && continue
+		local ep_len_int
+		ep_len_int=$(awk -v t="$total_duration" -v g="$g" -v c="$chapter_count" 'BEGIN{printf "%.0f", t*g/c}')
+		(( ep_len_int < min_ep_sec )) && continue
+		if awk -v s="$score" -v t="$thresh" 'BEGIN{exit !(s<=t)}'; then
+			echo "$g"; return
 		fi
-	done
+		if [[ -z "$best_score" ]] || awk -v s="$score" -v b="$best_score" 'BEGIN{exit !(s<b)}'; then
+			best_score="$score"; best_g="$g"
+		fi
+	done <<< "$scores"
 
-	echo "$best_grouping"
+	[[ -n "$best_g" ]] && { echo "$best_g"; return; }
+	echo "1"
 }
 
 # Infer content type from directory structure
