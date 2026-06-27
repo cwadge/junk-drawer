@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.9"
+SCRIPT_VERSION="1.17.10"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -626,8 +626,12 @@ get_episode_num() {
 	ep_num=$(echo "$filename" | grep -oP '(?<=_)\d{2,3}(?=\.)' | head -1)
 	[[ -n "$ep_num" ]] && { echo $((10#$ep_num)); return; }
 
-	# 6. Original: [t_]NN directly before .mkv
-	ep_num=$(echo "$filename" | sed -E 's/.*[t_]([0-9]{2,3})\.mkv$/\1/')
+	# 6. _NN directly before .mkv (e.g. Show_07.mkv). Deliberately matches only
+	#    an underscore before the digits, NOT the MakeMKV title pattern _tNN
+	#    (BGC_t01.mkv, Name_t00.mkv) — there the number is the disc's title index,
+	#    not an episode, so those fall through to UNKNOWN and get sequential
+	#    numbering by sorted filename instead of inheriting gappy title numbers.
+	ep_num=$(echo "$filename" | sed -E 's/.*_([0-9]{2,3})\.mkv$/\1/')
 	if [[ -n "$ep_num" && "$ep_num" =~ ^[0-9]{2,3}$ ]]; then
 		echo $((10#$ep_num)); return
 	fi
@@ -2308,125 +2312,89 @@ get_chapter_times() {
     ffprobe -v quiet -show_chapters "$input" 2>/dev/null | grep "start_time=" | cut -d'=' -f2
 }
 
-# Detect optimal chapters per episode grouping
+# Numeric check for the non-negative values bc produces here. Also accepts bc's
+# leading-zero-less output for values in (0,1) — bc prints "0.24" as ".24",
+# which a leading-digit-anchored regex wrongly rejects. Rejects negatives and
+# garbage so bad chapter data bails out.
+is_numeric() { [[ "$1" =~ ^[0-9]*\.?[0-9]+$ ]]; }
+
+# Detect optimal chapters per episode grouping.
+#
+# Scores each candidate grouping by how uniform its full (g-chapter) episodes
+# are: disc-authored episodes share a near-identical chapter layout (e.g. OP,
+# two content parts, ED, next-episode preview), so the correct grouping has by
+# far the lowest episode-to-episode duration variance. A leftover smaller than g
+# becomes a short final episode (a finale with no next-ep preview, which is what
+# makes a disc's chapter count indivisible) — it's allowed but excluded from the
+# uniformity score so it can't penalize the right grouping. Lowest stddev wins,
+# with a 15-35 min mean-episode gate to rule out the degenerate 1-chapter case.
 detect_chapters_per_episode() {
 	local input="$1"
 
-    # Get all chapter times
-    local chapter_times=($(get_chapter_times "$input"))
-    local chapter_count=${#chapter_times[@]}
+	local chapter_times=($(get_chapter_times "$input"))
+	local chapter_count=${#chapter_times[@]}
+	[[ $chapter_count -eq 0 ]] && { echo "1"; return; }
 
-    if [[ $chapter_count -eq 0 ]]; then
-	    echo "1"
-	    return
-    fi
+	local total_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+	total_duration=${total_duration//,/}
+	is_numeric "$total_duration" || { echo "1"; return; }
 
-    # Get total duration
-    local total_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
-    total_duration=${total_duration//,/}
+	# Per-chapter durations (last chapter runs to end of file)
+	local durations=() i
+	for ((i=0; i<chapter_count; i++)); do
+		local start="${chapter_times[$i]}" end
+		if (( i+1 < chapter_count )); then end="${chapter_times[$((i+1))]}"; else end="$total_duration"; fi
+		is_numeric "$start" && is_numeric "$end" || { echo "1"; return; }
+		local d=$(echo "$end - $start" | bc 2>/dev/null)
+		is_numeric "$d" || { echo "1"; return; }
+		durations+=("$d")
+	done
 
-    # Validate total duration
-    if ! [[ "$total_duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-	    echo "1"
-	    return
-    fi
+	local best_grouping=1 best_sd="" grouping
+	for grouping in 1 2 3 4 5 6; do
+		local full_eps=$(( chapter_count / grouping ))
+		# Need at least two full episodes to judge uniformity meaningfully
+		(( full_eps < 2 )) && continue
 
-    # Calculate duration of each chapter
-    local durations=()
-    for ((i=0; i<chapter_count; i=i+1)); do
-	    local start="${chapter_times[$i]}"
-	    local end
-	    if [[ $((i + 1)) -lt $chapter_count ]]; then
-	    end="${chapter_times[$((i + 1))]}"
-    else
-    end="$total_duration"
-	    fi
-
-	# Validate start and end are numbers
-	if ! [[ "$start" =~ ^[0-9]+\.?[0-9]*$ ]] || ! [[ "$end" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-		echo "1"
-		return
-	fi
-
-	local duration=$(echo "$end - $start" | bc 2>/dev/null)
-	if [[ -z "$duration" ]] || ! [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-		echo "1"
-		return
-	fi
-	durations+=("$duration")
-done
-
-    # Try different groupings (1-6 chapters per episode)
-    local best_grouping=1
-    local best_stddev=999999
-
-    for grouping in 1 2 3 4 5 6; do
-	    # Check if grouping divides evenly
-	    if [[ $((chapter_count % grouping)) -ne 0 ]]; then
-		    continue
-	    fi
-
-	# Calculate episode durations for this grouping
-	local episode_durations=()
-	for ((ep=0; ep<chapter_count; ep=ep+grouping)); do
-		local ep_duration=0
-		for ((ch=0; ch<grouping; ch=ch+1)); do
-			local idx=$((ep + ch))
-			if [[ $idx -lt ${#durations[@]} ]]; then
-				ep_duration=$(echo "$ep_duration + ${durations[$idx]}" | bc 2>/dev/null)
-			fi
+		# Sum each full episode's chapter durations
+		local epd=() ep ch
+		for ((ep=0; ep<full_eps; ep++)); do
+			local sum=0
+			for ((ch=0; ch<grouping; ch++)); do
+				sum=$(echo "$sum + ${durations[$((ep*grouping+ch))]}" | bc 2>/dev/null)
+			done
+			epd+=("$sum")
 		done
-		episode_durations+=("$ep_duration")
+
+		# Mean episode length, gated to a sane 15-35 min window
+		local tot=0 d
+		for d in "${epd[@]}"; do tot=$(echo "$tot + $d" | bc 2>/dev/null); done
+		local mean=$(echo "scale=3; $tot / ${#epd[@]}" | bc -l 2>/dev/null)
+		is_numeric "$mean" || continue
+		local mean_int=$(printf "%.0f" "$mean" 2>/dev/null)
+		{ [[ -z "$mean_int" ]] || (( mean_int < 900 )) || (( mean_int > 2100 )); } && continue
+
+		# Standard deviation of full-episode durations
+		local var=0 diff sq
+		for d in "${epd[@]}"; do
+			diff=$(echo "scale=3; $d - $mean" | bc 2>/dev/null)
+			sq=$(echo "scale=3; $diff * $diff" | bc 2>/dev/null)
+			var=$(echo "scale=3; $var + $sq" | bc 2>/dev/null)
+		done
+		var=$(echo "scale=3; $var / ${#epd[@]}" | bc -l 2>/dev/null)
+		local stddev=$(echo "scale=3; sqrt($var)" | bc -l 2>/dev/null)
+		is_numeric "$stddev" || continue
+
+		# Lowest stddev wins; compare as integer milliseconds to avoid bc float compares
+		local sd_milli=$(echo "$stddev * 1000 / 1" | bc 2>/dev/null)
+		is_numeric "$sd_milli" || continue
+		if [[ -z "$best_sd" ]] || (( sd_milli < best_sd )); then
+			best_sd=$sd_milli
+			best_grouping=$grouping
+		fi
 	done
 
-	# Calculate mean
-	local sum=0
-	for dur in "${episode_durations[@]}"; do
-		sum=$(echo "$sum + $dur" | bc 2>/dev/null)
-	done
-	local mean=$(echo "scale=2; $sum / ${#episode_durations[@]}" | bc -l 2>/dev/null)
-
-	# Validate mean
-	if [[ -z "$mean" ]] || ! [[ "$mean" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-		continue
-	fi
-
-	# Calculate standard deviation
-	local variance=0
-	for dur in "${episode_durations[@]}"; do
-		local diff=$(echo "scale=2; $dur - $mean" | bc 2>/dev/null)
-		local sq=$(echo "scale=2; $diff * $diff" | bc 2>/dev/null)
-		variance=$(echo "scale=2; $variance + $sq" | bc 2>/dev/null)
-	done
-	variance=$(echo "scale=2; $variance / ${#episode_durations[@]}" | bc -l 2>/dev/null)
-
-	# Validate variance
-	if [[ -z "$variance" ]] || ! [[ "$variance" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-		continue
-	fi
-
-	local stddev=$(echo "scale=2; sqrt($variance)" | bc -l 2>/dev/null)
-
-	# Validate stddev
-	if [[ -z "$stddev" ]] || ! [[ "$stddev" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-		continue
-	fi
-
-	# Check if average episode length is reasonable (15-35 minutes = 900-2100 seconds)
-	local mean_int=$(printf "%.0f" "$mean" 2>/dev/null)
-	if [[ -z "$mean_int" ]] || [[ $mean_int -lt 900 ]] || [[ $mean_int -gt 2100 ]]; then
-		continue
-	fi
-
-	# Update best if this has lower standard deviation
-	local stddev_int=$(printf "%.0f" "$stddev" 2>/dev/null)
-	if [[ -n "$stddev_int" ]] && [[ $stddev_int -lt $best_stddev ]]; then
-		best_stddev=$stddev_int
-		best_grouping=$grouping
-	fi
-done
-
-echo "$best_grouping"
+	echo "$best_grouping"
 }
 
 # Infer content type from directory structure
@@ -3555,7 +3523,10 @@ else
 
 		    # Get chapter count
 		    chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]" || true)
-		    episode_count=$((chapter_count / chapters_per_ep))
+		    # Ceiling division so a short final episode (indivisible remainder,
+		    # e.g. a finale with fewer chapters) gets its own episode instead of
+		    # being silently dropped by integer truncation.
+		    episode_count=$(( (chapter_count + chapters_per_ep - 1) / chapters_per_ep ))
 		    echo "  File has $chapter_count chapters - will split into $episode_count episodes"
 
 		    # Extract disc number from directory name
@@ -3570,6 +3541,8 @@ else
 		    for ((ep=0; ep<episode_count; ep=ep+1)); do
 			    start_chapter=$((ep * chapters_per_ep))
 			    end_chapter=$((start_chapter + chapters_per_ep - 1))
+			    # Final episode absorbs any leftover chapters (short last episode)
+			    (( end_chapter > chapter_count - 1 )) && end_chapter=$((chapter_count - 1))
 			    ep_num=$((ep + 1))
 			    # Store: disc_num|disc_dir|episode_num|source_file|start_chapter|end_chapter
 			    episode_files+=("$file_disc_num|$file_dir|$ep_num|$source_file|$start_chapter|$end_chapter")
@@ -3704,13 +3677,17 @@ else
 
 			# Get chapter count
 			chapter_count=$(ffprobe -v quiet -show_chapters "$source_file" 2>/dev/null | grep -c "^\[CHAPTER\]" || true)
-			episode_count=$((chapter_count / chapters_per_ep))
+			# Ceiling division so a short final episode (indivisible remainder)
+			# gets its own episode instead of being dropped by truncation.
+			episode_count=$(( (chapter_count + chapters_per_ep - 1) / chapters_per_ep ))
 			echo "  File has $chapter_count chapters - will split into $episode_count episodes"
 
 			# Add each episode (group of chapters)
 			for ((ep=0; ep<episode_count; ep=ep+1)); do
 				start_chapter=$((ep * chapters_per_ep))
 				end_chapter=$((start_chapter + chapters_per_ep - 1))
+				# Final episode absorbs any leftover chapters (short last episode)
+				(( end_chapter > chapter_count - 1 )) && end_chapter=$((chapter_count - 1))
 				ep_num=$((ep + 1))
 				# Store: disc_num|disc_dir|episode_num|source_file|start_chapter|end_chapter
 				episode_files+=("$disc_number|$disc_dir|$ep_num|$source_file|$start_chapter|$end_chapter")
