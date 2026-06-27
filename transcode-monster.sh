@@ -2277,31 +2277,32 @@ should_split_by_chapters() {
 	local input="$1"
 	local content_type="$2"
 
-    # Get chapter count and duration
-    local chapter_count=$(ffprobe -v quiet -show_chapters "$input" 2>/dev/null | grep -c "^\[CHAPTER\]" || true)
-    local duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+	# Chapter count is the cheap pre-check
+	local chapter_count=$(ffprobe -v quiet -show_chapters "$input" 2>/dev/null | grep -c "^\[CHAPTER\]" || true)
+	[[ $chapter_count -gt 1 ]] || { echo "false"; return; }
 
-    # Clean duration value
-    duration=${duration//,/}
+	# A file is only split when its chapters actually mark episode boundaries.
+	# Rather than guess from file length (a single drama episode can run 70+
+	# minutes, while a multi-episode disc and a single episode can be the same
+	# size), require evidence: an explicit per-episode count, or a confident
+	# repeating episodic period from detect_chapters_per_episode (which returns
+	# "0" when the chapters are intra-episode scene markers). This is what keeps
+	# a long single episode with scene chapters from being shredded into scenes.
+	local has_grouping="false"
+	if [[ "$CHAPTERS_PER_EPISODE" != "auto" ]]; then
+		has_grouping="true"            # user specified the grouping explicitly
+	elif [[ "$(detect_chapters_per_episode "$input")" != "0" ]]; then
+		has_grouping="true"            # a real episodic period was detected
+	fi
+	[[ "$has_grouping" == "true" ]] || { echo "false"; return; }
 
-    # Check split mode
-    if [[ "$SPLIT_CHAPTERS" == "true" ]]; then
-	    # Force on - split if there are chapters
-	    if [[ $chapter_count -gt 0 ]]; then
-		    echo "true"
-		    return
-	    fi
-    elif [[ "$SPLIT_CHAPTERS" == "auto" ]]; then
-	    # Auto mode - only for series with files >60 minutes and multiple chapters
-	    if [[ "$content_type" == "series" ]] && [[ $chapter_count -gt 1 ]]; then
-		    if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$duration > 3600" | bc -l 2>/dev/null || echo 0) )); then
-			    echo "true"
-			    return
-		    fi
-	    fi
-    fi
+	if [[ "$SPLIT_CHAPTERS" == "true" ]]; then
+		echo "true"; return
+	elif [[ "$SPLIT_CHAPTERS" == "auto" ]]; then
+		[[ "$content_type" == "series" ]] && { echo "true"; return; }
+	fi
 
-    echo "false"
+	echo "false"
 }
 
 # Get chapter times for splitting
@@ -2333,20 +2334,20 @@ detect_chapters_per_episode() {
 
 	local chapter_times=($(get_chapter_times "$input"))
 	local chapter_count=${#chapter_times[@]}
-	[[ $chapter_count -eq 0 ]] && { echo "1"; return; }
+	[[ $chapter_count -eq 0 ]] && { echo "0"; return; }
 
 	local total_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
 	total_duration=${total_duration//,/}
-	is_numeric "$total_duration" || { echo "1"; return; }
+	is_numeric "$total_duration" || { echo "0"; return; }
 
 	# Per-chapter durations (last chapter runs to end of file)
 	local durations=() i
 	for ((i=0; i<chapter_count; i++)); do
 		local start="${chapter_times[$i]}" end
 		if (( i+1 < chapter_count )); then end="${chapter_times[$((i+1))]}"; else end="$total_duration"; fi
-		is_numeric "$start" && is_numeric "$end" || { echo "1"; return; }
+		is_numeric "$start" && is_numeric "$end" || { echo "0"; return; }
 		local d=$(echo "$end - $start" | bc 2>/dev/null)
-		is_numeric "$d" || { echo "1"; return; }
+		is_numeric "$d" || { echo "0"; return; }
 		durations+=("$d")
 	done
 
@@ -2378,9 +2379,8 @@ detect_chapters_per_episode() {
 				}
 			}')
 
-	# Smallest grouping at/below threshold wins (the base period, not a multiple);
-	# otherwise fall back to the most-repeating grouping for unusual sources.
-	local best_g="" best_score="" g score
+	# Smallest grouping at/below threshold wins (the base period, not a multiple).
+	local g score
 	while read -r g score; do
 		[[ -z "$g" ]] && continue
 		local ep_len_int
@@ -2389,13 +2389,12 @@ detect_chapters_per_episode() {
 		if awk -v s="$score" -v t="$thresh" 'BEGIN{exit !(s<=t)}'; then
 			echo "$g"; return
 		fi
-		if [[ -z "$best_score" ]] || awk -v s="$score" -v b="$best_score" 'BEGIN{exit !(s<b)}'; then
-			best_score="$score"; best_g="$g"
-		fi
 	done <<< "$scores"
 
-	[[ -n "$best_g" ]] && { echo "$best_g"; return; }
-	echo "1"
+	# No grouping repeats cleanly: the chapters are intra-episode scene markers,
+	# not episode boundaries (e.g. a single long drama episode with scene
+	# chapters). Signal "no episodic period" so the caller keeps the file whole.
+	echo "0"
 }
 
 # Infer content type from directory structure
