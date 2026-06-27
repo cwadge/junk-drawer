@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.8"
+SCRIPT_VERSION="1.17.9"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -106,8 +106,11 @@ DEFAULT_DETECT_INTERLACING="true"
 DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Force adaptive deinterlacing for mixed content
 DEFAULT_FORCE_DEINTERLACE="false"  # Force deinterlacing even on progressive content
 DEFAULT_DEINTERLACER="bwdif"  # bwdif (default - best for most content), nnedi (best for noisy/difficult sources), yadif
+DEFAULT_DEINTERLACE_RATE="auto"  # Output rate for the deinterlace path (telecined film is IVTC'd separately, so this only governs true interlaced video). auto = field-rate for NTSC-family video (60i→60p) and frame-rate for PAL/unknown (to avoid double-bobbing 25PsF film); field = always double-rate; frame = always single-rate
 DEFAULT_DETECT_CROP="true"
-DEFAULT_DETECT_PULLDOWN="auto"  # auto = SD only, true = force on, false = force off
+DEFAULT_DETECT_PULLDOWN="auto"  # auto = detect at any resolution (was SD-only), true = force on, false = force off
+DEFAULT_IVTC_MODE="adaptive"  # How to drop the pulldown-duplicated frames after inverse telecine. adaptive = mpdecimate + VFR output: drops only true duplicates, so cleanly-telecined film becomes 23.976 while interlaced-video/effects sections (common in anime OVAs) keep their unique frames at ~29.97 with no judder. fixed = classic decimate + 23.976 CFR: exact 1-in-5 drop, best for uniformly-telecined film and players that require constant frame rate, but judders on mixed-cadence sources
+DEFAULT_FIELDMATCH_MODE="pc_n"  # fieldmatch matching thoroughness. pc_n (default) tries the current+next field combinations plus a 5th-field check. pcn_ub additionally tries the previous-field (u/b) combinations — the most exhaustive matcher, which reconstructs more frames across cadence breaks (fewer orphans left for the deinterlacer) at a slightly higher risk of a bad match. Useful on mixed-cadence anime that fights pc_n
 DEFAULT_SPLIT_CHAPTERS="auto"  # auto = series files >60min, true = force on, false = force off
 DEFAULT_CHAPTERS_PER_EPISODE="auto"  # auto = detect optimal grouping, or specify number
 
@@ -262,8 +265,11 @@ DETECT_INTERLACING="${DETECT_INTERLACING:-$DEFAULT_DETECT_INTERLACING}"
 ADAPTIVE_DEINTERLACE="${ADAPTIVE_DEINTERLACE:-$DEFAULT_ADAPTIVE_DEINTERLACE}"
 FORCE_DEINTERLACE="${FORCE_DEINTERLACE:-$DEFAULT_FORCE_DEINTERLACE}"
 DEINTERLACER="${DEINTERLACER:-$DEFAULT_DEINTERLACER}"
+DEINTERLACE_RATE="${DEINTERLACE_RATE:-$DEFAULT_DEINTERLACE_RATE}"
 DETECT_CROP="${DETECT_CROP:-$DEFAULT_DETECT_CROP}"
 DETECT_PULLDOWN="${DETECT_PULLDOWN:-$DEFAULT_DETECT_PULLDOWN}"
+IVTC_MODE="${IVTC_MODE:-$DEFAULT_IVTC_MODE}"
+FIELDMATCH_MODE="${FIELDMATCH_MODE:-$DEFAULT_FIELDMATCH_MODE}"
 SPLIT_CHAPTERS="${SPLIT_CHAPTERS:-$DEFAULT_SPLIT_CHAPTERS}"
 CHAPTERS_PER_EPISODE="${CHAPTERS_PER_EPISODE:-$DEFAULT_CHAPTERS_PER_EPISODE}"
 
@@ -373,9 +379,23 @@ ${BOLDBLUE}VIDEO PROCESSING${RESET}
 			 ${CYAN}bwdif${RESET}  Bob weaver — best quality for most content
 			 ${CYAN}nnedi${RESET}  Neural network — best for noisy or difficult sources
 			 ${CYAN}yadif${RESET}  Yet another deinterlacer — fast and widely compatible
+  ${GREEN}--deinterlace-rate${RESET} ${YELLOW}RATE${RESET}  Output rate when deinterlacing true interlaced video
+			 ${CYAN}auto${RESET}   Field-rate for NTSC video (60i→60p), frame-rate for PAL/unknown
+			 ${CYAN}field${RESET}  Always double-rate (one frame per field — smoothest motion)
+			 ${CYAN}frame${RESET}  Always single-rate (one frame per frame — preserves source fps)
+			 Telecined film is inverse-telecined regardless of this setting.
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
-  ${GREEN}--force-ivtc${RESET}           Force inverse telecine on HD content
-			 (by default, only runs on SD content ≤576p)
+  ${GREEN}--force-ivtc${RESET}           Force inverse telecine on this content
+			 (auto mode now detects telecine at any resolution, including HD)
+  ${GREEN}--ivtc-mode${RESET} ${YELLOW}MODE${RESET}       How to drop pulldown duplicates after inverse telecine
+			 ${CYAN}adaptive${RESET} mpdecimate + VFR — keeps unique frames in mixed
+				  film/video sources (anime OVAs); no judder (default)
+			 ${CYAN}fixed${RESET}    decimate + 23.976 CFR — exact, best for uniform
+				  film and players that require constant frame rate
+  ${GREEN}--fieldmatch-mode${RESET} ${YELLOW}MODE${RESET} fieldmatch matching thoroughness during inverse telecine
+			 ${CYAN}pc_n${RESET}    current+next field combos + 5th-field check (default)
+			 ${CYAN}pcn_ub${RESET}  also tries previous-field combos — most exhaustive,
+				  fewer orphans on mixed-cadence anime, slight mismatch risk
   ${GREEN}--split-chapters${RESET}       Force chapter splitting for multi-episode files
   ${GREEN}--no-split-chapters${RESET}    Process file as a single video (no chapter splitting)
   ${GREEN}--chapters-per-episode${RESET} ${YELLOW}N${RESET}
@@ -703,75 +723,243 @@ resolve_unknown_episodes() {
 	echo -e "${YELLOW}  Notice: Could not parse episode number(s) from $unknown_count file(s) — using alphabetical sort order as fallback${RESET}"
 }
 
+# ─────────────────────────────────────────────────────────────────────────
+# Source metadata priors — cheap ffprobe reads that steer the heavier
+# frame-analysis passes below. Reading the nominal rate and field order up
+# front lets us skip work (already-progressive film) or route it correctly
+# (NTSC video vs PAL film) instead of inferring everything from idet alone.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Nominal frame rate as a decimal (e.g. 23.976, 25.000, 29.970). Echoes "0"
+# when it can't be determined.
+get_frame_rate() {
+	local input="$1"
+	local rate
+	rate=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d '[:space:],')
+
+	if [[ "$rate" =~ ^([0-9]+)/([0-9]+)$ ]]; then
+		local num="${BASH_REMATCH[1]}" den="${BASH_REMATCH[2]}"
+		[[ "$den" -eq 0 ]] && { echo "0"; return; }
+		echo "scale=3; $num/$den" | bc 2>/dev/null || echo "0"
+	elif [[ "$rate" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+		echo "$rate"
+	else
+		echo "0"
+	fi
+}
+
+# Classify the rate family: ntsc (29.97/30/59.94/60), pal (25/50),
+# film (23.976/24), or other. Drives both telecine candidacy and the
+# auto deinterlace-rate decision.
+classify_frame_rate() {
+	local rate="$1"
+	# bc echoes 1 when the comparison holds. Bands are deliberately loose to
+	# absorb 1000/1001 pulldown (29.970, 23.976, 59.940) and minor rounding.
+	if [[ "$(echo "$rate >= 23.5 && $rate <= 24.5" | bc 2>/dev/null)" == "1" ]]; then
+		echo "film"
+	elif [[ "$(echo "$rate >= 24.9 && $rate <= 25.1" | bc 2>/dev/null)" == "1" ]]; then
+		echo "pal"
+	elif [[ "$(echo "$rate >= 49.0 && $rate <= 50.1" | bc 2>/dev/null)" == "1" ]]; then
+		echo "pal"
+	elif [[ "$(echo "$rate >= 29.0 && $rate <= 30.1" | bc 2>/dev/null)" == "1" ]]; then
+		echo "ntsc"
+	elif [[ "$(echo "$rate >= 59.0 && $rate <= 60.1" | bc 2>/dev/null)" == "1" ]]; then
+		echo "ntsc"
+	else
+		echo "other"
+	fi
+}
+
+# Map the container's field-order metadata to a fieldmatch/deinterlace order.
+# Echoes "tff", "bff", or "" (unknown — caller falls back to its own default).
+get_field_order() {
+	local input="$1"
+	local fo
+	fo=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d '[:space:],')
+	case "$fo" in
+		tt|tb) echo "tff" ;;   # top field first / top coded first
+		bb|bt) echo "bff" ;;   # bottom field first / bottom coded first
+		*)     echo "" ;;       # progressive or unknown
+	esac
+}
+
+# Resolve the output rate for the deinterlace path: "field" (double-rate,
+# motion-preserving) or "frame" (single-rate). Honors an explicit
+# DEINTERLACE_RATE; in "auto" it uses the rate family — true NTSC interlaced
+# content is video (60i→60p), while PAL/unknown defaults to single-rate to
+# avoid double-bobbing 25PsF film that carries no 3:2 cadence for the IVTC
+# path to catch.
+resolve_deint_rate() {
+	local input="$1"
+	case "$DEINTERLACE_RATE" in
+		field|double) echo "field"; return ;;
+		frame|single) echo "frame"; return ;;
+	esac
+	# auto
+	local family
+	family=$(classify_frame_rate "$(get_frame_rate "$input")")
+	if [[ "$family" == "ntsc" ]]; then
+		echo "field"
+	else
+		echo "frame"
+	fi
+}
+
 # Detect if content is telecined (3:2 pulldown)
 detect_telecine() {
 	local input="$1"
 
-	echo "    → Analyzing 2000 frames for telecine patterns (3:2 pulldown)..." >&2
+	# Rate prior: 3:2 pulldown only exists in the NTSC family. Content already
+	# at film rate (23.976/24) is progressive film — nothing to inverse. PAL
+	# (25/50) uses 2:2, which has no repeated-field signature and is handled by
+	# the deinterlace path, not here. Skip the expensive scan when the rate
+	# rules telecine out — unless the user forced IVTC (--force-ivtc), in which
+	# case we still run the scan to catch sources whose rate tag lies. The
+	# repeated-field cadence test below remains the real gate either way, so a
+	# genuinely progressive forced source still returns "none".
+	local family
+	family=$(classify_frame_rate "$(get_frame_rate "$input")")
+	if [[ "$DETECT_PULLDOWN" != "true" && "$family" != "ntsc" ]]; then
+		echo "    → Frame-rate family '$family' is not an NTSC telecine candidate — skipping pulldown scan" >&2
+		echo "none"
+		return
+	fi
 
-    # Analyze field statistics - need more frames for accurate detection
-    local idet_output=$(ffmpeg -i "$input" -vf idet -frames:v 2000 -an -f null - 2>&1)
+	echo "    → Analyzing telecine cadence at 20%, 40%, 60%, and 80% through file..." >&2
 
-    # Get repeated field counts (key indicator of telecine)
-    local rep_top=$(echo "$idet_output" | grep "Repeated Fields:" | tail -1 | grep -oP 'Top:\s*\K[0-9]+' || echo "0")
-    local rep_bot=$(echo "$idet_output" | grep "Repeated Fields:" | tail -1 | grep -oP 'Bottom:\s*\K[0-9]+' || echo "0")
+	local duration
+	duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+	duration=${duration//,/}
+	if ! [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+		echo "none"
+		return
+	fi
 
-    # Get interlacing stats
-    local tff=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'TFF:\s*\K[0-9]+' || echo "0")
-    local bff=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'BFF:\s*\K[0-9]+' || echo "0")
-    local prog=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'Progressive:\s*\K[0-9]+' || echo "0")
+	# Sample the body of the file, not the head — opening logos and title
+	# cards are frequently progressive overlays or a different cadence than
+	# the feature, and scanning from frame 0 (the old behavior) gave the
+	# detector its least representative window.
+	local sample_points=("0.20" "0.40" "0.60" "0.80")
+	local total_rep=0 total_tff=0 total_bff=0 total_prog=0 samples_taken=0
 
-    # Clean values
-    rep_top=$(echo "$rep_top" | tr -d '[:space:]')
-    rep_bot=$(echo "$rep_bot" | tr -d '[:space:]')
-    tff=$(echo "$tff" | tr -d '[:space:]')
-    bff=$(echo "$bff" | tr -d '[:space:]')
-    prog=$(echo "$prog" | tr -d '[:space:]')
+	for pct in "${sample_points[@]}"; do
+		local seek_time
+		seek_time=$(echo "scale=2; $duration * $pct" | bc 2>/dev/null || echo "0")
+		[[ "$seek_time" =~ ^[0-9]+\.?[0-9]*$ ]] || continue
 
-    # Validate
-    if ! [[ "$tff" =~ ^[0-9]+$ ]] || ! [[ "$bff" =~ ^[0-9]+$ ]] || ! [[ "$prog" =~ ^[0-9]+$ ]]; then
-	    echo "none"
-	    return
-    fi
+		# 500 frames/point ≈ 100 full 3:2 cadences — plenty to see the pattern
+		local idet_output
+		idet_output=$(ffmpeg -ss "$seek_time" -i "$input" -vf idet -frames:v 500 -an -f null - 2>&1)
 
-    if ! [[ "$rep_top" =~ ^[0-9]+$ ]] || ! [[ "$rep_bot" =~ ^[0-9]+$ ]]; then
-	    rep_top=0
-	    rep_bot=0
-    fi
+		local rep_top rep_bot tff bff prog
+		rep_top=$(echo "$idet_output" | grep "Repeated Fields:" | tail -1 | grep -oP 'Top:\s*\K[0-9]+' || echo "0")
+		rep_bot=$(echo "$idet_output" | grep "Repeated Fields:" | tail -1 | grep -oP 'Bottom:\s*\K[0-9]+' || echo "0")
+		tff=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'TFF:\s*\K[0-9]+' || echo "0")
+		bff=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'BFF:\s*\K[0-9]+' || echo "0")
+		prog=$(echo "$idet_output" | grep "Multi frame detection:" | tail -1 | grep -oP 'Progressive:\s*\K[0-9]+' || echo "0")
 
-    local total=$((tff + bff + prog))
-    if [[ $total -eq 0 ]]; then
-	    echo "none"
-	    return
-    fi
+		rep_top=$(echo "$rep_top" | tr -d '[:space:]'); rep_bot=$(echo "$rep_bot" | tr -d '[:space:]')
+		tff=$(echo "$tff" | tr -d '[:space:]'); bff=$(echo "$bff" | tr -d '[:space:]'); prog=$(echo "$prog" | tr -d '[:space:]')
 
-    # In 3:2 pulldown, every 5 frames has 2 repeated fields (40% of frames)
-    local total_repeated=$((rep_top + rep_bot))
-    if [[ $total_repeated -gt 0 ]]; then
-	    local repeated_pct=$((total_repeated * 100 / total))
-	    echo "    → Repeated fields: ${repeated_pct}% (telecine threshold: >10%)" >&2
+		[[ "$tff" =~ ^[0-9]+$ ]] && [[ "$bff" =~ ^[0-9]+$ ]] && [[ "$prog" =~ ^[0-9]+$ ]] || continue
+		[[ "$rep_top" =~ ^[0-9]+$ ]] || rep_top=0
+		[[ "$rep_bot" =~ ^[0-9]+$ ]] || rep_bot=0
 
-	    # Calculate interlacing percentage
-	    local interlaced_count=$((tff + bff))
-	    local interlaced_pct=$((interlaced_count * 100 / total))
+		total_rep=$((total_rep + rep_top + rep_bot))
+		total_tff=$((total_tff + tff))
+		total_bff=$((total_bff + bff))
+		total_prog=$((total_prog + prog))
+		samples_taken=$((samples_taken + 1))
+	done
 
-	    # True telecine should have:
-	    # 1. Significant repeated fields (>10%)
-	    # 2. Mostly progressive content (interlaced <50%)
-	    # If heavily interlaced (>50%), it's probably just noisy interlaced content
-	    if [[ $repeated_pct -gt 10 ]]; then
-		    if [[ $interlaced_pct -lt 50 ]]; then
-			    echo "telecine"
-			    return
-		    else
-			    echo "    → High interlacing ($interlaced_pct%) suggests noisy interlaced source, not telecine" >&2
-		    fi
-	    fi
-    else
-	    echo "    → No repeated fields detected" >&2
-    fi
+	local total=$((total_tff + total_bff + total_prog))
+	if [[ $samples_taken -eq 0 || $total -eq 0 ]]; then
+		echo "none"
+		return
+	fi
 
-    echo "none"
+	local repeated_pct=$((total_rep * 100 / total))
+	local combed_pct=$(( (total_tff + total_bff) * 100 / total ))
+	echo "    → Repeated fields: ${repeated_pct}%, combed: ${combed_pct}% across ${samples_taken} sample(s)" >&2
+
+	# ── Decision ────────────────────────────────────────────────────────────
+	# Three tiers, because no single idet statistic separates all cases:
+	#
+	#   1. Strong repeat cadence (≥12%) → telecine outright. Clean live-action
+	#      3:2 repeats ~20% of frames; nothing else produces a sustained repeat
+	#      signature, so this is a safe fast-accept that skips the costly trial.
+	#
+	#   2. Weak repeats but real combing (combed ≥20%) → AMBIGUOUS. This is the
+	#      band that fooled the old detector: animation held on 2s/3s already has
+	#      many identical adjacent fields, which starves idet's repeat counter
+	#      (Bubblegum Crash measured ~3–7% repeats despite being textbook NTSC
+	#      telecine). The repeat ratio can't tell weak-cadence telecine from true
+	#      interlaced video — but a trial fieldmatch can: on telecine it
+	#      reconstructs the progressive frames and combing collapses to near
+	#      zero; on true video the fields have no match and combing stays high.
+	#      We verify rather than guess.
+	#
+	#   3. Otherwise → not telecine.
+	local fm_order
+	fm_order=$(get_field_order "$input"); fm_order="${fm_order:-tff}"
+
+	if [[ $repeated_pct -ge 12 ]]; then
+		echo "    → Strong repeat cadence — telecine" >&2
+		echo "telecine"
+		return
+	fi
+
+	if [[ $combed_pct -ge 20 ]]; then
+		echo "    → Ambiguous (weak repeats, heavy combing) — verifying with trial fieldmatch (order=${fm_order})..." >&2
+
+		local v_combed=0 v_total=0 v_samples=0
+		for pct in "${sample_points[@]}"; do
+			local seek_time
+			seek_time=$(echo "scale=2; $duration * $pct" | bc 2>/dev/null || echo "0")
+			[[ "$seek_time" =~ ^[0-9]+\.?[0-9]*$ ]] || continue
+
+			# Mirror the production IVTC matcher so the measurement reflects
+			# what the real chain would actually achieve, then idet the result.
+			local v_out
+			v_out=$(ffmpeg -ss "$seek_time" -i "$input" \
+				-vf "fieldmatch=order=${fm_order}:mode=pc_n:combmatch=full,idet" \
+				-frames:v 400 -an -f null - 2>&1)
+
+			local v_tff v_bff v_prog
+			v_tff=$(echo "$v_out" | grep "Multi frame detection:" | tail -1 | grep -oP 'TFF:\s*\K[0-9]+' || echo "0")
+			v_bff=$(echo "$v_out" | grep "Multi frame detection:" | tail -1 | grep -oP 'BFF:\s*\K[0-9]+' || echo "0")
+			v_prog=$(echo "$v_out" | grep "Multi frame detection:" | tail -1 | grep -oP 'Progressive:\s*\K[0-9]+' || echo "0")
+			v_tff=$(echo "$v_tff" | tr -d '[:space:]'); v_bff=$(echo "$v_bff" | tr -d '[:space:]'); v_prog=$(echo "$v_prog" | tr -d '[:space:]')
+
+			[[ "$v_tff" =~ ^[0-9]+$ ]] && [[ "$v_bff" =~ ^[0-9]+$ ]] && [[ "$v_prog" =~ ^[0-9]+$ ]] || continue
+			v_combed=$((v_combed + v_tff + v_bff))
+			v_total=$((v_total + v_tff + v_bff + v_prog))
+			v_samples=$((v_samples + 1))
+		done
+
+		if [[ $v_samples -gt 0 && $v_total -gt 0 ]]; then
+			local residual_pct=$((v_combed * 100 / v_total))
+			echo "    → Residual combing after fieldmatch: ${residual_pct}% (was ${combed_pct}%)" >&2
+			# Telecine if the matcher reconstructed nearly everything: low
+			# absolute residual AND a large relative collapse. True interlaced
+			# video can't satisfy both — its fields have no progressive frame to
+			# match back to, so combing barely moves.
+			local drop_floor=$(( combed_pct * 40 / 100 ))  # require ≥60% collapse
+			if [[ $residual_pct -le 8 && $residual_pct -le $drop_floor ]]; then
+				echo "    → Combing collapsed — telecine confirmed" >&2
+				echo "telecine"
+				return
+			fi
+			echo "    → Combing persists — true interlaced video, not telecine" >&2
+		else
+			echo "    → Trial fieldmatch produced no usable samples — treating as not telecine" >&2
+		fi
+		echo "none"
+		return
+	fi
+
+	echo "    → Insufficient combing/cadence for telecine" >&2
+	echo "none"
 }
 
 # Detect interlacing
@@ -863,24 +1051,35 @@ done
     echo "progressive"
 }
 
-# Apply deinterlacer based on DEINTERLACER setting and field order
+# Apply deinterlacer based on DEINTERLACER setting, field order, and rate
 # Returns the filter string to add to vf chain
+#   $1 field_order : "tff", "bff", or "auto"
+#   $2 rate        : "field" (double-rate, one frame per field) or
+#                    "frame" (single-rate, one frame per frame). Default frame.
 apply_deinterlacer() {
-	local field_order="$1"  # "tff", "bff", or "auto"
+	local field_order="$1"
+	local rate="${2:-frame}"
 	local filter=""
 
-	# Determine field parity
-	local field=""
-	local parity=""
+	# Field parity for bwdif/yadif (0=tff, 1=bff, -1=auto) and the matching
+	# nnedi field token. nnedi distinguishes rate in the token itself:
+	# t/b/a keep the frame count (single-rate); tf/bf/af emit one frame per
+	# field (double-rate). bwdif/yadif carry rate in mode (0=frame, 1=field).
+	local parity nnedi_field
 	if [[ "$field_order" == "tff" ]]; then
-		field="t"  # top field first for nnedi
-		parity="0"  # for bwdif/yadif
+		parity="0"; nnedi_field="t"
 	elif [[ "$field_order" == "bff" ]]; then
-		field="b"  # bottom field first for nnedi
-		parity="1"  # for bwdif/yadif
+		parity="1"; nnedi_field="b"
 	else
-		field="a"  # auto for nnedi
-		parity="-1"  # auto for bwdif/yadif
+		parity="-1"; nnedi_field="a"
+	fi
+
+	local mode
+	if [[ "$rate" == "field" ]]; then
+		mode="1"
+		[[ "$nnedi_field" != "a" ]] && nnedi_field="${nnedi_field}f" || nnedi_field="af"
+	else
+		mode="0"
 	fi
 
 	case "$DEINTERLACER" in
@@ -898,23 +1097,20 @@ apply_deinterlacer() {
 				echo "    Place in: $NNEDI_WEIGHTS_FILE" >&2
 				return 1
 			fi
-			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${field}"
-			echo "    Using nnedi deinterlacer (high quality, neural network)" >&2
+			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}"
+			echo "    Using nnedi deinterlacer (high quality, neural network, ${rate}-rate)" >&2
 			;;
 		bwdif)
-			# Use bwdif - mode=1 deinterlaces all frames (not adaptive)
-			filter="bwdif=mode=1:parity=$parity"
-			echo "    Using bwdif deinterlacer (bob weaver)" >&2
+			filter="bwdif=mode=${mode}:parity=$parity"
+			echo "    Using bwdif deinterlacer (bob weaver, ${rate}-rate)" >&2
 			;;
 		yadif)
-			# Use yadif - mode=1 deinterlaces all frames (not adaptive)
-			filter="yadif=mode=1:parity=$parity"
-			echo "    Using yadif deinterlacer" >&2
+			filter="yadif=mode=${mode}:parity=$parity"
+			echo "    Using yadif deinterlacer (${rate}-rate)" >&2
 			;;
 		auto|*)
-			# Use default deinterlacer (bwdif)
-			filter="bwdif=mode=1:parity=$parity"
-			echo "    Using bwdif deinterlacer (default)" >&2
+			filter="bwdif=mode=${mode}:parity=$parity"
+			echo "    Using bwdif deinterlacer (default, ${rate}-rate)" >&2
 			;;
 	esac
 
@@ -994,9 +1190,20 @@ done
     local x=$(echo "$best_crop" | cut -d: -f3)
     local y=$(echo "$best_crop" | cut -d: -f4)
 
-    # Round to nearest 16 pixels for encoder efficiency
+    # Round dimensions down to a multiple of 16 (encoder/VAAPI alignment).
     w=$((w - (w % 16)))
     h=$((h - (h % 16)))
+
+    # Force even offsets. Two reasons, both of which bite the downstream chain:
+    #   • 4:2:0 chroma is subsampled 2×2, so an odd x/y shifts chroma against
+    #     luma → colored fringing along the crop edges.
+    #   • An odd vertical offset swaps which line is the "top" field, inverting
+    #     parity for fieldmatch/yadif and leaving residual combing that
+    #     survives the whole pipeline.
+    # Rounding down is always in-bounds here because w/h were only shrunk, so
+    # the right/bottom edge can never exceed the source.
+    x=$((x - (x % 2)))
+    y=$((y - (y % 2)))
 
     # Get original dimensions
     local orig_w=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=width -of csv=p=0 "$input" | head -1)
@@ -1083,6 +1290,13 @@ build_vf() {
     local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$input" | head -1)
     height=${height//,/}
 
+    # Which frame-dropper to append after inverse telecine. mpdecimate drops
+    # only near-duplicate frames (adaptive, → VFR), decimate drops a fixed
+    # 1-in-5 (→ 23.976 CFR). The caller turns VFR on by detecting "mpdecimate"
+    # in the returned filter string. See IVTC_MODE for the tradeoff.
+    local ivtc_decimator="mpdecimate"
+    [[ "$IVTC_MODE" == "fixed" ]] && ivtc_decimator="decimate"
+
     # Display analysis phase message
     echo "  → Analyzing source content (crop, interlacing, telecine)..." >&2
 
@@ -1094,10 +1308,17 @@ build_vf() {
 	    fi
     fi
 
-    # For VAAPI, ensure dimensions are aligned to 16 pixels (HEVC requirement)
-    # This prevents green bar artifacts at edges
+    # For VAAPI, HEVC wants the coded surface aligned to 16 pixels. We compute
+    # the target here but DO NOT insert the alignment filter yet: it must land
+    # AFTER any inverse-telecine/deinterlace step. Scaling or trimming a frame
+    # that still has interlaced field structure combs it permanently. We also
+    # switched from scale-down to pad-up (see the deferred block below) so we
+    # never throw away picture rows — note 1080 is not a multiple of 16
+    # (67.5×16), so the old code was silently scaling nearly every 1080p source
+    # to 1072 and losing 8 rows.
+    local vaapi_need_align=false
+    local vaapi_aligned_width="" vaapi_aligned_height="" vaapi_src_width="" vaapi_src_height=""
     if [[ "$encoder_type" == "vaapi" ]]; then
-	    # Get current dimensions after crop
 	    local current_width current_height
 	    if [[ -n "$vf_cpu" && "$vf_cpu" =~ crop=([0-9]+):([0-9]+) ]]; then
 		    current_width="${BASH_REMATCH[1]}"
@@ -1109,15 +1330,13 @@ build_vf() {
 		    current_height=${current_height//,/}
 	    fi
 
-	    # Round down to nearest multiple of 16
-	    local aligned_width=$(( (current_width / 16) * 16 ))
-	    local aligned_height=$(( (current_height / 16) * 16 ))
-
-	    # Add scale filter if alignment is needed
-	    if [[ "$aligned_width" -ne "$current_width" || "$aligned_height" -ne "$current_height" ]]; then
-		    [[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-		    vf_cpu="${vf_cpu}scale=${aligned_width}:${aligned_height}"
-		    echo "    Aligning dimensions for VAAPI: ${current_width}x${current_height} → ${aligned_width}x${aligned_height}" >&2
+	    # Round UP to the next multiple of 16 — pad rather than crop.
+	    vaapi_aligned_width=$(( ( (current_width + 15) / 16 ) * 16 ))
+	    vaapi_aligned_height=$(( ( (current_height + 15) / 16 ) * 16 ))
+	    vaapi_src_width="$current_width"
+	    vaapi_src_height="$current_height"
+	    if [[ "$vaapi_aligned_width" -ne "$current_width" || "$vaapi_aligned_height" -ne "$current_height" ]]; then
+		    vaapi_need_align=true
 	    fi
     fi
 
@@ -1130,39 +1349,51 @@ build_vf() {
 	    # reliable and respects the user's DEINTERLACER setting.
 	    # ────────────────────────────────────────────────────────────
 
-	# Determine if we should check for telecine
+	# Determine if we should check for telecine. "auto" now scans at any
+	# resolution — the most common telecine in an archiving workflow is 1080i
+	# film off broadcast/Blu-ray, and the repeated-field cadence is just as
+	# reliable at HD as at SD. detect_telecine's own rate prior keeps it from
+	# firing on PAL or already-progressive film.
 	local should_check_telecine=false
 	if [[ "$DETECT_PULLDOWN" == "true" ]]; then
 		should_check_telecine=true
-	elif [[ "$DETECT_PULLDOWN" == "auto" && "$height" =~ ^[0-9]+$ && $height -le 576 ]]; then
+	elif [[ "$DETECT_PULLDOWN" == "auto" ]]; then
 		should_check_telecine=true
 	fi
 
-	# Check for telecine first (only on SD content by default)
+	# Field order for fieldmatch comes from the container when it's tagged,
+	# falling back to TFF (the near-universal NTSC telecine order).
+	local fm_order
+	fm_order=$(get_field_order "$input"); fm_order="${fm_order:-tff}"
+
+	# Check for telecine first
 	local telecine="none"
 	local skip_interlace=false
 	if [[ "$should_check_telecine" == "true" ]]; then
 		telecine=$(detect_telecine "$input")
 		if [[ "$telecine" == "telecine" ]]; then
-			# Telecine MUST be done on CPU (no GPU equivalent)
+			# Telecine MUST be done on CPU (no GPU equivalent). IVTC:
+			# fieldmatch reconstructs progressive frames, yadif with
+			# deint=interlaced cleans the orphans it can't match, the decimator
+			# drops the pulldown duplicates.
 			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-			# Use combmatch=full for aggressive combing detection
-			# Use yadif with deint=1 as safety net for orphaned interlaced frames
-			vf_cpu="${vf_cpu}fieldmatch=order=tff:mode=pc_n:combmatch=full,yadif=mode=0:parity=-1:deint=1,decimate"
-			echo "    Telecine detected - using CPU inverse telecine (will be slower)" >&2
+			vf_cpu="${vf_cpu}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,yadif=mode=0:parity=-1:deint=1,${ivtc_decimator}"
+			echo "    Telecine detected (order=${fm_order}) - CPU inverse telecine via ${ivtc_decimator} (will be slower)" >&2
 			skip_interlace=true
 		fi
 	fi
 
-	# Deinterlace on CPU before hwupload — deint=1 on yadif processes only
-	# interlaced frames, giving adaptive behavior for mixed content
+	# Deinterlace on CPU before hwupload. By the time we reach this branch,
+	# cadenced film has already been routed to IVTC above, so whatever remains
+	# flagged interlaced is treated as true video and gets the resolved rate.
 	if [[ "$ADAPTIVE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
 		vf_cpu="${vf_cpu}yadif=mode=0:parity=-1:deint=1"
 		echo "    Added adaptive CPU deinterlacer: yadif (interlaced frames only)" >&2
 	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-		local deint_filter=$(apply_deinterlacer "auto")
+		local deint_rate=$(resolve_deint_rate "$input")
+		local deint_filter=$(apply_deinterlacer "$fm_order" "$deint_rate")
 		if [[ -n "$deint_filter" ]]; then
 			vf_cpu="${vf_cpu}${deint_filter}"
 		fi
@@ -1171,50 +1402,47 @@ build_vf() {
 		echo "    Interlacing detected: $interlacing" >&2
 		if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
 			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-			local deint_filter=$(apply_deinterlacer "$interlacing")
+			local deint_rate=$(resolve_deint_rate "$input")
+			local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate")
 			if [[ -n "$deint_filter" ]]; then
 				vf_cpu="${vf_cpu}${deint_filter}"
 			fi
 		fi
 	fi
 
-	# Check if color space conversion is needed
+	# Apply the deferred VAAPI alignment now — AFTER field processing — as a
+	# pad so we never comb or discard rows. The pad sits at the bottom-right;
+	# the encoder's conformance window would otherwise be the "right" answer,
+	# but an explicit pad is predictable across ffmpeg/Mesa versions and the
+	# few added pixels cost nothing.
+	if [[ "$vaapi_need_align" == "true" ]]; then
+		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
+		vf_cpu="${vf_cpu}pad=${vaapi_aligned_width}:${vaapi_aligned_height}:0:0"
+		echo "    Aligning for VAAPI (pad): ${vaapi_src_width}x${vaapi_src_height} → ${vaapi_aligned_width}x${vaapi_aligned_height}" >&2
+	fi
+
+	# Color space handling
 	local colorspace_conversion=$(get_colorspace_conversion "$input" "$height")
 	if [[ "$colorspace_conversion" == "hdr" ]]; then
 		# HDR content detected - preserve metadata without conversion
 		echo "    HDR content detected - preserving color space metadata" >&2
-	elif [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
-		# Check if source has unknown/untagged color metadata
-		local source_primaries=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_primaries -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d ',' | xargs)
-
-		if [[ "$source_primaries" =~ ^(unknown|)$ ]]; then
-			# Source has unknown primaries - can't convert, only tag output
-			echo -e "${YELLOW}    WARNING: Source has unknown color primaries - cannot convert, will tag output only${RESET}" >&2
-			echo -e "${YELLOW}    Consider using --codec libx265 for better color handling${RESET}" >&2
+	elif [[ "$colorspace_conversion" == "bt709" || "$colorspace_conversion" == "bt601" ]]; then
+		# Source carries a legacy/mismatched tag — actually convert the pixels.
+		local cs_filter=""
+		if [[ "$colorspace_conversion" == "bt709" ]]; then
+			cs_filter="colorspace=space=bt709:primaries=bt709:trc=bt709:range=tv"
+			echo "    Converting color space to BT.709 (HD standard)" >&2
 		else
-			# Add colorspace filter before format conversion
-			local cs_filter=""
-			if [[ "$colorspace_conversion" == "bt709" ]]; then
-				cs_filter="colorspace=space=bt709:primaries=bt709:trc=bt709:range=tv"
-				echo "    Converting color space to BT.709 (HD standard)" >&2
-			elif [[ "$colorspace_conversion" == "bt601" ]]; then
-				cs_filter="colorspace=space=smpte170m:primaries=smpte170m:trc=smpte170m:range=tv"
-				echo "    Converting color space to BT.601 (SD standard)" >&2
-			fi
-			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-			vf_cpu="${vf_cpu}${cs_filter}"
+			cs_filter="colorspace=space=smpte170m:primaries=smpte170m:trc=smpte170m:range=tv"
+			echo "    Converting color space to BT.601 (SD standard)" >&2
 		fi
-	elif [[ "$colorspace_conversion" == "unsafe" ]]; then
-		# Warn if using hardware encoding with unknown color metadata
-		echo -e "${YELLOW}    WARNING: Unknown color space metadata - hardware encoding may produce artifacts${RESET}" >&2
-		echo -e "${YELLOW}    Consider using --codec libx265 or --colorspace to override${RESET}" >&2
-	elif [[ "$colorspace_conversion" == "none" ]]; then
-		# Check if source is SMPTE170M (which normally uses software encoding)
-		local source_colorspace=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$input" 2>/dev/null | head -1 | tr -d ',' | xargs)
-		if [[ "$source_colorspace" == "smpte170m" ]]; then
-			echo -e "${YELLOW}    WARNING: SMPTE170M with hardware encoding may produce color artifacts${RESET}" >&2
-			echo -e "${YELLOW}    Auto mode would use software encoding - consider --codec libx265${RESET}" >&2
-		fi
+		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
+		vf_cpu="${vf_cpu}${cs_filter}"
+	elif [[ "$colorspace_conversion" == "tag601" ]]; then
+		# Untagged SD — output tagged BT.601 in build_ffmpeg_command (no pixels touched)
+		echo "    Untagged source — tagging output as BT.601 (SD convention)" >&2
+	elif [[ "$colorspace_conversion" == "tag709" ]]; then
+		echo "    Untagged source — tagging output as BT.709 (HD convention)" >&2
 	fi
 
 	# Build complete filter chain: CPU processing → format → hwupload
@@ -1234,13 +1462,17 @@ else
 
 	vf="$vf_cpu"
 
-	# Determine if we should check for telecine
+	# Determine if we should check for telecine (auto = any resolution; see
+	# the VAAPI branch for the rationale)
 	local should_check_telecine=false
 	if [[ "$DETECT_PULLDOWN" == "true" ]]; then
 		should_check_telecine=true
-	elif [[ "$DETECT_PULLDOWN" == "auto" && "$height" =~ ^[0-9]+$ && $height -le 576 ]]; then
+	elif [[ "$DETECT_PULLDOWN" == "auto" ]]; then
 		should_check_telecine=true
 	fi
+
+	local fm_order
+	fm_order=$(get_field_order "$input"); fm_order="${fm_order:-tff}"
 
 	# Check for telecine first
 	local telecine="none"
@@ -1249,10 +1481,8 @@ else
 		telecine=$(detect_telecine "$input")
 		if [[ "$telecine" == "telecine" ]]; then
 			[[ -n "$vf" ]] && vf="$vf,"
-			# Use combmatch=full for aggressive combing detection
-			# Use yadif with deint=1 as safety net for orphaned interlaced frames
-			vf="${vf}fieldmatch=order=tff:mode=pc_n:combmatch=full,yadif=mode=0:parity=-1:deint=1,decimate"
-			echo "    Detected telecine - using fieldmatch+yadif+decimate for inverse telecine" >&2
+			vf="${vf}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,yadif=mode=0:parity=-1:deint=1,${ivtc_decimator}"
+			echo "    Detected telecine (order=${fm_order}) - inverse telecine via fieldmatch+yadif+${ivtc_decimator}" >&2
 			skip_interlace=true
 		fi
 	fi
@@ -1266,7 +1496,8 @@ else
 	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		# Force deinterlacing without detection
 		[[ -n "$vf" ]] && vf="$vf,"
-		local deint_filter=$(apply_deinterlacer "auto")
+		local deint_rate=$(resolve_deint_rate "$input")
+		local deint_filter=$(apply_deinterlacer "$fm_order" "$deint_rate")
 		if [[ -n "$deint_filter" ]]; then
 			vf="${vf}${deint_filter}"
 		fi
@@ -1277,7 +1508,8 @@ else
 	    # Add deinterlacer if interlacing detected
 	    if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
 		    [[ -n "$vf" ]] && vf="$vf,"
-		    local deint_filter=$(apply_deinterlacer "$interlacing")
+		    local deint_rate=$(resolve_deint_rate "$input")
+		    local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate")
 		    if [[ -n "$deint_filter" ]]; then
 			    vf="${vf}${deint_filter}"
 		    fi
@@ -1290,7 +1522,7 @@ else
 	if [[ "$colorspace_conversion" == "hdr" ]]; then
 		# HDR content detected - preserve metadata without conversion
 		echo "    HDR content detected - preserving color space metadata" >&2
-	elif [[ "$colorspace_conversion" != "none" && "$colorspace_conversion" != "unsafe" ]]; then
+	elif [[ "$colorspace_conversion" == "bt709" || "$colorspace_conversion" == "bt601" ]]; then
 		# Add colorspace filter
 		local cs_filter=""
 		if [[ "$colorspace_conversion" == "bt709" ]]; then
@@ -1302,8 +1534,12 @@ else
 		fi
 		[[ -n "$vf" ]] && vf="$vf,"
 		vf="${vf}${cs_filter}"
+	elif [[ "$colorspace_conversion" == "tag601" ]]; then
+		echo "    Untagged source — tagging output as BT.601 (SD convention)" >&2
+	elif [[ "$colorspace_conversion" == "tag709" ]]; then
+		echo "    Untagged source — tagging output as BT.709 (HD convention)" >&2
 	elif [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
-		# Fallback for SD content when no conversion needed but want to ensure proper matrix
+		# Tagged SD with a compatible space: keep the matrix intact across the encode
 		[[ -n "$vf" ]] && vf="$vf,"
 		vf="${vf}scale=in_color_matrix=bt601:out_color_matrix=bt601:flags=lanczos"
 		echo "    Applied bt601 color matrix preservation" >&2
@@ -1529,14 +1765,18 @@ find_bd_m2ts_files() {
 }
 
 # Determine color space conversion strategy for hardware encoding
-# Returns: "none" | "bt601" | "bt709" | "unsafe"
-# - none: No conversion needed, color space already compatible
-# - bt601: Convert to BT.601 (for SD content)
-# - bt709: Convert to BT.709 (for HD content)
-# - unsafe: Unknown color space, cannot safely convert
+# Returns: "none" | "bt601" | "bt709" | "tag601" | "tag709" | "hdr"
+# - none:   No conversion needed, color space already compatible
+# - bt601:  Convert pixels to BT.601 (tagged SD with a mismatched space)
+# - bt709:  Convert pixels to BT.709 (tagged HD with a mismatched space)
+# - tag601: Untagged SD — no conversion, tag output BT.601 by convention
+# - tag709: Untagged HD — no conversion, tag output BT.709 by convention
+# - hdr:    HDR/wide-gamut — preserve metadata, no conversion
 get_colorspace_conversion() {
 	local source_file="$1"
 	local height="$2"
+	local quiet="${3:-}"  # "quiet" suppresses the advisory warnings (for the
+	# second, decision-only call in build_ffmpeg_command)
 
 	# Check for manual override
 	if [[ "$COLORSPACE" != "auto" ]]; then
@@ -1553,7 +1793,7 @@ get_colorspace_conversion() {
 				;;
 			*)
 				# Invalid value, fall through to auto detection
-				echo "    Warning: Invalid COLORSPACE value '$COLORSPACE', using auto detection" >&2
+				[[ "$quiet" != "quiet" ]] && echo "    Warning: Invalid COLORSPACE value '$COLORSPACE', using auto detection" >&2
 				;;
 		esac
 	fi
@@ -1565,7 +1805,7 @@ get_colorspace_conversion() {
 
 	# Check for Dolby Vision - cannot be preserved during transcoding
 	local has_dolby_vision=$(ffprobe -v quiet -select_streams v:0 -show_entries stream_side_data=side_data_type -of csv=p=0 "$source_file" 2>/dev/null | grep -i "DOVI configuration record" || true)
-	if [[ -n "$has_dolby_vision" ]]; then
+	if [[ -n "$has_dolby_vision" && "$quiet" != "quiet" ]]; then
 		echo -e "${YELLOW}    WARNING: Dolby Vision detected - will be stripped during transcoding${RESET}" >&2
 		echo -e "${YELLOW}    Only HDR10 base layer will be preserved (colors may appear washed out)${RESET}" >&2
 		echo -e "${YELLOW}    Consider keeping the original file for Dolby Vision playback${RESET}" >&2
@@ -1584,9 +1824,17 @@ get_colorspace_conversion() {
 		return
 	fi
 
-	# If ANY color metadata is completely unknown or missing, it's unsafe to convert
+	# Untagged or partly-tagged source: there's nothing reliable to convert
+	# FROM, so we don't run a conversion — but the output should still declare a
+	# color space by convention (SD is BT.601, HD is BT.709). This is lossless
+	# VUI metadata and replaces the old "unsafe" path, which could only warn.
+	# SD DVDs in particular are BT.601 but almost always ship untagged.
 	if [[ "$color_space" =~ ^(unknown|)$ ]] || [[ "$color_transfer" =~ ^(unknown|)$ ]] || [[ "$color_primaries" =~ ^(unknown|)$ ]]; then
-		echo "unsafe"
+		if [[ "$height" =~ ^[0-9]+$ ]] && [[ $height -le 576 ]]; then
+			echo "tag601"
+		else
+			echo "tag709"
+		fi
 		return
 	fi
 
@@ -1651,7 +1899,6 @@ should_use_software_encoder() {
 	local bit_depth=$(detect_bit_depth "$source_file")
 	local pix_fmt=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=pix_fmt -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
 	local source_codec=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
-	local height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" 2>/dev/null | head -1 | tr -d ',')
 
 	# ─── HARD BLOCKERS: Will definitely produce artifacts ───
 
@@ -1687,50 +1934,24 @@ should_use_software_encoder() {
 		return
 	fi
 
-	# SMPTE170M color space causes artifacts with VAAPI hardware encoding
-	# Even with conversion attempts, hardware encoders don't handle it reliably
-	# Software encoding handles SMPTE170M correctly
-	local color_space=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=color_space -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',' | xargs)
-	if [[ "$color_space" == "smpte170m" ]]; then
-		echo "libx265"
-		return
-	fi
-
-	# Check color space conversion capability
-	# If "unsafe", we cannot reliably convert, so use software encoding
-	local colorspace_conversion=$(get_colorspace_conversion "$source_file" "$height")
-	if [[ "$colorspace_conversion" == "unsafe" ]]; then
-		echo "libx265"
-		return
-	fi
-
-	# If we reach here and need color space conversion (not "none"), we can safely
-	# convert and still use hardware encoding
-
-	# ─── SOFT INDICATORS: Correlate with problems but not guaranteed ───
-
-	local software_score=0
-	local field_order=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=field_order -of csv=p=0 "$source_file" 2>/dev/null | tr -d ',')
-
-	# Interlaced content (VAAPI can handle it, but software has better deinterlacing options)
-	# Software encoding gives us more control over field processing
-	if [[ "$field_order" != "progressive" && "$field_order" != "unknown" ]]; then
-		((software_score+=3))
-	fi
-
-	# Old codecs (correlation with problematic content)
-	# These codecs often appear with other characteristics that cause issues
-	if [[ "$source_codec" =~ ^(mpeg2video|mpeg1video|mpeg4)$ ]]; then
-		((software_score+=2))
-	fi
-
-	# Use software if multiple indicators present (score >= 4)
-	# This requires either 2 strong indicators or 1 strong + 1 moderate
-	if [[ $software_score -ge 4 ]]; then
-		echo "libx265"
-	else
-		echo "hevc_vaapi"
-	fi
+	# ─── Everything below the hard blockers encodes in hardware ───
+	#
+	# Earlier versions also routed SD BT.601 (tagged smpte170m or untagged) and
+	# interlaced content to software. Both rationales have since dissolved:
+	#   • Color: the "VAAPI mangles BT.601" artifacts were really matrix
+	#     mistagging — the bitstream signaling BT.709 on SD so players applied
+	#     the wrong matrix. build_ffmpeg_command now tags the output BT.601
+	#     explicitly, so the encoder isn't guessing and the colors are correct.
+	#   • Interlacing: the VAAPI path deinterlaces/inverse-telecines on the CPU
+	#     (bwdif/nnedi/fieldmatch) before hwupload, so it uses the exact same
+	#     field processing software encoding would — there's no quality argument
+	#     left for the detour.
+	#
+	# Hardware HEVC is several times faster at a fraction of the power (SD runs
+	# into the thousands of fps), and libx265's marginally smaller file at equal
+	# quality doesn't justify the time and wattage for most content. So once a
+	# clip clears the genuine capability blockers above, it encodes in hardware.
+	echo "hevc_vaapi"
 }
 
 # Get appropriate bitrate for audio track based on channel count
@@ -2688,7 +2909,23 @@ build_ffmpeg_command() {
     [[ -n "$audio_opts" ]] && read -ra audio_arr <<< "$audio_opts"
     [[ -n "$sub_opts" ]] && read -ra subs_arr <<< "$sub_opts"
 
-    FFMPEG_CMD=("${prefix_arr[@]}" ffmpeg -hide_banner -loglevel "$FFMPEG_LOGLEVEL" -stats)
+    # fieldmatch logs a per-frame "still interlaced" warning for every frame it
+    # can't match. Those are harmless here — the yadif cleanup handles them
+    # downstream — but on mixed-cadence anime they flood thousands of lines and
+    # bury the script's own output (and the matroska muxer adds VFR "new
+    # cluster" chatter on top). Drop the encode to error level to mute the
+    # benign noise; -stats still draws the live progress bar and genuine errors
+    # still surface. An explicitly verbose FFMPEG_LOGLEVEL is respected so
+    # debugging sessions keep the full firehose.
+    local encode_loglevel="$FFMPEG_LOGLEVEL"
+    if [[ "$vf" == *fieldmatch* ]]; then
+	    case "$FFMPEG_LOGLEVEL" in
+		    verbose|debug|trace) : ;;
+		    *) encode_loglevel="error" ;;
+	    esac
+    fi
+
+    FFMPEG_CMD=("${prefix_arr[@]}" ffmpeg -hide_banner -loglevel "$encode_loglevel" -stats)
     FFMPEG_CMD+=(-analyzeduration "$FFMPEG_ANALYZEDURATION" -probesize "$FFMPEG_PROBESIZE")
     FFMPEG_CMD+=("${input_arr[@]}" -i "$source_file" -map 0:v:0)
     FFMPEG_CMD+=("${audio_arr[@]}" "${subs_arr[@]}")
@@ -2714,6 +2951,34 @@ build_ffmpeg_command() {
 	    FFMPEG_CMD+=(-crf "$QUALITY" -pix_fmt "$pix_fmt")
 	    [[ -n "$vf" ]] && FFMPEG_CMD+=(-vf "$vf")
 	    FFMPEG_CMD+=(-x265-params "$x265_params")
+    fi
+
+    # mpdecimate (adaptive IVTC) yields variable frame durations: pulldown
+    # duplicates are dropped in film sections while unique frames survive in
+    # interlaced-video/effects sections. Emit VFR so survivors keep their own
+    # timestamps; forcing CFR here would re-pad to a constant rate and put back
+    # exactly the judder mpdecimate removed. Keyed off the filter string so we
+    # don't depend on a flag leaking out of build_vf's command substitution.
+    if [[ "$COPY_ONLY" != "true" && "$vf" == *mpdecimate* ]]; then
+	    FFMPEG_CMD+=(-fps_mode vfr)
+    fi
+
+    # Tag output color for sources we resolved by convention (untagged SD→BT.601,
+    # untagged HD→BT.709). Pure VUI metadata, no pixel conversion — SD DVDs are
+    # BT.601 but ship untagged, so this declares it instead of warning. Sources
+    # that were genuinely converted (bt601/bt709) already got tagged by the
+    # colorspace filter, so they don't match here. Decision-only call, hence quiet.
+    if [[ "$COPY_ONLY" != "true" ]]; then
+	    local cs_decision=$(get_colorspace_conversion "$source_file" "$height" quiet)
+	    if [[ "$cs_decision" == "tag601" ]]; then
+		    if [[ "$height" =~ ^[0-9]+$ && $height -gt 480 ]]; then
+			    FFMPEG_CMD+=(-colorspace bt470bg -color_primaries bt470bg -color_trc smpte170m)
+		    else
+			    FFMPEG_CMD+=(-colorspace smpte170m -color_primaries smpte170m -color_trc smpte170m)
+		    fi
+	    elif [[ "$cs_decision" == "tag709" ]]; then
+		    FFMPEG_CMD+=(-colorspace bt709 -color_primaries bt709 -color_trc bt709)
+	    fi
     fi
 
     FFMPEG_CMD+=(-map_chapters 0 -f "$CONTAINER" "$output_file" -y)
@@ -2800,6 +3065,10 @@ while [[ $# -gt 0 ]]; do
 			DEINTERLACER="$2"
 			shift 2
 			;;
+		--deinterlace-rate)
+			DEINTERLACE_RATE="$2"
+			shift 2
+			;;
 		--no-pulldown)
 			DETECT_PULLDOWN="false"
 			shift
@@ -2807,6 +3076,14 @@ while [[ $# -gt 0 ]]; do
 		--force-ivtc)
 			DETECT_PULLDOWN="true"
 			shift
+			;;
+		--ivtc-mode)
+			IVTC_MODE="$2"
+			shift 2
+			;;
+		--fieldmatch-mode)
+			FIELDMATCH_MODE="$2"
+			shift 2
 			;;
 		--split-chapters)
 			SPLIT_CHAPTERS="true"
@@ -3065,7 +3342,10 @@ else
 	echo -e "${BOLD}Crop:${RESET}         $DETECT_CROP"
 	echo -e "${BOLD}Deinterlace:${RESET}  $DETECT_INTERLACING"
 	[[ "$ADAPTIVE_DEINTERLACE" == "true" ]] && echo -e "${BOLD}Adaptive:${RESET}     $ADAPTIVE_DEINTERLACE"
+	echo -e "${BOLD}Deint rate:${RESET}   $DEINTERLACE_RATE"
 	echo -e "${BOLD}Pulldown:${RESET}     $DETECT_PULLDOWN"
+	echo -e "${BOLD}IVTC mode:${RESET}    $IVTC_MODE"
+	[[ "$FIELDMATCH_MODE" != "pc_n" ]] && echo -e "${BOLD}Fieldmatch:${RESET}   $FIELDMATCH_MODE"
 fi
 echo -e "${BOLD}Split Chapters:${RESET} $SPLIT_CHAPTERS"
 [[ "$DRY_RUN" == true ]] && echo -e "${YELLOW}Mode:         DRY RUN${RESET}"

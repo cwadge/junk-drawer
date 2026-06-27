@@ -1,70 +1,930 @@
-# Junk Drawer
-A collection of miscellaneous resources for Linux gaming and system tasks. Many of these are low-effort and largely unpolished, but I found them useful, so you might also.
+# Transcode Monster
 
-## Scripts
-| Category | Script | Description |
-|----------|--------|-------------|
-| Emulation | [network_tune_batocera](network_tune_batocera) | Sets custom network interface parameters (e.g., MTU, speed) at Batocera startup |
-| Emulation | [nfs_mount_batocera](nfs_mount_batocera) | Mounts NFS exports locally as a client on Batocera Linux, e.g. for Kodi |
-| Emulation | [disc-crusher.sh](disc-crusher.sh) | Compresses DVD or CD-ROM-based console images to CHD, auto-creates M3U for multi-disc games |
-| Utility | [dirloot.sh](dirloot.sh) | Download files matching a glob pattern from an HTML directory index with smart resumption |
-| Utility | [kea-show-leases.sh](kea-show-leases.sh) | Display active Kea DHCP lease records (v4, v6, or both) with human-readable output |
-| Utility | [net-core-status.sh](net-core-status.sh) | Monitors the status of `unbound`, `kea`, and `chrony` on a core network services box |
-| Utility | [fs-status.sh](fs-status.sh) | Monitors the status of ZFS, `mdadm`, storage devices, volumes, networks, NFS and Samba |
-| Multimedia | [midi2wav.sh](midi2wav.sh) | Convert MIDI file(s) to digital audio like WAV, FLAC, AAC or MP3 |
-| Multimedia | [pipewire_tuning_guide.md](pipewire_tuning_guide.md) | Quick & dirty guide to setting up low-latency, multi-rate PipeWire |
-| Multimedia | [sonicsqueezer.sh](sonicsqueezer.sh) | A multi-threaded audio converter for WAV and FLAC to MP3, AAC, OGG, and more | 
-| Multimedia | [transcode-monster.sh](transcode-monster.sh) | Transcode single titles (movies) or series to H.265 with hardware accelleration ([README](transcode-monster.md)) |
-| Multimedia | [yt-music-dl.sh](yt-music-dl.sh) | Download purchased YouTube Music content with the correct structure |
+A universal video transcoding script with intelligent automatic detection for series and movies. Designed for archiving DVD and Blu-ray collections with optimal quality and minimal manual intervention.
 
-## Installation
-Clone the whole repo:
+## Design Goals
+- "Do the right thing" 90% of the time
+    * The majority of use cases, the user should be able to simply point the script at a directory containing source media
+- Simple workflow
+    * Transcoding entire multi-disc series so you can stream them on your home media devices shouldn't involve hand tailoring your encoder for each of 100+ files
+- High-quality results
+    * The default product should be compressed but otherwise archival-grade, with transparent video, pass-through of primary audio for use with home theater / audio receivers, and transparent secondary & tertiary audio tracks
+
+## Features
+
+- **Automatic detection**: Series vs movies, interlacing, telecine (3:2 pulldown), crop borders
+- **HDR support**: Detects and preserves HDR10, HLG, and BT.2020 content automatically
+- **Bulk movie processing**: Process multiple movies in one directory without manual intervention
+- **Hybrid encoding**: Stays on hardware (VAAPI) for speed and only falls back to software (x265) when the hardware genuinely can't handle the source
+- **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, with multiple filter options and adaptive handling for mixed film/video sources
+- **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence rather than guessing from combing alone
+- **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD), and tags untagged sources with the correct standard so players don't guess
+- **Multi-episode files**: Automatically splits by chapters for disc rips with multiple episodes
+- **Audio/subtitle management**: Language filtering, format conversion, disposition handling
+- **Copy-only (remux) mode**: Restructure track selection, dispositions, and naming without re-encoding, for sources that are already well-encoded but badly mastered or named
+- **Configurable**: Config file + CLI arguments for full control
+
+## Dependencies
+- `bash` - The script is written in bash for simplicity, and we use its built-in error handling
+- `bc` - For doing advanced things like automatically calculating whether or not a series is broken up by chapter or by file
+- `ffmpeg` - The latest version available to you, e.g. with a rolling distro like `arch` or utilizing the [deb-multimedia](https://www.deb-multimedia.org/) repository for Debian.
+- `VA-API`_(optional)_ -  Use your GPU to give you a massive encoding speedup (usually available through packages like `mesa-va-drivers` or `va-driver-all`)
+- Adequate permissions - The user you're leveraging for transcoding needs the correct privileges. Typically this means membership in the `video` or `render` group.
+
+## Quick Start
+
+### Basic Usage
+
+Transcode a TV series:
 ```bash
-git clone https://github.com/cwadge/junk-drawer.git
+transcode-monster.sh "/path/to/rips/Firefly/" "/path/to/output/Firefly/"
 ```
 
-or download an individual script:
+Transcode a movie:
 ```bash
-wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/set-rdna-oc-fan.sh
+transcode-monster.sh -t movie -n "Dune" -y 1984 "/path/to/rips/dune/" "/path/to/output/"
 ```
 
-You could also download & install with a one-liner:
+Process multiple movies:
 ```bash
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/dirloot.sh -O /usr/local/bin/dirloot.sh && sudo chmod 755 /usr/local/bin/dirloot.sh
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/disc-crusher.sh -O /usr/local/bin/disc-crusher.sh && sudo chmod 755 /usr/local/bin/disc-crusher.sh
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/midi2wav.sh -O /usr/local/bin/midi2wav.sh && sudo chmod 755 /usr/local/bin/midi2wav.sh
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/sonicsqueezer.sh -O /usr/local/bin/sonicsqueezer.sh && sudo chmod 755 /usr/local/bin/sonicsqueezer.sh
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/transcode-monster.sh -O /usr/local/bin/transcode-monster.sh && sudo chmod 755 /usr/local/bin/transcode-monster.sh
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/yt-music-dl.sh -O /usr/local/bin/yt-music-dl.sh && sudo chmod 755 /usr/local/bin/yt-music-dl.sh
+transcode-monster.sh --bulk-movies "/path/to/movies/rips/" "/path/to/output/"
 ```
 
-On Batocera:
+Overwrite existing files:
 ```bash
-mkdir /userdata/system/services/
-wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/network_tune_batocera -O /userdata/system/services/network_tune && chmod 755 /userdata/system/services/network_tune
-wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/nfs_mount_batocera -O /userdata/system/services/nfs_mount && chmod 755 /userdata/system/services/nfs_mount
+transcode-monster.sh -o "/path/to/source/" "/path/to/output/"
 ```
 
-On a core network services machine:
+### Installation
+
 ```bash
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/kea-show-leases.sh -O /usr/local/sbin/kea-show-leases.sh && sudo chmod 755 /usr/local/sbin/kea-show-leases.sh
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/net-core-status.sh -O /usr/local/bin/net-core-status.sh && sudo chmod 755 /usr/local/bin/net-core-status.sh
+# Copy to your PATH
+sudo cp transcode-monster.sh /usr/local/bin/
+sudo chmod +x /usr/local/bin/transcode-monster.sh
+
+# Verify installation
+transcode-monster.sh --version
 ```
 
-On a file server:
+### Configuration
+
+Create `~/.config/transcode-monster.conf` for persistent settings. Here is my own config for reference:
+
 ```bash
-sudo wget https://raw.githubusercontent.com/cwadge/junk-drawer/main/fs-status.sh -O /usr/local/bin/fs-status.sh && sudo chmod 755 /usr/local/bin/fs-status.sh
+# Max bframes for compression. Playback even works great on Raspberry Pi4
+# NOTE: Has no effect when VIDEO_CODEC="hevc_vaapi" on AMD GPUs, since B-frames
+# are unsupported in AMD HEVC hardware encoding across all VCN generations.
+# Only takes effect with libx265 (software encoding).
+BFRAMES="4"
+# Prefer the source media's native language over dubs in our default language.
+PREFER_ORIGINAL="true"
+# Default to hardware encoding, even if the source media has weird or missing color metadata. Fallback manually with the `-c libx265` flag.
+VIDEO_CODEC="hevc_vaapi"
 ```
 
-## Usage
-Navigate to the script's folder and run it with appropriate arguments. See each script's `--help` or inline comments for details.
+## Common Use Cases
 
-## Contributing
-The usual: you're welcome to fork, submit issues, PRs, etc.
+### UHD / HDR Content
+
+HDR content is automatically detected and preserved:
+
+```bash
+# HDR10, HLG, and BT.2020 are automatically detected
+transcode-monster.sh "/path/to/UHD/Ghost in the Shell/" "/output/"
+
+# Force HDR preservation if needed
+transcode-monster.sh --colorspace hdr "/path/to/source/" "/output/"
+```
+
+**Important: Dolby Vision Limitation**
+
+Dolby Vision **cannot be preserved** during transcoding. When re-encoding DV content:
+- The script will warn you that DV will be stripped
+- Only the HDR10 base layer is preserved
+- Colors may appear washed out compared to the original
+
+If you have Dolby Vision-capable playback (Apple TV 4K, LG OLED, etc.), consider keeping the original file rather than transcoding.
+
+### Bulk Movie Processing
+
+Process multiple movies in one directory:
+
+```bash
+# Process all movies in a directory
+transcode-monster.sh --bulk-movies "/path/to/movies/rips/" "/output/"
+
+# Example: Star Wars collection
+transcode-monster.sh --bulk-movies "/path/to/Star Wars/Laserdisc/" "/output/Movies/"
+# Outputs: Star Wars Episode 1 - The Phantom Menace.mkv, etc.
+```
+
+### Anime / Foreign Content
+
+Prefer original audio with English subtitles:
+
+```bash
+transcode-monster.sh --original-lang jpn "/path/to/Cowboy Bebop/" "/output/"
+```
+
+Telecined anime (especially OVAs that mix telecined film with true interlaced
+video/effects) is inverse-telecined automatically; the default `adaptive`
+`--ivtc-mode` keeps those video sections smooth. If a disc shows stray combing or
+fights detection, see [Telecine Detection Issues](#telecine-detection-issues).
+
+### Noisy Broadcast Sources
+
+Use nnedi deinterlacer for heavily compressed or noisy sources:
+
+```bash
+transcode-monster.sh --deinterlacer nnedi "/path/to/The Maxx/" "/output/"
+```
+
+### Film with Interlaced Elements
+
+Use adaptive deinterlacing for mixed progressive/interlaced content:
+
+```bash
+transcode-monster.sh --adaptive-deinterlace "/path/to/movie.mkv" "/output/"
+```
+
+### Custom Quality
+
+Adjust quality for different use cases:
+
+```bash
+# High quality archival (larger files)
+transcode-monster.sh -q 18 "/path/to/source/" "/output/"
+
+# Space-conscious (smaller files)
+transcode-monster.sh -q 24 "/path/to/source/" "/output/"
+```
+
+### Dry Run
+
+Preview what will be processed without encoding:
+
+```bash
+transcode-monster.sh -d "/path/to/source/" "/output/"
+```
+
+### Copy-Only (Remux) Mode
+
+When the source is already encoded the way you want it but is badly mastered or
+named, `--copy-only` (also available as `--remux`) keeps the video and audio
+streams byte-for-byte and only restructures the container: it selects the right
+audio and subtitle tracks, filters by language, sets the default/forced subtitle
+dispositions, maps chapters, and names the output exactly as a normal run would.
+
+```bash
+# Remux a badly-named series into clean Show - S01E01.mkv files, no re-encode
+transcode-monster.sh -t series -n "Darkwing Duck" --copy-only "/rips/darkwing/" "/output/"
+
+# Fix track selection/dispositions on a single film without touching quality
+transcode-monster.sh -t movie -n "Revolver" --copy-only "/rips/revolver.mkv" "/output/"
+```
+
+Because nothing is re-encoded, this runs at copy speed and is lossless. All the
+video-analysis steps (crop, interlacing, telecine, bit-depth, encoder choice)
+are skipped. Audio is copied as-is; a track is only converted when it genuinely
+cannot be muxed verbatim (for example `pcm_bluray`, which is remapped losslessly
+to FLAC). Subtitle text formats that the target container can't carry directly
+are converted losslessly, the same as in encode mode. Note that chapter-based
+episode splitting in copy mode cuts on the nearest keyframe rather than the exact
+frame, since the video isn't being re-encoded.
+
+## Understanding Automatic Detection
+
+### Interlacing Detection
+
+The script samples frames at multiple points to detect interlacing:
+
+- **Progressive**: 0-5% interlaced → No deinterlacing
+- **Interlaced**: >5% interlaced → Applies deinterlacer
+- **Threshold**: 5% ensures even partially interlaced content is handled
+
+### Telecine Detection (3:2 Pulldown)
+
+Telecine is checked at **any resolution** (not just SD), since HD broadcast and
+disc masters can be telecined too. Detection samples the cadence at four points
+(20%, 40%, 60%, 80% through the file) rather than trusting the opening frames,
+and decides in tiers:
+
+- **Strong repeated-field cadence** → accepted as telecine directly. A regular
+  pattern of repeated fields is the actual signature of 3:2 pulldown.
+- **Ambiguous** (heavy combing but a weak repeat signal) → the script runs a
+  *trial fieldmatch* and only confirms telecine if the residual combing
+  collapses. Real telecine inverts cleanly; genuinely interlaced video does not.
+  This is what stops noisy interlaced sources from being misread as film.
+- **NTSC rate prior**: detection favors the 29.97/23.976 rate family that 3:2
+  pulldown actually comes from, so PAL and native-progressive film aren't
+  dragged through an inverse-telecine they don't need (override with
+  `--force-ivtc`).
+
+When telecine is confirmed, the script inverse-telecines on the CPU
+(`fieldmatch` → `yadif` cleanup of the frames fieldmatch can't match → frame
+decimation), then hands the progressive result to the encoder.
+
+**Dropping the duplicates — `--ivtc-mode`:** after field matching, the pulldown
+duplicate frames have to go. Two strategies:
+
+- `adaptive` (default): `mpdecimate` + variable frame rate. Drops only true
+  duplicates, so cleanly-telecined film lands at 23.976 while interlaced
+  video/effects stretches (common in anime OVAs) keep their unique frames at
+  ~29.97 — no judder on mixed-cadence sources.
+- `fixed`: classic `decimate` + 23.976 CFR. Exact 1-in-5 drop, best for
+  uniformly-telecined film and players that need a constant frame rate, but it
+  judders on mixed-cadence material. It can also make residual combing in the
+  video sections *less* visible (every frame shows for the same duration instead
+  of lingering under VFR), so it's worth a try if a mixed disc shows stray combing.
+
+**Match thoroughness — `--fieldmatch-mode`:** `pc_n` (default) is the standard
+matcher. `pcn_ub` additionally tries the previous-field combinations — the most
+exhaustive search, which can reconstruct more frames across cadence breaks on
+difficult anime, at a slightly higher risk of a bad match. It's a per-disc
+experiment, not a clear upgrade; leave it on `pc_n` unless a specific source
+fights it.
+
+Override if needed:
+```bash
+# Force inverse telecine (any resolution), e.g. when the rate prior skips it
+transcode-monster.sh --force-ivtc "/path/to/source/"
+
+# Disable telecine detection entirely (treat as plain interlaced/progressive)
+transcode-monster.sh --no-pulldown "/path/to/source/"
+
+# Constant-frame-rate IVTC for uniformly telecined film
+transcode-monster.sh --ivtc-mode fixed "/path/to/source/"
+
+# Exhaustive matching for stubborn mixed-cadence anime
+transcode-monster.sh --fieldmatch-mode pcn_ub "/path/to/source/"
+```
+
+### Crop Detection
+
+Automatically detects and removes black bars:
+
+- Samples at 25%, 50%, 75% through file
+- Uses the least aggressive crop (preserves most content)
+- Rounds dimensions to 16-pixel boundaries for encoder efficiency
+- Forces crop **offsets** to even values, so chroma siting and field parity stay
+  correct on 4:2:0 sources (an odd offset would shift color planes or swap fields)
+
+Disable if needed:
+```bash
+transcode-monster.sh --no-crop "/path/to/source/"
+```
+
+## Deinterlacing Options
+
+Two different problems get two different treatments, chosen automatically:
+
+- **Telecined film** (3:2 pulldown) is *inverse-telecined* — the original
+  progressive frames are reconstructed and the duplicates dropped (see
+  [Telecine Detection](#telecine-detection-32-pulldown)). This is the right path
+  for film and most animation.
+- **True interlaced video** (camera-original 50i/60i) is *deinterlaced* with one
+  of the filters below, since there are no progressive frames to recover.
+
+The filter choice (`--deinterlacer`) and output rate (`--deinterlace-rate`) below
+govern the **deinterlace** path; telecined film is handled by `--ivtc-mode`.
+
+### When to Use Each Filter
+
+**bwdif (default)**:
+- Best for most content
+- Fast, sharp results
+- Good balance of quality and speed
+- Preserves fine details well
+
+**nnedi (neural network)**:
+- Best for noisy broadcast sources
+- Heavily compressed video with artifacts
+- Sources where bwdif leaves residual combing
+- Slower, but handles difficult content better
+
+**yadif**:
+- Fast, widely compatible
+- Good for quick previews
+- Slightly less quality than bwdif
+
+### Output Rate (`--deinterlace-rate`)
+
+Interlaced video carries two distinct fields per frame, so it can be
+deinterlaced to either single or double frame rate:
+
+- `auto` (default): field-rate for NTSC-family video (60i → 60p, preserving the
+  motion in true interlaced video) and frame-rate for PAL/unknown sources (to
+  avoid double-bobbing 25PsF film that was flagged interlaced).
+- `field`: always double-rate (e.g. 60p) — smoothest motion for real video.
+- `frame`: always single-rate (e.g. 30p) — half the frames, for compatibility or
+  size.
+
+This only affects the deinterlace path; telecined film is set to its film rate by
+`--ivtc-mode`, independent of this setting.
+
+### Examples
+
+```bash
+# Use default (bwdif)
+transcode-monster.sh "/path/to/source/"
+
+# Use nnedi for noisy source
+transcode-monster.sh --deinterlacer nnedi "/path/to/source/"
+
+# Force deinterlacing on misdetected progressive content
+transcode-monster.sh --force-deinterlace "/path/to/source/"
+
+# Adaptive mode (only deinterlace frames flagged as interlaced)
+transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
+
+# Force single-rate output when deinterlacing true video
+transcode-monster.sh --deinterlace-rate frame "/path/to/source/"
+```
+
+## Series Organization
+
+### Directory Naming Conventions
+
+For optimal automatic detection, organize ripped discs using this structure:
+
+**Format**: `S{season}D{disc}` where season and disc are numbers
+
+**Single Season Series**:
+```
+/path/to/Firefly/
+├── S1D1/          # Season 1, Disc 1
+├── S1D2/          # Season 1, Disc 2
+└── S1D3/          # Season 1, Disc 3
+```
+
+**Multi-Season Series**:
+```
+/path/to/The Venture Bros./
+├── S1D1/          # Season 1, Disc 1
+├── S1D2/          # Season 1, Disc 2
+├── S1D3/          # Season 1, Disc 3
+├── S2D1/          # Season 2, Disc 1
+├── S2D2/          # Season 2, Disc 2
+├── S2D3/          # Season 2, Disc 3
+├── S3D1/          # Season 3, Disc 1
+└── S3D2/          # Season 3, Disc 2
+```
+
+**Alternative Formats** (also supported):
+```
+/path/to/Breaking Bad/
+├── Season 1/Disc 1/
+├── Season 1/Disc 2/
+├── Season 2/Disc 1/
+└── Season 2/Disc 2/
+```
+
+**Flat directories (season in the filename)**:
+
+A folder with no disc/season subdirectories is fine too; the season and episode
+are read from the filenames, so a single pool of mixed-season files is split
+correctly:
+```
+/path/to/Darkwing Duck/
+├── Darkwing_Duck_S01_E01.mkv   # → S01E01
+├── ...
+├── Darkwing_Duck_S01_E28.mkv   # → S01E28
+├── Darkwing_Duck_S02_E01.mkv   # → S02E01   (not lumped into season 1)
+└── Darkwing_Duck_S02_E27.mkv   # → S02E27
+```
+Recognized filename tags include `S02E05`, `S02_E05`, `S02.E05`, `2x05`, and
+`Season 2` / `Series 2`. The season and episode may be written together
+(`S02E05`) or split by a space, underscore, dot, or hyphen (`S02_E05`); both
+parse identically, and single-digit forms like `S2E5` work too. Guards prevent
+resolutions like `1920x1080` from being misread as a season.
+
+**Mixed layouts** are handled in a single pass: some seasons can live as a flat
+pool of files while others are split across `S#D#` disc directories. Each file is
+assigned to a season by its own name first, then its containing directory, then
+the season being processed.
+
+**Inside Each Disc Directory**:
+```
+S1D1/
+├── title_t00.mkv  # Episode 1
+├── title_t01.mkv  # Episode 2
+├── title_t02.mkv  # Episode 3
+└── title_t03.mkv  # Episode 4
+```
+
+The script automatically:
+- Detects season numbers from filenames, then disc/season directory names
+- Sorts episodes by disc, then by episode number
+- Numbers episodes by their parsed value when those are unambiguous (so a season
+  with a missing episode keeps its canonical numbering), falling back to
+  sequential position when numbers are absent, duplicated, or synthetic (e.g.
+  several chapter-split discs that each restart at 1)
+
+### Output Naming
+
+```
+The Venture Bros. - S01E01.mkv
+The Venture Bros. - S01E02.mkv
+The Venture Bros. - S01E03.mkv
+...
+The Venture Bros. - S02E01.mkv
+The Venture Bros. - S02E02.mkv
+...
+```
+
+### Multi-Episode Files
+
+For files with multiple episodes marked by chapters:
+
+```bash
+# Auto-detect chapters (files >60min)
+transcode-monster.sh "/path/to/source/"
+
+# Force chapter splitting
+transcode-monster.sh --split-chapters "/path/to/source/"
+
+# Specify episodes per file (e.g., 2 episodes per file)
+transcode-monster.sh --chapters-per-episode 2 "/path/to/source/"
+```
+
+## Encoder Selection
+
+### Automatic (Default)
+
+The script stays on **hardware (hevc_vaapi)** wherever it can — VAAPI is far
+faster and, on modern AMD, very efficient — and only falls back to **software
+(libx265)** when the hardware genuinely can't encode the source. The fallback
+triggers are capability blockers, not quality preferences:
+
+- **Bit depth the GPU can't encode** (e.g. 12-bit, or 10-bit on a backend
+  `vainfo` reports no support for)
+- **Non-4:2:0 chroma** (4:2:2 / 4:4:4), which AMD/Intel HEVC encoders don't take
+- **`dvvideo`** and similar formats that have no usable hardware path
+
+Resolution and color metadata no longer force software: SD encodes on hardware
+just fine, and color is handled by tagging the output (see
+[Color Space](#color-space)) rather than by switching encoders. Interlaced and
+telecined sources also stay on hardware — the deinterlace/IVTC filtering runs on
+the CPU *before* the frames are uploaded to the GPU, so the encode itself is
+still hardware.
+
+### Manual Override
+
+```bash
+# Force software encoding (highest quality)
+transcode-monster.sh --codec libx265 "/path/to/source/"
+
+# Force hardware encoding (fastest)
+transcode-monster.sh --codec hevc_vaapi "/path/to/source/"
+```
+
+### Hardware Encoding Quality
+
+VAAPI compression level (0-7, default 4):
+
+This parameter controls encoder effort. On **Intel VAAPI**, it has a meaningful
+impact on compression efficiency. On **AMD VAAPI** (RDNA 3/4, Mesa 25.2+), it
+produces a marginal but measurable improvement (~1%); on older Mesa it is
+effectively a no-op. On other VAAPI backends, behavior is driver-dependent.
+
+```bash
+# Faster, larger files
+transcode-monster.sh --compression-level 0 "/path/to/source/"
+
+# Slower, smaller files
+transcode-monster.sh --compression-level 7 "/path/to/source/"
+```
+
+## Quality Settings
+
+### Recommended CRF/CQP Values
+
+**8-bit encoding**:
+- Archival quality: 18-19
+- High quality: 20-21
+- Standard quality: 22-23
+
+**10-bit encoding** (recommended, default):
+- Archival quality: 20-21
+- High quality: 22-23
+- Standard quality: 24-25
+
+**12-bit encoding**:
+- Archival quality: 22-23
+- High quality: 24-25
+- Standard quality: 26-27
+
+### Why 10-bit?
+
+Enabled by default (`UPGRADE_8BIT_TO_10BIT="true"`):
+- Better quality with less banding
+- 10-15% smaller files at same quality
+- No visible quality loss
+- Wide device compatibility
+
+## Audio Options
+
+### Language Filtering
+
+Keep only specific languages:
+
+```bash
+# English only (default)
+transcode-monster.sh --language eng "/path/to/source/"
+
+# Multiple languages
+transcode-monster.sh --language "eng,spa,fra" "/path/to/source/"
+
+# Keep all audio tracks
+transcode-monster.sh --all-audio "/path/to/source/"
+```
+
+### Original Language Mode
+
+For anime or foreign content:
+
+```bash
+# Prefer Japanese audio + English subs
+transcode-monster.sh --original-lang jpn "/path/to/anime/"
+```
+
+This selects:
+- Original language audio (jpn) as default
+- Default language (eng) subtitles
+- Skips foreign dubs
+
+### Secondary Track Passthrough
+
+The primary audio track is always copied as-is. For secondary tracks, anything
+already in an efficient lossy format is copied untouched rather than re-encoded
+to HE-AAC; re-encoding lossy audio into another lossy codec compounds
+generational quality loss while saving little or no space. By default this
+covers Opus, AAC, MP3, and Vorbis:
+
+```bash
+AUDIO_PASSTHROUGH_CODECS="opus aac mp3 vorbis"
+```
+
+Values are ffprobe `codec_name` strings, space-separated. Space-heavy lossy
+formats (`ac3`, `eac3`, `dts`) are deliberately omitted so they still get
+downsized to HE-AAC; add them to the list if you'd rather keep them bit-for-bit.
+Lossless secondary tracks (FLAC, TrueHD, DTS-HD, PCM) are intentionally absent:
+they're meant to be re-encoded.
+
+### Subtitle Selection
+
+Subtitles in `LANGUAGE` are kept and converted to MKV-compatible formats. Which
+track gets enabled by default depends on the audio language of the file:
+
+- **Foreign audio** (e.g. a Japanese film, or `--original-lang` mode): a *full*
+  subtitle track is enabled by default so all dialogue is translated. A
+  forced-only track is used only as a fallback if no full track exists.
+- **Native audio** (audio already in `LANGUAGE`): full subtitles are *not*
+  auto-enabled, but a *forced/signs* track is (with disposition `default+forced`)
+  so compliant players show it even when subtitles are otherwise off. This keeps
+  intentional foreign-language scenes and on-screen signage legible. A good
+  example is the film *Revolver*, which has whole scenes in Mandarin that were
+  meant to be translated; without the forced track those scenes play untranslated.
+  Disable with `FORCED_SUBS_ON_NATIVE_AUDIO="false"`.
+
+A track is classified as forced, cheapest check first:
+
+1. The `forced` disposition flag (authoritative when the muxer set it).
+2. The title tag matching `forced`, `signs`, or `songs` (case-insensitive).
+3. Cue density: forced tracks light up only a handful of times per film, full
+   tracks run continuously. This fallback only runs when steps 1-2 are silent and
+   `SUBTITLE_FORCED_DETECT_DENSITY="true"`. It reads the container's cue-count
+   metadata (the `NUMBER_OF_FRAMES` statistics tag that mkvmerge and MakeMKV
+   write), so it is instant and adds no measurable cost to a normal run. Tune the
+   boundary with `SUBTITLE_FORCED_MAX_EVENTS_PER_MIN` (default `3`). For the rare
+   long file that lacks cue-count metadata, density is skipped by default rather
+   than demuxing a multi-gigabyte stream; set `SUBTITLE_FORCED_DEEP_SCAN="true"`
+   to count cues by demuxing instead (accurate, but slow on large network sources,
+   and it prints a heads-up while it works).
+
+Note: the forced track must be tagged in `LANGUAGE` (or matched by the language
+filter) to be picked up. Properly authored discs tag forced tracks with the
+correct language; a forced track tagged `und` with no flag/title won't be
+detected.
+
+## Advanced Options
+
+### Process Specific Episodes
+
+```bash
+# Process only season 2
+transcode-monster.sh -s 2 "/path/to/source/" "/output/"
+
+# Process only season 1, episode 3
+transcode-monster.sh -s 1 -e 3 "/path/to/source/" "/output/"
+```
+
+### B-frames
+
+Control B-frame count (0-4+):
+
+```bash
+# Maximum compatibility
+transcode-monster.sh -b 0 "/path/to/source/"
+
+# Best compression (libx265 only)
+transcode-monster.sh -b 4 "/path/to/source/"
+```
+
+> **AMD HEVC hardware encoding note:** `-b`/`BFRAMES` is **silently ignored**
+> by `hevc_vaapi` on all AMD GPUs. This is a hardware-level limitation present
+> across all VCN generations (VCN 1 through 5, covering every GPU up to and
+> including RDNA 4). B-frames only take effect with `libx265` (software
+> encoding).
+
+### x265 Tuning (Software Encoding)
+
+```bash
+# Optimize for low-power playback devices
+transcode-monster.sh --tune fastdecode "/path/to/source/"
+
+# Preserve film grain
+transcode-monster.sh --tune grain "/path/to/source/"
+
+# Optimize for animation
+transcode-monster.sh --tune animation "/path/to/source/"
+```
+
+### Color Space
+
+Override automatic color space detection:
+
+```bash
+# Preserve HDR metadata (HDR10, HLG, BT.2020)
+transcode-monster.sh --colorspace hdr "/path/to/uhd/"
+
+# Force BT.709 (HD)
+transcode-monster.sh --colorspace bt709 "/path/to/source/"
+
+# Force BT.601 (SD)
+transcode-monster.sh --colorspace bt601 "/path/to/source/"
+
+# Disable conversion (use source as-is)
+transcode-monster.sh --colorspace none "/path/to/source/"
+```
+
+**Note**: HDR content is automatically detected and preserved - manual override is rarely needed.
+
+**Untagged sources**: when a source carries no color metadata at all (common on
+DVD and older rips), the script tags the **output** with the correct standard by
+convention — BT.601 for SD (`smpte170m` for ≤480-line, `bt470bg` for 576-line)
+and BT.709 for HD — so players render colors correctly instead of guessing. This
+is a metadata tag on the output, not a conversion of the pixels, and it no longer
+forces a switch to software encoding the way earlier versions did.
+
+## Troubleshooting
+
+### Content Detected as Progressive but Has Combing
+
+Force deinterlacing:
+```bash
+transcode-monster.sh --force-deinterlace "/path/to/source/"
+```
+
+### Deinterlacer Leaves Artifacts
+
+Try nnedi for difficult sources:
+```bash
+transcode-monster.sh --deinterlacer nnedi "/path/to/source/"
+```
+
+For sources that are mostly progressive with occasional interlaced frames, limit
+deinterlacing to the frames that actually need it:
+```bash
+transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
+```
+
+### Telecine Detection Issues
+
+Disable telecine detection for purely interlaced content:
+```bash
+transcode-monster.sh --no-pulldown "/path/to/source/"
+```
+
+Force inverse telecine when the rate prior skips a source you know is telecined
+(e.g. a PAL or oddly-flagged film master):
+```bash
+transcode-monster.sh --force-ivtc "/path/to/source/"
+```
+
+Stray combing on a mixed film/video disc (anime OVAs especially): the inverse
+telecine reconstructs the film cleanly, but genuinely interlaced video/effects
+shots can leave a few combed frames the field matcher can't invert. Two things to
+try — switch to constant-rate decimation so those frames don't linger, and/or use
+the exhaustive matcher:
+```bash
+transcode-monster.sh --ivtc-mode fixed "/path/to/source/"
+transcode-monster.sh --fieldmatch-mode pcn_ub "/path/to/source/"
+```
+If a particular disc is mostly true interlaced video rather than film, it may be
+better handled by disabling pulldown and deinterlacing it outright
+(`--no-pulldown`).
+
+### Crop Detection Too Aggressive
+
+Disable automatic crop:
+```bash
+transcode-monster.sh --no-crop "/path/to/source/"
+```
+
+### Hardware Encoding Has Artifacts
+
+Force software encoding:
+```bash
+transcode-monster.sh --codec libx265 "/path/to/source/"
+```
+
+### I Want To Do a Custom, Weird, One-Off
+
+If the script doesn't handle some 0.001% edge-case, you can still use it to do the hard work and build the bulk of your `ffmpeg` command for you with the `--dry-run` option:
+```
+transcode-monster.sh --dry-run "/path/to/special-one-off/"
+```
+Then just copy the resulting `ffmpeg` command and adjust as needed.
+
+### Washed Out Colors on UHD/HDR Content
+
+This typically indicates Dolby Vision content being transcoded:
+
+**Problem**: Dolby Vision uses enhancement layers and metadata that cannot be preserved during re-encoding. Only the HDR10 base layer remains, which may look washed out.
+
+**Detection**: The script will warn "Dolby Vision detected - will be stripped during transcoding"
+
+**Solutions**:
+1. **Keep the original** - Best option if you have DV-capable playback
+2. **Accept the HDR10 output** - Still HDR, but not as vibrant as DV
+3. **Use specialized tools** - Advanced users can use `dovi_tool` to extract/inject RPU metadata (complex)
+
+**Note**: Neither VAAPI nor x265 can preserve Dolby Vision during transcoding. This is a limitation of the encoding process, not the script.
+
+### Episode Numbering Issues
+
+For complex cases, manually specify:
+```bash
+# Set content name
+transcode-monster.sh -n "Show Name" "/path/to/source/"
+
+# Set specific season
+transcode-monster.sh -s 1 "/path/to/source/"
+```
+
+## Configuration Reference
+
+Full list of config file options (`~/.config/transcode-monster.conf`):
+
+```bash
+# Video encoding
+VIDEO_CODEC="auto"              # auto, hevc_vaapi, libx265
+QUALITY="20.6"                  # CRF/CQP value
+PRESET="medium"                 # x265 preset
+X265_TUNE=""                    # fastdecode, grain, animation, etc.
+BFRAMES="4"                     # Number of B-frames
+DEINTERLACER="bwdif"           # bwdif, nnedi, yadif
+DEINTERLACE_RATE="auto"        # auto, field, frame (deinterlace path only)
+
+# Hardware encoding
+VAAPI_DEVICE="/dev/dri/renderD128"
+VAAPI_COMPRESSION_LEVEL="4"    # 0-7 for Intel VAAPI
+
+# Bit depth
+UPGRADE_8BIT_TO_10BIT="true"
+DOWNGRADE_12BIT_TO_10BIT="false"
+
+# Audio
+AUDIO_CODEC="libfdk_aac"
+AUDIO_PROFILE="aac_he"
+AUDIO_FILTER_LANGUAGES="true"
+AUDIO_PASSTHROUGH_CODECS="opus aac mp3 vorbis"  # Secondary tracks in these formats are copied, not re-encoded
+
+# Language
+LANGUAGE="eng"
+PREFER_ORIGINAL="false"
+ORIGINAL_LANGUAGE=""            # e.g., "jpn" for anime
+
+# Subtitles
+FORCED_SUBS_ON_NATIVE_AUDIO="true"      # Auto-enable forced/signs subs when audio is already native
+SUBTITLE_FORCED_DETECT_DENSITY="true"   # Use cue-density fallback when the forced flag/title are absent
+SUBTITLE_FORCED_MAX_EVENTS_PER_MIN="3"  # Below this cues/min => treated as forced/signs
+SUBTITLE_FORCED_DEEP_SCAN="false"       # Demux long files lacking cue-count metadata to count cues (slow; off by default)
+
+# Processing
+DETECT_INTERLACING="true"
+ADAPTIVE_DEINTERLACE="false"
+FORCE_DEINTERLACE="false"
+DETECT_CROP="true"
+DETECT_PULLDOWN="auto"         # auto (detect at any resolution), true, false
+IVTC_MODE="adaptive"           # adaptive (mpdecimate + VFR), fixed (decimate + 23.976 CFR)
+FIELDMATCH_MODE="pc_n"         # pc_n (standard), pcn_ub (exhaustive match)
+SPLIT_CHAPTERS="auto"          # auto, true, false
+
+# Output
+OUTPUT_DIR="${HOME}/Videos"
+OVERWRITE="false"
+COLORSPACE="auto"              # auto, bt709, bt601, hdr, none
+BULK_MOVIES="false"            # Process all movies in directory
+
+# Process priority
+USE_NICE="true"
+NICE_LEVEL="10"
+USE_IONICE="true"
+IONICE_CLASS="2"
+IONICE_LEVEL="4"
+```
+
+## Examples
+
+### Standard TV Series
+
+```bash
+transcode-monster.sh "/mnt/rips/Firefly/" "/mnt/media/TV/Firefly/"
+```
+
+### UHD / HDR Movie
+
+```bash
+transcode-monster.sh -t movie "/mnt/rips/Ghost in the Shell/" "/mnt/media/Movies/"
+# HDR10/HLG automatically detected and preserved
+```
+
+### Bulk Movie Processing
+
+```bash
+transcode-monster.sh --bulk-movies "/mnt/rips/Star Wars/Laserdisc/" "/mnt/media/Movies/"
+# Processes all 6 Star Wars movies automatically
+```
+
+### Series with Year (for Reboots/Disambiguation)
+
+```bash
+transcode-monster.sh -n "The Twilight Zone" -y 1959 "/mnt/rips/TZ/" "/mnt/media/TV/"
+# Output: The Twilight Zone (1959) - S01E01.mkv
+```
+
+### Anime Series (Japanese Audio, English Subs)
+
+```bash
+transcode-monster.sh --original-lang jpn "/mnt/rips/Cowboy Bebop/" "/mnt/media/Anime/"
+```
+
+### Noisy Broadcast Tape Source
+
+```bash
+transcode-monster.sh --deinterlacer nnedi "/mnt/rips/The Maxx/" "/mnt/media/TV/"
+```
+
+### Movie with Custom Quality
+
+```bash
+transcode-monster.sh -t movie -n "Blade Runner" -y 1982 -q 18 "/mnt/rips/blade_runner/" "/mnt/media/Movies/"
+```
+
+### Process Specific Season
+
+```bash
+transcode-monster.sh -s 2 "/mnt/rips/Breaking Bad/" "/mnt/media/TV/Breaking Bad/"
+```
+
+### High Quality Archival
+
+```bash
+transcode-monster.sh -q 18 --codec libx265 --tune grain "/mnt/rips/Lawrence of Arabia/" "/mnt/archive/"
+```
+
+### Quick Preview (Dry Run)
+
+```bash
+transcode-monster.sh -e 1 -d "/mnt/rips/New Show/" "/tmp/preview/"
+```
+
+## Tips & Best Practices
+
+1. **Use dry run first** (`-d`) to verify detection
+2. **Start with defaults** - they work well for most content
+3. **Use nnedi sparingly** - only for noisy/difficult sources
+4. **Test one episode** (`-e 1`) before processing entire series
+5. **Keep 10-bit enabled** - better quality, smaller files
+6. **Let auto-detection work** - manual overrides rarely needed
+7. **Use config file** for persistent preferences
+8. **Check output quality** on first few episodes before batch processing
+
+## Detailed Requirements
+
+- **bash** for advanced error handling
+- **ffmpeg** with libx265, libfdk_aac
+- **ffprobe** (included with ffmpeg)
+- **bc** (for calculations)
+- **Optional**: VAAPI drivers for hardware encoding
+- **Optional**: nnedi filter in ffmpeg (compile with `--enable-libnnedi`)
 
 ## License
-MIT License ([LICENSE](https://opensource.org/license/MIT)) - feel free to use, modify, and share.
 
----
+MIT License - See script header for full text
 
-_A bunch of B-grade scripts by Chris Wadge_
+## Support
+
+For issues or questions, check the script's `--help` output or review detection results with `--dry-run`.
