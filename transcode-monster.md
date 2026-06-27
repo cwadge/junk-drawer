@@ -15,9 +15,10 @@ A universal video transcoding script with intelligent automatic detection for se
 - **Automatic detection**: Series vs movies, interlacing, telecine (3:2 pulldown), crop borders
 - **HDR support**: Detects and preserves HDR10, HLG, and BT.2020 content automatically
 - **Bulk movie processing**: Process multiple movies in one directory without manual intervention
-- **Hybrid encoding**: Intelligently chooses hardware (VAAPI) or software (x265) encoding
-- **Smart deinterlacing**: Automatically detects and removes interlacing with multiple filter options
-- **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD)
+- **Hybrid encoding**: Stays on hardware (VAAPI) for speed and only falls back to software (x265) when the hardware genuinely can't handle the source
+- **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, with multiple filter options and adaptive handling for mixed film/video sources
+- **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence rather than guessing from combing alone
+- **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD), and tags untagged sources with the correct standard so players don't guess
 - **Multi-episode files**: Automatically splits by chapters for disc rips with multiple episodes
 - **Audio/subtitle management**: Language filtering, format conversion, disposition handling
 - **Copy-only (remux) mode**: Restructure track selection, dispositions, and naming without re-encoding, for sources that are already well-encoded but badly mastered or named
@@ -125,6 +126,11 @@ Prefer original audio with English subtitles:
 transcode-monster.sh --original-lang jpn "/path/to/Cowboy Bebop/" "/output/"
 ```
 
+Telecined anime (especially OVAs that mix telecined film with true interlaced
+video/effects) is inverse-telecined automatically; the default `adaptive`
+`--ivtc-mode` keeps those video sections smooth. If a disc shows stray combing or
+fights detection, see [Telecine Detection Issues](#telecine-detection-issues).
+
 ### Noisy Broadcast Sources
 
 Use nnedi deinterlacer for heavily compressed or noisy sources:
@@ -198,19 +204,59 @@ The script samples frames at multiple points to detect interlacing:
 
 ### Telecine Detection (3:2 Pulldown)
 
-For SD content (≤576p), checks for telecine patterns:
+Telecine is checked at **any resolution** (not just SD), since HD broadcast and
+disc masters can be telecined too. Detection samples the cadence at four points
+(20%, 40%, 60%, 80% through the file) rather than trusting the opening frames,
+and decides in tiers:
 
-- **Repeated fields**: >10% indicates pulldown
-- **Interlacing percentage**: <50% confirms it's telecine (not just noisy interlaced)
-- **Action**: Uses inverse telecine (fieldmatch+yadif+decimate)
+- **Strong repeated-field cadence** → accepted as telecine directly. A regular
+  pattern of repeated fields is the actual signature of 3:2 pulldown.
+- **Ambiguous** (heavy combing but a weak repeat signal) → the script runs a
+  *trial fieldmatch* and only confirms telecine if the residual combing
+  collapses. Real telecine inverts cleanly; genuinely interlaced video does not.
+  This is what stops noisy interlaced sources from being misread as film.
+- **NTSC rate prior**: detection favors the 29.97/23.976 rate family that 3:2
+  pulldown actually comes from, so PAL and native-progressive film aren't
+  dragged through an inverse-telecine they don't need (override with
+  `--force-ivtc`).
+
+When telecine is confirmed, the script inverse-telecines on the CPU
+(`fieldmatch` → `yadif` cleanup of the frames fieldmatch can't match → frame
+decimation), then hands the progressive result to the encoder.
+
+**Dropping the duplicates — `--ivtc-mode`:** after field matching, the pulldown
+duplicate frames have to go. Two strategies:
+
+- `adaptive` (default): `mpdecimate` + variable frame rate. Drops only true
+  duplicates, so cleanly-telecined film lands at 23.976 while interlaced
+  video/effects stretches (common in anime OVAs) keep their unique frames at
+  ~29.97 — no judder on mixed-cadence sources.
+- `fixed`: classic `decimate` + 23.976 CFR. Exact 1-in-5 drop, best for
+  uniformly-telecined film and players that need a constant frame rate, but it
+  judders on mixed-cadence material. It can also make residual combing in the
+  video sections *less* visible (every frame shows for the same duration instead
+  of lingering under VFR), so it's worth a try if a mixed disc shows stray combing.
+
+**Match thoroughness — `--fieldmatch-mode`:** `pc_n` (default) is the standard
+matcher. `pcn_ub` additionally tries the previous-field combinations — the most
+exhaustive search, which can reconstruct more frames across cadence breaks on
+difficult anime, at a slightly higher risk of a bad match. It's a per-disc
+experiment, not a clear upgrade; leave it on `pc_n` unless a specific source
+fights it.
 
 Override if needed:
 ```bash
-# Force telecine removal
+# Force inverse telecine (any resolution), e.g. when the rate prior skips it
 transcode-monster.sh --force-ivtc "/path/to/source/"
 
-# Disable telecine detection
+# Disable telecine detection entirely (treat as plain interlaced/progressive)
 transcode-monster.sh --no-pulldown "/path/to/source/"
+
+# Constant-frame-rate IVTC for uniformly telecined film
+transcode-monster.sh --ivtc-mode fixed "/path/to/source/"
+
+# Exhaustive matching for stubborn mixed-cadence anime
+transcode-monster.sh --fieldmatch-mode pcn_ub "/path/to/source/"
 ```
 
 ### Crop Detection
@@ -219,7 +265,9 @@ Automatically detects and removes black bars:
 
 - Samples at 25%, 50%, 75% through file
 - Uses the least aggressive crop (preserves most content)
-- Rounds to 16-pixel boundaries for encoder efficiency
+- Rounds dimensions to 16-pixel boundaries for encoder efficiency
+- Forces crop **offsets** to even values, so chroma siting and field parity stay
+  correct on 4:2:0 sources (an odd offset would shift color planes or swap fields)
 
 Disable if needed:
 ```bash
@@ -227,6 +275,18 @@ transcode-monster.sh --no-crop "/path/to/source/"
 ```
 
 ## Deinterlacing Options
+
+Two different problems get two different treatments, chosen automatically:
+
+- **Telecined film** (3:2 pulldown) is *inverse-telecined* — the original
+  progressive frames are reconstructed and the duplicates dropped (see
+  [Telecine Detection](#telecine-detection-32-pulldown)). This is the right path
+  for film and most animation.
+- **True interlaced video** (camera-original 50i/60i) is *deinterlaced* with one
+  of the filters below, since there are no progressive frames to recover.
+
+The filter choice (`--deinterlacer`) and output rate (`--deinterlace-rate`) below
+govern the **deinterlace** path; telecined film is handled by `--ivtc-mode`.
 
 ### When to Use Each Filter
 
@@ -247,6 +307,21 @@ transcode-monster.sh --no-crop "/path/to/source/"
 - Good for quick previews
 - Slightly less quality than bwdif
 
+### Output Rate (`--deinterlace-rate`)
+
+Interlaced video carries two distinct fields per frame, so it can be
+deinterlaced to either single or double frame rate:
+
+- `auto` (default): field-rate for NTSC-family video (60i → 60p, preserving the
+  motion in true interlaced video) and frame-rate for PAL/unknown sources (to
+  avoid double-bobbing 25PsF film that was flagged interlaced).
+- `field`: always double-rate (e.g. 60p) — smoothest motion for real video.
+- `frame`: always single-rate (e.g. 30p) — half the frames, for compatibility or
+  size.
+
+This only affects the deinterlace path; telecined film is set to its film rate by
+`--ivtc-mode`, independent of this setting.
+
 ### Examples
 
 ```bash
@@ -259,8 +334,11 @@ transcode-monster.sh --deinterlacer nnedi "/path/to/source/"
 # Force deinterlacing on misdetected progressive content
 transcode-monster.sh --force-deinterlace "/path/to/source/"
 
-# Adaptive mode (only deinterlace interlaced frames)
+# Adaptive mode (only deinterlace frames flagged as interlaced)
 transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
+
+# Force single-rate output when deinterlacing true video
+transcode-monster.sh --deinterlace-rate frame "/path/to/source/"
 ```
 
 ## Series Organization
@@ -373,10 +451,22 @@ transcode-monster.sh --chapters-per-episode 2 "/path/to/source/"
 
 ### Automatic (Default)
 
-The script automatically chooses the best encoder:
+The script stays on **hardware (hevc_vaapi)** wherever it can — VAAPI is far
+faster and, on modern AMD, very efficient — and only falls back to **software
+(libx265)** when the hardware genuinely can't encode the source. The fallback
+triggers are capability blockers, not quality preferences:
 
-- **Hardware (hevc_vaapi)**: HD content, simple characteristics
-- **Software (libx265)**: SD content, needs color space conversion, complex processing
+- **Bit depth the GPU can't encode** (e.g. 12-bit, or 10-bit on a backend
+  `vainfo` reports no support for)
+- **Non-4:2:0 chroma** (4:2:2 / 4:4:4), which AMD/Intel HEVC encoders don't take
+- **`dvvideo`** and similar formats that have no usable hardware path
+
+Resolution and color metadata no longer force software: SD encodes on hardware
+just fine, and color is handled by tagging the output (see
+[Color Space](#color-space)) rather than by switching encoders. Interlaced and
+telecined sources also stay on hardware — the deinterlace/IVTC filtering runs on
+the CPU *before* the frames are uploaded to the GPU, so the encode itself is
+still hardware.
 
 ### Manual Override
 
@@ -580,6 +670,13 @@ transcode-monster.sh --colorspace none "/path/to/source/"
 
 **Note**: HDR content is automatically detected and preserved - manual override is rarely needed.
 
+**Untagged sources**: when a source carries no color metadata at all (common on
+DVD and older rips), the script tags the **output** with the correct standard by
+convention — BT.601 for SD (`smpte170m` for ≤480-line, `bt470bg` for 576-line)
+and BT.709 for HD — so players render colors correctly instead of guessing. This
+is a metadata tag on the output, not a conversion of the pixels, and it no longer
+forces a switch to software encoding the way earlier versions did.
+
 ## Troubleshooting
 
 ### Content Detected as Progressive but Has Combing
@@ -596,12 +693,37 @@ Try nnedi for difficult sources:
 transcode-monster.sh --deinterlacer nnedi "/path/to/source/"
 ```
 
+For sources that are mostly progressive with occasional interlaced frames, limit
+deinterlacing to the frames that actually need it:
+```bash
+transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
+```
+
 ### Telecine Detection Issues
 
 Disable telecine detection for purely interlaced content:
 ```bash
 transcode-monster.sh --no-pulldown "/path/to/source/"
 ```
+
+Force inverse telecine when the rate prior skips a source you know is telecined
+(e.g. a PAL or oddly-flagged film master):
+```bash
+transcode-monster.sh --force-ivtc "/path/to/source/"
+```
+
+Stray combing on a mixed film/video disc (anime OVAs especially): the inverse
+telecine reconstructs the film cleanly, but genuinely interlaced video/effects
+shots can leave a few combed frames the field matcher can't invert. Two things to
+try — switch to constant-rate decimation so those frames don't linger, and/or use
+the exhaustive matcher:
+```bash
+transcode-monster.sh --ivtc-mode fixed "/path/to/source/"
+transcode-monster.sh --fieldmatch-mode pcn_ub "/path/to/source/"
+```
+If a particular disc is mostly true interlaced video rather than film, it may be
+better handled by disabling pulldown and deinterlacing it outright
+(`--no-pulldown`).
 
 ### Crop Detection Too Aggressive
 
@@ -663,6 +785,7 @@ PRESET="medium"                 # x265 preset
 X265_TUNE=""                    # fastdecode, grain, animation, etc.
 BFRAMES="4"                     # Number of B-frames
 DEINTERLACER="bwdif"           # bwdif, nnedi, yadif
+DEINTERLACE_RATE="auto"        # auto, field, frame (deinterlace path only)
 
 # Hardware encoding
 VAAPI_DEVICE="/dev/dri/renderD128"
@@ -694,7 +817,9 @@ DETECT_INTERLACING="true"
 ADAPTIVE_DEINTERLACE="false"
 FORCE_DEINTERLACE="false"
 DETECT_CROP="true"
-DETECT_PULLDOWN="auto"         # auto, true, false
+DETECT_PULLDOWN="auto"         # auto (detect at any resolution), true, false
+IVTC_MODE="adaptive"           # adaptive (mpdecimate + VFR), fixed (decimate + 23.976 CFR)
+FIELDMATCH_MODE="pc_n"         # pc_n (standard), pcn_ub (exhaustive match)
 SPLIT_CHAPTERS="auto"          # auto, true, false
 
 # Output
