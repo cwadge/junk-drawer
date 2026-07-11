@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.17.11"
+SCRIPT_VERSION="1.18.0"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -111,7 +111,7 @@ DEFAULT_DETECT_CROP="true"
 DEFAULT_DETECT_PULLDOWN="auto"  # auto = detect at any resolution (was SD-only), true = force on, false = force off
 DEFAULT_IVTC_MODE="adaptive"  # How to drop the pulldown-duplicated frames after inverse telecine. adaptive = mpdecimate + VFR output: drops only true duplicates, so cleanly-telecined film becomes 23.976 while interlaced-video/effects sections (common in anime OVAs) keep their unique frames at ~29.97 with no judder. fixed = classic decimate + 23.976 CFR: exact 1-in-5 drop, best for uniformly-telecined film and players that require constant frame rate, but judders on mixed-cadence sources
 DEFAULT_FIELDMATCH_MODE="pc_n"  # fieldmatch matching thoroughness. pc_n (default) tries the current+next field combinations plus a 5th-field check. pcn_ub additionally tries the previous-field (u/b) combinations — the most exhaustive matcher, which reconstructs more frames across cadence breaks (fewer orphans left for the deinterlacer) at a slightly higher risk of a bad match. Useful on mixed-cadence anime that fights pc_n
-DEFAULT_SPLIT_CHAPTERS="auto"  # auto = series files >60min, true = force on, false = force off
+DEFAULT_SPLIT_CHAPTERS="auto"  # auto = split series files whose chapters form a repeating episodic structure, true = force on, false = force off
 DEFAULT_CHAPTERS_PER_EPISODE="auto"  # auto = detect optimal grouping, or specify number
 
 # Blu-ray disc processing
@@ -133,11 +133,29 @@ DEFAULT_FFMPEG_PROBESIZE="128000000"  # Bytes (128MB) - amount of data to probe 
 CURRENT_OPERATION=""
 CURRENT_FILE=""
 
+# Path of an in-progress output being written. Encodes/remuxes write to a
+# "<final>.part" scratch file and rename it into place only on success, so an
+# interrupted or failed run never leaves a truncated file that the next run's
+# "already exists, skip" check would mistake for a finished episode. The two
+# trap handlers below remove it if we die mid-write.
+PARTIAL_OUTPUT=""
+
+# Remove a half-written output file, if one is in flight.
+cleanup_partial_output() {
+	if [[ -n "${PARTIAL_OUTPUT:-}" && -f "$PARTIAL_OUTPUT" ]]; then
+		rm -f "$PARTIAL_OUTPUT" 2>/dev/null || true
+		echo -e "${YELLOW}Removed incomplete output: $PARTIAL_OUTPUT${RESET}" >&2
+	fi
+	PARTIAL_OUTPUT=""
+}
+
 # Error handler function
 error_handler() {
 	local exit_code=$?
 	local line_number=$1
 	local failed_command="${2:-}"
+
+	cleanup_partial_output
 
 	echo ""
 	echo -e "${RED}════════════════════════════════════════════${RESET}"
@@ -168,6 +186,7 @@ error_handler() {
 interrupt_handler() {
 	echo ""
 	echo -e "${YELLOW}Transcoding interrupted by user${RESET}"
+	cleanup_partial_output
 	exit 130
 }
 
@@ -385,8 +404,10 @@ ${BOLDBLUE}VIDEO PROCESSING${RESET}
 			 ${CYAN}frame${RESET}  Always single-rate (one frame per frame — preserves source fps)
 			 Telecined film is inverse-telecined regardless of this setting.
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
-  ${GREEN}--force-ivtc${RESET}           Force inverse telecine on this content
-			 (auto mode now detects telecine at any resolution, including HD)
+  ${GREEN}--force-ivtc${RESET}           Run the telecine scan even when the frame-rate prior
+			 would skip it (e.g. a PAL or oddly-flagged film master).
+			 The cadence test still gates: a genuinely progressive
+			 source is left alone. Auto already scans at any resolution.
   ${GREEN}--ivtc-mode${RESET} ${YELLOW}MODE${RESET}       How to drop pulldown duplicates after inverse telecine
 			 ${CYAN}adaptive${RESET} mpdecimate + VFR — keeps unique frames in mixed
 				  film/video sources (anime OVAs); no judder (default)
@@ -2029,8 +2050,12 @@ should_include_audio_track() {
 	    return
     fi
 
-    # Get track language and title
+    # Get track language and title. A stream with no language tag at all yields
+    # an empty string here (not "und"); DVD/VOB, MPEG-PS/TS, and AVI sources are
+    # routinely untagged, so treat empty as 'und' — otherwise every untagged
+    # secondary track would fail the language filter and be dropped.
     local lang=$(ffprobe -v quiet -select_streams a:$track_index -show_entries stream_tags=language -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+    lang="${lang:-und}"
     local title=$(ffprobe -v quiet -select_streams a:$track_index -show_entries stream_tags=title -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
 
     # Always include if it's a commentary track (check title for "commentary" case-insensitive)
@@ -2071,11 +2096,15 @@ should_include_subtitle_track() {
 	local input="$1"
 	local track_index="$2"
 
-    # Get track language
+    # Get track language. As with audio, an untagged subtitle stream yields an
+    # empty string (common on DVD/VOB rips); treat it as 'und' so it isn't
+    # silently discarded by the language filter.
     local lang=$(ffprobe -v quiet -select_streams s:$track_index -show_entries stream_tags=language -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+    lang="${lang:-und}"
 
-    # Build list of allowed languages from LANGUAGE setting (can be comma-separated)
-    local allowed_langs="$LANGUAGE"
+    # Build list of allowed languages from LANGUAGE setting (can be comma-separated).
+    # Always include 'und' so untagged subtitle tracks survive filtering.
+    local allowed_langs="$LANGUAGE,und"
 
     # Check if track language is in the allowed list
     IFS=',' read -ra ALLOWED_LANGS <<< "$allowed_langs"
@@ -2490,12 +2519,15 @@ find_video_files() {
 	local dir="$1"
 	local -n result_array=$2
 
+	# nocaseglob so UPPERCASE.MKV / .MP4 etc. are matched too — count_video_files
+	# uses find -iname, so without this the two disagree: a dir of .MKV files is
+	# counted as "has video" (→ series inference) but then yields zero here.
 	result_array=()
-	shopt -s nullglob
+	shopt -s nullglob nocaseglob
 	for ext in $INPUT_VIDEO_EXTENSIONS; do
 		result_array+=("$dir"/*."$ext")
 	done
-	shopt -u nullglob
+	shopt -u nullglob nocaseglob
 }
 
 # Count video files in directory
@@ -2533,16 +2565,50 @@ extract_season() {
 #   3. the season currently being processed (context fallback)
 # This is what lets a flat directory of mixed-season files split correctly while
 # leaving path-separated disc/season layouts working exactly as before.
+#
+# $4 (allow_ctx_fallback, default "true") gates the context fallback. When a
+# directory holds MORE than one season and a file carries no season signal of
+# its own (neither name nor container), the context fallback would otherwise
+# match that file in EVERY season pass and transcode it once per season. Callers
+# processing multiple seasons pass "true" only for the first (lowest) season, so
+# a truly tagless file is claimed exactly once instead of duplicated; in later
+# seasons it returns UNKNOWN and is skipped.
 get_effective_season() {
 	local file="$1"
 	local container="$2"
 	local ctx_season="$3"
+	local allow_ctx_fallback="${4:-true}"
 	local s
 	s=$(get_season_num "$(basename "$file")")
 	[[ "$s" != "UNKNOWN" ]] && { echo "$s"; return; }
 	s=$(season_from_path "$(basename "$container")")
 	[[ "$s" != "UNKNOWN" ]] && { echo "$s"; return; }
-	echo "$ctx_season"
+	if [[ "$allow_ctx_fallback" == "true" ]]; then
+		echo "$ctx_season"
+	else
+		echo "UNKNOWN"
+	fi
+}
+
+# Sanitize a string for use as a filename component. A name can come from a
+# source's metadata title or a directory name, and titles like
+# "AC/DC: Let There Be Rock" contain a '/', which would make the output path
+# point at a nonexistent subdirectory and fail the mux. Replace path separators
+# with a dash, flatten newlines/tabs to spaces, drop other control characters,
+# strip a leading dash/dot (so a name can't turn into an option or a hidden
+# file), and collapse surrounding whitespace.
+sanitize_filename() {
+	local s="$1"
+	s="${s//\//-}"           # forward slash → dash (path separator)
+	s="${s//$'\n'/ }"        # newline → space
+	s="${s//$'\t'/ }"        # tab → space
+	s=$(printf '%s' "$s" | tr -d '[:cntrl:]')  # remove any remaining control chars
+	s="${s#"${s%%[![:space:]]*}"}"   # ltrim
+	s="${s%"${s##*[![:space:]]}"}"   # rtrim
+	s="${s#[-.]}"            # strip a single leading dash or dot
+	# Guard against an empty or dot-only result
+	[[ -z "$s" || "$s" == "." || "$s" == ".." ]] && s="Untitled"
+	printf '%s' "$s"
 }
 
 # Extract show/movie name from path
@@ -2663,6 +2729,23 @@ normalize_source() {
 	    return 0
     fi
 
+    # A glob pattern that reached us unexpanded — either quoted on the command
+    # line ("/rips/episode_*.mkv", as the help shows) or an unquoted pattern that
+    # matched nothing (nullglob off, so the shell handed us the literal). Expand
+    # it here; if it matches files, treat them as the source list.
+    if [[ "$source" == *[\*\?\[]* ]]; then
+	    local -a glob_matches=()
+	    local m
+	    while IFS= read -r m; do
+		    [[ -e "$m" ]] && glob_matches+=("$m")
+	    done < <(compgen -G "$source" 2>/dev/null || true)
+	    if [[ ${#glob_matches[@]} -gt 0 ]]; then
+		    SOURCE_FILES=("${glob_matches[@]}")
+		    SOURCE_DIR="$(dirname "${SOURCE_FILES[0]}")"
+		    return 0
+	    fi
+    fi
+
     # Nothing found
     return 1
 }
@@ -2686,7 +2769,7 @@ build_ffmpeg_command() {
     if [[ "$COPY_ONLY" != "true" ]]; then
 	    # Detect bit depth and height
 	    bit_depth=$(detect_bit_depth "$source_file")
-	    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" | head -1)
+	    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" 2>/dev/null | head -1 || true)
 	    height=${height//,/}
 
 	    # Adjust bit depth based on user preferences
@@ -2913,7 +2996,16 @@ build_ffmpeg_command() {
 	    FFMPEG_CMD+=(-c:v copy)
     elif [[ "$encoder_type" == "vaapi" ]]; then
 	    local vaapi_profile=$(get_vaapi_profile "$bit_depth")
-	    FFMPEG_CMD+=(-c:v "$actual_codec" -vaapi_device "$VAAPI_DEVICE" -rc_mode CQP -qp "$QUALITY")
+	    # hevc_vaapi's -qp is an integer AVOption: a fractional QUALITY like "20.6"
+	    # is silently rounded by ffmpeg, so the hardware path never honors the
+	    # fractional precision the software (CRF) path does. Round it here so the
+	    # value we pass is explicit and we can tell the user when it differs.
+	    local vaapi_qp="$QUALITY"
+	    if [[ "$QUALITY" == *.* ]]; then
+		    vaapi_qp=$(printf '%.0f' "$QUALITY")
+		    echo -e "    ${BOLD}Quality:${RESET}     QP ${vaapi_qp} (rounded from ${QUALITY}; hevc_vaapi uses integer QP)" >&2
+	    fi
+	    FFMPEG_CMD+=(-c:v "$actual_codec" -vaapi_device "$VAAPI_DEVICE" -rc_mode CQP -qp "$vaapi_qp")
 	    [[ -n "$VAAPI_COMPRESSION_LEVEL" ]] && FFMPEG_CMD+=(-compression_level "$VAAPI_COMPRESSION_LEVEL")
 	    # -bf is ignored by hevc_vaapi on AMD (all VCN); effective on libx265/h264_vaapi only
 	    FFMPEG_CMD+=(-g "$GOP_SIZE" -keyint_min "$MIN_KEYINT" -bf "$BFRAMES" -low_power false)
@@ -2957,7 +3049,18 @@ build_ffmpeg_command() {
 	    fi
     fi
 
-    FFMPEG_CMD+=(-map_chapters 0 -f "$CONTAINER" "$output_file" -y)
+    # Chapter handling. A whole-file encode keeps the source chapters (-map_chapters 0).
+    # A chapter-split segment (non-empty input_opts, i.e. -ss/-t applied) must NOT:
+    # ffmpeg copies the *entire* source chapter list, shifts it by -ss, and clamps
+    # the pre-window entries to zero — so the segment ends up with a zero-length
+    # chapter at 0:00 and trailing chapters that point past its own end. Disable
+    # chapter mapping (-map_chapters -1) on split segments so each episode has a
+    # clean, empty chapter list instead of phantom marks from its neighbors.
+    if [[ -n "$input_opts" ]]; then
+	    FFMPEG_CMD+=(-map_chapters -1 -f "$CONTAINER" "$output_file" -y)
+    else
+	    FFMPEG_CMD+=(-map_chapters 0 -f "$CONTAINER" "$output_file" -y)
+    fi
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3145,6 +3248,31 @@ done
 # VALIDATE ARGUMENTS
 # ════════════════════════════════════════════════════════════════════════════
 
+# Normalize a zero-padded --episode to a bare integer. Later comparisons use
+# arithmetic (( )) / -ne, and "08"/"09" are parsed as octal there, which both
+# errors out ("value too great for base") and — because the failed test is
+# treated as false — silently disables the episode filter so the whole season
+# encodes. 10# forces base-10.
+if [[ -n "$EPISODE_NUM" ]]; then
+	if [[ "$EPISODE_NUM" =~ ^[0-9]+$ ]]; then
+		EPISODE_NUM=$((10#$EPISODE_NUM))
+	else
+		echo -e "${RED}Error: --episode must be a number (got '$EPISODE_NUM')${RESET}"
+		exit 1
+	fi
+fi
+
+# Validate --chapters-per-episode. Anything other than "auto" must be a positive
+# integer: a user-supplied 0 (or non-number) bypasses the auto path's guard and
+# reaches the ceiling-division below, where "/ 0" aborts the run under set -e.
+if [[ "$CHAPTERS_PER_EPISODE" != "auto" ]]; then
+	if ! [[ "$CHAPTERS_PER_EPISODE" =~ ^[0-9]+$ ]] || [[ "$CHAPTERS_PER_EPISODE" -lt 1 ]]; then
+		echo -e "${RED}Error: --chapters-per-episode must be 'auto' or a positive integer (got '$CHAPTERS_PER_EPISODE')${RESET}"
+		exit 1
+	fi
+	CHAPTERS_PER_EPISODE=$((10#$CHAPTERS_PER_EPISODE))
+fi
+
 if [[ $# -lt 1 ]]; then
 	echo -e "${RED}Error: Source required (directory or file)${RESET}"
 	echo "Use -h or --help for usage information"
@@ -3162,8 +3290,13 @@ if [[ $# -gt 1 ]]; then
 	# Multiple arguments - last one might be output directory
 	last_arg="${!#}"
 
-    # Check if last arg is an existing directory OR looks like a path (contains /)
-    if [[ -d "$last_arg" ]] || [[ "$last_arg" == */* ]]; then
+    # Check if last arg is an existing directory OR looks like a path (contains /),
+    # but NOT if it's an existing file. Without the file guard, an unquoted glob
+    # with no explicit output dir (transcode-monster.sh /rips/ep_*.mkv) would have
+    # its last matched episode reinterpreted as the output directory and dropped
+    # from the batch. A real output dir is either an existing directory or a path
+    # that doesn't yet exist — never an existing regular file.
+    if { [[ -d "$last_arg" ]] || [[ "$last_arg" == */* ]]; } && [[ ! -f "$last_arg" ]]; then
 	    # Last arg is output directory (or intended to be)
 	    OUTPUT_DIR_ARG="$last_arg"
 	    # All arguments except the last are source files/directory
@@ -3287,6 +3420,10 @@ if [[ -n "$YEAR" ]]; then
 	CONTENT_NAME="$CONTENT_NAME ($YEAR)"
 fi
 
+# Scrub path separators / control chars so a metadata title like
+# "AC/DC: Let There Be Rock" can't produce a broken output path.
+CONTENT_NAME=$(sanitize_filename "$CONTENT_NAME")
+
 # Create output directory
 if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
 	echo -e "${RED}Error: Cannot create output directory: $OUTPUT_DIR${RESET}"
@@ -3369,7 +3506,10 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 		max_duration=0
 		max_file=""
 		for file in "${video_files[@]}"; do
-			duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null)
+			# || true: a single unreadable/corrupt file should be skipped
+			# (its duration stays empty and fails the numeric test below),
+			# not abort selection of the longest file under set -e.
+			duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null || true)
 			duration=${duration//,/}
 			if [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$duration > $max_duration" | bc -l) )); then
 				max_duration="$duration"
@@ -3399,7 +3539,7 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 		# Extract movie name from file if in bulk mode
 		movie_name="$CONTENT_NAME"
 		if [[ "$BULK_MOVIES" == "true" ]]; then
-			movie_name=$(extract_name "$video_file" "movie")
+			movie_name=$(sanitize_filename "$(extract_name "$video_file" "movie")")
 		fi
 
 		output_file="${OUTPUT_DIR%/}/${movie_name}.mkv"
@@ -3414,13 +3554,13 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 		echo -e "${BOLD}Processing:${RESET} $video_file"
 		echo -e "${BOLD}Output:${RESET} $output_file"
 
-		src_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$video_file" 2>/dev/null)
+		src_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$video_file" 2>/dev/null || true)
 		echo -e "${BOLD}Duration:${RESET}    $(format_duration "$src_duration")"
 
-		# Build the ffmpeg command (populates the FFMPEG_CMD array)
-		build_ffmpeg_command "$video_file" "$output_file"
-
+		# Dry run: build against the real output name purely for display, print the
+		# command, and move on without touching disk.
 		if [[ "$DRY_RUN" == true ]]; then
+			build_ffmpeg_command "$video_file" "$output_file"
 			echo -e "${YELLOW}[DRY RUN] Would transcode to: $output_file${RESET}"
 			echo ""
 			echo -e "${CYAN}Command that would be executed:${RESET}"
@@ -3430,6 +3570,9 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 			continue
 		fi
 
+		# Print the encoder/bit-depth summary BEFORE building (which runs the
+		# crop/interlace/telecine analysis), so the summary reads in logical order
+		# — mirroring the series path. Copy-only skips all video analysis.
 		if [[ "$COPY_ONLY" == "true" ]]; then
 			echo -e "${CYAN}Remuxing (stream copy, no re-encode)${RESET}"
 			CURRENT_OPERATION="Remuxing"
@@ -3438,7 +3581,7 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 
 			# Detect bit depth and height for informational output
 			bit_depth=$(detect_bit_depth "$video_file")
-			height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file")
+			height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$video_file" || true)
 			height=${height//,/}
 
 			# Adjust bit depth based on user preferences
@@ -3477,8 +3620,22 @@ if [[ "$CONTENT_TYPE" == "movie" ]]; then
 			CURRENT_OPERATION="Encoding"
 		fi
 
+		# Encode to a scratch ".part" file and rename into place only on success,
+		# so an interrupt/failure never leaves a truncated file that the next run
+		# would skip as "already exists".
+		tmp_output="${output_file}.part"
+		rm -f "$tmp_output" 2>/dev/null || true
+		PARTIAL_OUTPUT="$tmp_output"
+
+		# Build the ffmpeg command (populates FFMPEG_CMD), targeting the scratch file
+		build_ffmpeg_command "$video_file" "$tmp_output"
+
 		# Execute the ffmpeg command (array form, no eval — paths pass through literally)
 		"${FFMPEG_CMD[@]}"
+
+		# Success — promote the scratch file to the final name atomically
+		mv -f "$tmp_output" "$output_file"
+		PARTIAL_OUTPUT=""
 
 		CURRENT_OPERATION=""
 		CURRENT_FILE=""
@@ -3494,11 +3651,24 @@ else
 	# SERIES MODE
 	# ────────────────────────────────────────
 
+    # Lowest season being processed (SEASONS_TO_PROCESS is sorted ascending). Only
+    # this season may claim tagless files via the context fallback, so a file with
+    # no season signal of its own is transcoded once — attributed to the lowest
+    # season — instead of once per season pass. With a single season this is
+    # always the current one, so behavior is unchanged for the common case.
+    FIRST_SEASON="${SEASONS_TO_PROCESS[0]}"
+    [[ "$FIRST_SEASON" =~ ^[0-9]+$ ]] && FIRST_SEASON=$((10#$FIRST_SEASON))
+
     # Process each season
     for SEASON_NUM in "${SEASONS_TO_PROCESS[@]}"; do
 	    # Normalize to a bare integer: avoids octal printf errors on "08"/"09"
 	    # and keeps season comparisons consistent regardless of zero-padding.
 	    [[ "$SEASON_NUM" =~ ^[0-9]+$ ]] && SEASON_NUM=$((10#$SEASON_NUM))
+
+	    # Allow the tagless-file context fallback only in the lowest season pass.
+	    ctx_fallback_ok=false
+	    [[ "$SEASON_NUM" == "$FIRST_SEASON" ]] && ctx_fallback_ok=true
+
 	    echo -e "${BLUE}────────────────────────────────────────${RESET}"
 	    echo -e "${BOLDBLUE}PROCESSING SEASON $SEASON_NUM${RESET}"
 	    echo -e "${BLUE}────────────────────────────────────────${RESET}"
@@ -3513,7 +3683,7 @@ else
 		    for source_file in "${SOURCE_FILES[@]}"; do
 			    # Skip files that belong to a different season (explicit file
 			    # lists can span seasons; honor each file's own season tag)
-			    if [[ "$(get_effective_season "$source_file" "$(dirname "$source_file")" "$SEASON_NUM")" != "$SEASON_NUM" ]]; then
+			    if [[ "$(get_effective_season "$source_file" "$(dirname "$source_file")" "$SEASON_NUM" "$ctx_fallback_ok")" != "$SEASON_NUM" ]]; then
 				    continue
 			    fi
 			    echo "Processing: $(basename "$source_file")"
@@ -3539,7 +3709,7 @@ else
 		    # being silently dropped by integer truncation.
 		    episode_count=$(( (chapter_count + chapters_per_ep - 1) / chapters_per_ep ))
 		    echo "  File has $chapter_count chapters - will split into $episode_count episodes"
-		    src_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$source_file" 2>/dev/null)
+		    src_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$source_file" 2>/dev/null || true)
 		    echo "  Source duration: $(format_duration "$src_duration")"
 
 		    # Extract disc number from directory name
@@ -3671,7 +3841,7 @@ else
 			    # Skip files whose own season tag puts them in a different
 			    # season than the one we're processing (lets a flat or mixed
 			    # directory hold multiple seasons without cross-contamination).
-			    if [[ "$(get_effective_season "$source_file" "$disc_dir" "$SEASON_NUM")" != "$SEASON_NUM" ]]; then
+			    if [[ "$(get_effective_season "$source_file" "$disc_dir" "$SEASON_NUM" "$ctx_fallback_ok")" != "$SEASON_NUM" ]]; then
 				    continue
 			    fi
 			    # Check if this file should be split by chapters
@@ -3694,7 +3864,7 @@ else
 			# gets its own episode instead of being dropped by truncation.
 			episode_count=$(( (chapter_count + chapters_per_ep - 1) / chapters_per_ep ))
 			echo "  File has $chapter_count chapters - will split into $episode_count episodes"
-			src_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$source_file" 2>/dev/null)
+			src_duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$source_file" 2>/dev/null || true)
 			echo "  Source duration: $(format_duration "$src_duration")"
 
 			# Add each episode (group of chapters)
@@ -3936,7 +4106,7 @@ else
 
 		    # Detect bit depth and height
 		    bit_depth=$(detect_bit_depth "$source_file")
-		    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file")
+		    height=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=height -of csv=p=0 "$source_file" 2>/dev/null || true)
 		    height=${height//,/}
 
 		    # Adjust bit depth based on user preferences
@@ -4006,10 +4176,21 @@ else
 		    CURRENT_OPERATION="Encoding episode $ep_index"
 	    fi
 
+	    # Encode/remux to a scratch ".part" file and rename into place only on
+	    # success, so an interrupt or failure never leaves a truncated episode
+	    # that the next run's "already exists" check would skip as finished.
+	    tmp_output="${output_file}.part"
+	    rm -f "$tmp_output" 2>/dev/null || true
+	    PARTIAL_OUTPUT="$tmp_output"
+
 	    # Build and execute the ffmpeg command (array form, no eval). Pass the
 	    # subtitle decision we already resolved so build doesn't redo it.
-	    build_ffmpeg_command "$source_file" "$output_file" "$input_opts" "$sub_default_spec"
+	    build_ffmpeg_command "$source_file" "$tmp_output" "$input_opts" "$sub_default_spec"
 	    "${FFMPEG_CMD[@]}"
+
+	    # Success — promote the scratch file to the final name atomically
+	    mv -f "$tmp_output" "$output_file"
+	    PARTIAL_OUTPUT=""
 
 	    echo "    Complete!"
 	    echo ""

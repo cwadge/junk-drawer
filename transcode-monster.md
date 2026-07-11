@@ -437,7 +437,7 @@ The Venture Bros. - S02E02.mkv
 For files with multiple episodes marked by chapters:
 
 ```bash
-# Auto-detect chapters (files >60min)
+# Auto-detect (splits when the chapters form a repeating episodic structure)
 transcode-monster.sh "/path/to/source/"
 
 # Force chapter splitting
@@ -606,6 +606,11 @@ Note: the forced track must be tagged in `LANGUAGE` (or matched by the language
 filter) to be picked up. Properly authored discs tag forced tracks with the
 correct language; a forced track tagged `und` with no flag/title won't be
 detected.
+
+**Untagged tracks**: sources with no language metadata at all (common on DVD/VOB,
+MPEG-PS/TS, and AVI rips) report an empty language rather than `und`. Both the
+audio and subtitle language filters treat an empty tag as `und` and keep the
+track, so untagged secondary audio and subtitle streams aren't silently dropped.
 
 ## Advanced Options
 
@@ -919,7 +924,9 @@ transcode-monster.sh -e 1 -d "/mnt/rips/New Show/" "/tmp/preview/"
 - **ffprobe** (included with ffmpeg)
 - **bc** (for calculations)
 - **Optional**: VAAPI drivers for hardware encoding
-- **Optional**: nnedi filter in ffmpeg (compile with `--enable-libnnedi`)
+- **Optional**: the `nnedi` filter, for `--deinterlacer nnedi`. It's built into
+  FFmpeg (no special filter flag); distro builds configured with `--enable-gpl`
+  include it. The script downloads the required `nnedi3_weights.bin` on first use.
 
 ## License
 
