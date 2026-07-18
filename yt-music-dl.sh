@@ -18,6 +18,7 @@ CODEC="m4a"       # remux to M4A by default; use --codec copy for raw stream
 DRY_RUN=false
 VERBOSE=false
 NO_CROP=false
+NO_ALBUM_DIR=false
 
 # YouTube Music internal API — update these if artist resolution starts failing
 YTM_API_KEY="AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"   # baked into YTM web app JS
@@ -69,6 +70,9 @@ ${BLD}OPTIONS${RST}
                             copy  — write the raw stream verbatim, no processing
                                     (may produce .webm on non-purchased content)
       --no-crop           Skip the square thumbnail crop (keep 16:9 padding)
+      --no-album-dir      Don't probe the release for a fixed output directory;
+                          build the path from each track's own artist/album
+                          fields instead (may scatter one album across dirs)
   -n, --dry-run           Print what would be downloaded; nothing is fetched
   -v, --verbose           Pass --verbose to yt-dlp (very noisy)
   -h, --help              Show this help and exit
@@ -83,6 +87,7 @@ ${BLD}CONFIG FILE${RST}
     CODEC=copy             # revert to raw stream if you only use Linux hosts
     NO_CROP=true
     YTM_API_KEY=AIza...    # if the bundled key goes stale
+    NO_ALBUM_DIR=true      # revert to per-track artist/album paths
 
 ${BLD}EXAMPLES${RST}
   # Artist page (all albums — resolved automatically via YouTube Music API)
@@ -123,6 +128,18 @@ ${BLD}NOTES${RST}
     device/software compatibility only, not quality.
   • Re-runs are idempotent: --no-overwrites skips any track whose output file
     already exists. The filesystem is the state — no external tracking file.
+  • Every track from a single album/playlist URL lands in one directory. The
+    release is probed once (first track) for album artist + album title, and
+    that pair is used verbatim for the whole release, so featured artists or
+    per-track album variants ("Deluxe", "B-Sides") can't split it up. Use
+    --no-album-dir to go back to per-track path fields.
+  • Track numbers: upstream metadata wins when it's present and non-zero. In
+    practice YouTube Music almost never provides it, so the number is derived
+    — from a leading number in the title ("03 - Foo", "3. Foo"), else from the
+    playlist position. A separator after the digits is required, so
+    "99 Luftballons" and "1979" survive intact. When the title does carry a
+    number it's stripped from the title tag, since the filename already
+    prefixes it.
   • Release years from YouTube Music are often wrong (upload date, not release
     date). Run 'beet import <OUTDIR>' after downloading to fix tags via
     MusicBrainz. Picard (GUI) is the alternative.
@@ -145,6 +162,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output)   OUTDIR="${2:?'--output requires a value'}";   shift 2 ;;
         -c|--codec)    CODEC="${2:?'--codec requires a value'}";     shift 2 ;;
         --no-crop)     NO_CROP=true;  shift ;;
+        --no-album-dir) NO_ALBUM_DIR=true; shift ;;
         -n|--dry-run)  DRY_RUN=true;  shift ;;
         -v|--verbose)  VERBOSE=true;  shift ;;
         -h|--help)     usage; exit 0 ;;
@@ -164,12 +182,18 @@ done
 
 # ── Build yt-dlp argument array ───────────────────────────────────────────────
 #
-# Output template fallback chains:
-#   artist      → uploader        (channel name if artist tag missing)
-#   album       → playlist        (playlist title as album name)
+# The filename portion is per-track; the directory portion is decided per
+# release (see album_dir below) and prepended in the run loop, so -o is not
+# part of the shared argument array.
+#
 #   track_number → playlist_index  (position in playlist, zero-padded to 2)
 #
-OUTPUT_TMPL="${OUTDIR}/%(artist,uploader)s/%(album,playlist)s/%(track_number,playlist_index|00)02d - %(title)s.%(ext)s"
+TRACK_TMPL="%(track_number,playlist_index|00)02d - %(title)s.%(ext)s"
+
+# Fallback path used when the album probe fails or --no-album-dir is set:
+#   artist → uploader   (channel name if artist tag missing)
+#   album  → playlist   (playlist title as album name)
+LOOSE_TMPL="${OUTDIR}/%(artist,uploader)s/%(album,playlist)s/${TRACK_TMPL}"
 
 YTDLP_ARGS=(
     # Auth
@@ -187,6 +211,31 @@ YTDLP_ARGS=(
     # Prefer release_year if yt-dlp has it; fall back to upload_date
     --parse-metadata "%(release_year,upload_date)s:%(meta_date)s"
 
+    # Track number, in order of preference:
+    #   1. Upstream track_number, when present and non-zero
+    #   2. A leading number in the title ("03 - Foo"), stripped from the title
+    #   3. Position in the playlist
+    # YouTube Music functionally never supplies (1), so (2)/(3) carry nearly
+    # every download — but upstream still wins when it's actually there.
+    # FFmpegMetadataPP maps track_number → the 'track' tag on its own, so
+    # setting the field here populates both the tag and the filename.
+    #
+    # Step 1: lift a leading number out of the title into a scratch field. The
+    # separator after the digits is mandatory, or "99 Luftballons" and "1979"
+    # would lose their leading number. YTM sets 'track' alongside 'title' when
+    # it has real music metadata; strip both so the tag and filename agree.
+    # Both captures sit inside one optional group, so a title without a number
+    # matches empty and sets nothing — no "Could not interpret" line per track,
+    # and no risk of writing the literal 'NA' back when the field is absent.
+    --parse-metadata "title:^\s*(?:(?P<titletrack>\d{1,3})\s*[-–—.):]\s*(?P<title>\S.*)$)?"
+    --parse-metadata "track:^\s*(?:(?P<titletrack>\d{1,3})\s*[-–—.):]\s*(?P<track>\S.*)$)?"
+    #
+    # Step 2: take the first non-zero candidate. Missing fields default to 0,
+    # so a source reporting track 0 counts as no answer rather than as a real
+    # number. If every candidate is 0 the regex doesn't match and track_number
+    # is left alone — correct for a standalone single with no playlist.
+    --parse-metadata "%(track_number|0)s|%(titletrack|0)s|%(playlist_index|0)s:^(?:0*\|)*0*(?P<track_number>[1-9]\d*)"
+
     # Idempotency — skip tracks whose output file already exists
     --no-overwrites
 
@@ -196,9 +245,6 @@ YTDLP_ARGS=(
 
     # Treat artist pages and playlists as full collections
     --yes-playlist
-
-    # Output path
-    -o "$OUTPUT_TMPL"
 )
 
 # ── Codec / format selection ───────────────────────────────────────────────────
@@ -265,12 +311,11 @@ fi
 
 $VERBOSE  && YTDLP_ARGS+=(--verbose)
 
-# In dry-run mode: simulate without downloading and print resolved output paths
+# In dry-run mode: simulate without downloading and print resolved output paths.
+# 'filename' is the fully resolved path, so it reflects the per-release
+# directory without having to restate the output template here.
 if $DRY_RUN; then
-    YTDLP_ARGS+=(
-        --simulate
-        --print "%(artist,uploader)s/%(album,playlist)s/%(track_number,playlist_index|00)02d - %(title)s.%(ext)s"
-    )
+    YTDLP_ARGS+=(--simulate --print filename)
 fi
 
 # ── Artist URL resolver ───────────────────────────────────────────────────────
@@ -347,6 +392,40 @@ resolve_artist() {
     done
 }
 
+# ── Release directory probe ───────────────────────────────────────────────────
+#
+# Per-track fields aren't stable within a release: a guest spot changes
+# %(artist)s ("X feat. Y"), and edition/variant suffixes can change %(album)s
+# from one track to the next. Using them in the path scatters one album across
+# several directories. Instead, resolve the release once from its first track
+# and use that pair as literal path components for every track in it.
+
+# Make a string safe as a single path component and as literal output-template
+# text. Slashes would create spurious directories; a bare % would be read as a
+# template field; trailing dots/spaces are hostile on SMB and FAT targets.
+_sanitize() {
+    local s="$1"
+    s="${s//\//-}"
+    s="${s//$'\n'/ }"
+    s="${s//$'\t'/ }"
+    s="${s//%/%%}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    while [[ "$s" == *[.\ ] ]]; do s="${s%[.\ ]}"; done
+    printf '%s' "$s"
+}
+
+# Print "<album artist>\t<album title>" for a playlist/album URL, or fail.
+album_dir() {
+    local url="$1" line
+    line=$(yt-dlp --cookies-from-browser "$BROWSER" \
+                  --playlist-items 1 --skip-download --no-warnings \
+                  --print "%(album_artist,artist,playlist_uploader,uploader|)s"$'\t'"%(album,playlist_title,playlist|)s" \
+                  "$url" 2>/dev/null | head -n1) || return 1
+    [[ -n "$line" ]] || return 1
+    printf '%s' "$line"
+}
+
 # ── Run ───────────────────────────────────────────────────────────────────────
 info "Output dir : ${OUTDIR}"
 info "Browser    : ${BROWSER}"
@@ -376,7 +455,25 @@ for url in "${URLS[@]}"; do
 
     for target in "${targets[@]}"; do
         info "Fetching: ${target}"
-        if yt-dlp "${YTDLP_ARGS[@]}" "$target"; then
+
+        # Decide this release's directory before handing the URL to yt-dlp.
+        tmpl="$LOOSE_TMPL"
+        if ! $NO_ALBUM_DIR; then
+            if probe=$(album_dir "$target"); then
+                dir_artist=$(_sanitize "${probe%%$'\t'*}")
+                dir_album=$(_sanitize "${probe#*$'\t'}")
+                if [[ -n "$dir_artist" && -n "$dir_album" ]]; then
+                    tmpl="${OUTDIR}/${dir_artist}/${dir_album}/${TRACK_TMPL}"
+                    info "Release    : ${dir_artist} / ${dir_album}"
+                else
+                    warn "Release metadata incomplete — using per-track paths"
+                fi
+            else
+                warn "Could not probe release metadata — using per-track paths"
+            fi
+        fi
+
+        if yt-dlp "${YTDLP_ARGS[@]}" -o "$tmpl" "$target"; then
             ok "Finished: ${target}"
         else
             warn "Completed with errors: ${target}"
