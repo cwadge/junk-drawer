@@ -17,7 +17,7 @@ A universal video transcoding script with intelligent automatic detection for se
 - **Bulk movie processing**: Process multiple movies in one directory without manual intervention
 - **Hybrid encoding**: Stays on hardware (VAAPI) for speed and only falls back to software (x265) when the hardware genuinely can't handle the source
 - **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, with adaptive handling for mixed film/video sources
-- **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence rather than guessing from combing alone, and recognizes film whose cadence is too broken to decimate so it keeps its native rate instead of being resampled into judder
+- **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence, and recognizes film whose cadence is too broken to decimate so it keeps its native rate instead of being resampled into judder
 - **Measured field order**: Resolves top/bottom field order by testing both and keeping whichever leaves less combing, rather than trusting container tags that are frequently wrong; sources with no consistent field order are detected and handled conservatively
 - **Automatic filter selection**: Profiles each source and picks the deinterlacer that suits it, falling back gracefully when a filter or its weights are unavailable
 - **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD), and tags untagged sources with the correct standard so players don't guess
@@ -217,8 +217,10 @@ frame, since the video isn't being re-encoded.
 ### Interlacing Detection
 
 The script samples frames at multiple points and applies a deinterlacer when more
-than 5% of sampled frames show interlacing. The threshold is deliberately low so
-that partially interlaced content is still handled.
+than 5% of sampled frames show interlacing. The threshold is low because many
+sources are only partly interlaced — progressive film with interlaced titles or
+optical effects, for instance — and those frames need the same treatment as a
+fully interlaced source.
 
 **Field order** is resolved by measurement rather than by metadata. Sample points
 are deinterlaced at both field orders and scored on how much combing each leaves;
@@ -243,12 +245,13 @@ order, so motion repeatedly advances and snaps back.
 
 ### Telecine Detection (3:2 Pulldown)
 
-Telecine is checked at **any resolution** (not just SD), since HD broadcast and
-disc masters can be telecined too. Detection samples the cadence at four points
-(20%, 40%, 60%, 80% through the file) rather than trusting the opening frames,
-and favors the 29.97/23.976 rate family that 3:2 pulldown comes from, so PAL and
-native-progressive film aren't dragged through an inverse telecine they don't
-need (`--scan-ivtc` overrides the rate prior).
+Telecine is checked at **every resolution**, since HD broadcast and disc masters
+carry 3:2 pulldown as often as SD ones do. Detection samples the cadence at four
+points (20%, 40%, 60%, 80% through the file), because cadence frequently varies
+across a disc and any single sample can land on a static scene that shows no
+cadence at all. Detection favors the 29.97/23.976 rate family that 3:2 pulldown
+comes from, so PAL and native-progressive film aren't dragged through an inverse
+telecine they don't need (`--scan-ivtc` overrides the rate prior).
 
 Sources are sorted into three classes:
 
@@ -550,8 +553,8 @@ triggers are capability blockers, not quality preferences:
 - **Non-4:2:0 chroma** (4:2:2 / 4:4:4), which AMD/Intel HEVC encoders don't take
 - **`dvvideo`** and similar formats that have no usable hardware path
 
-Resolution and color metadata no longer force software: SD encodes on hardware
-just fine, and color is handled by tagging the output (see
+Resolution and color metadata don't affect encoder choice: SD encodes on
+hardware as readily as HD, and color is handled by tagging the output (see
 [Color Space](#color-space)) rather than by switching encoders. Interlaced and
 telecined sources also stay on hardware — the deinterlace/IVTC filtering runs on
 the CPU *before* the frames are uploaded to the GPU, so the encode itself is
@@ -768,8 +771,8 @@ transcode-monster.sh --colorspace none "/path/to/source/"
 DVD and older rips), the script tags the **output** with the correct standard by
 convention — BT.601 for SD (`smpte170m` for ≤480-line, `bt470bg` for 576-line)
 and BT.709 for HD — so players render colors correctly instead of guessing. This
-is a metadata tag on the output, not a conversion of the pixels, and it no longer
-forces a switch to software encoding the way earlier versions did.
+is a metadata tag on the output, not a conversion of the pixels, so it costs
+nothing to apply and has no bearing on which encoder is used.
 
 ## Troubleshooting
 
