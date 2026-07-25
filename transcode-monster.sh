@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.18.0"
+SCRIPT_VERSION="1.21.1"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -105,10 +105,15 @@ DEFAULT_COPY_ONLY="false"  # Remux mode: copy the source video and audio streams
 DEFAULT_DETECT_INTERLACING="true"
 DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Force adaptive deinterlacing for mixed content
 DEFAULT_FORCE_DEINTERLACE="false"  # Force deinterlacing even on progressive content
-DEFAULT_DEINTERLACER="bwdif"  # bwdif (default - best for most content), nnedi (best for noisy/difficult sources), yadif
+DEFAULT_DEINTERLACER="auto"  # auto = pick per source from a content profile (see select_deinterlacer), bwdif (safe general default), nnedi (best spatial reconstruction, wants a clean high-motion source), yadif
+# Thresholds for automatic deinterlacer selection. Both are preferences rather
+# than correctness gates — picking the runner-up costs some quality, not a
+# broken encode — so unlike the parity and rate thresholds these are meant to
+# be tuned against your own library.
+AUTO_DEINT_MOTION_PCT=85   # combed% above which the temporal path is mostly unavailable
 DEFAULT_DEINTERLACE_RATE="auto"  # Output rate for the deinterlace path (telecined film is IVTC'd separately, so this only governs true interlaced video). auto = field-rate for NTSC-family video (60i→60p) and frame-rate for PAL/unknown (to avoid double-bobbing 25PsF film); field = always double-rate; frame = always single-rate
 DEFAULT_DETECT_CROP="true"
-DEFAULT_DETECT_PULLDOWN="auto"  # auto = detect at any resolution (was SD-only), true = force on, false = force off
+DEFAULT_DETECT_PULLDOWN="auto"  # auto = scan at any resolution and let the cadence test decide, true = scan even when the frame-rate prior would skip it, always = skip detection and inverse-telecine unconditionally, false = never inverse telecine
 DEFAULT_IVTC_MODE="adaptive"  # How to drop the pulldown-duplicated frames after inverse telecine. adaptive = mpdecimate + VFR output: drops only true duplicates, so cleanly-telecined film becomes 23.976 while interlaced-video/effects sections (common in anime OVAs) keep their unique frames at ~29.97 with no judder. fixed = classic decimate + 23.976 CFR: exact 1-in-5 drop, best for uniformly-telecined film and players that require constant frame rate, but judders on mixed-cadence sources
 DEFAULT_FIELDMATCH_MODE="pc_n"  # fieldmatch matching thoroughness. pc_n (default) tries the current+next field combinations plus a 5th-field check. pcn_ub additionally tries the previous-field (u/b) combinations — the most exhaustive matcher, which reconstructs more frames across cadence breaks (fewer orphans left for the deinterlacer) at a slightly higher risk of a bad match. Useful on mixed-cadence anime that fights pc_n
 DEFAULT_SPLIT_CHAPTERS="auto"  # auto = split series files whose chapters form a repeating episodic structure, true = force on, false = force off
@@ -287,6 +292,9 @@ DEINTERLACER="${DEINTERLACER:-$DEFAULT_DEINTERLACER}"
 DEINTERLACE_RATE="${DEINTERLACE_RATE:-$DEFAULT_DEINTERLACE_RATE}"
 DETECT_CROP="${DETECT_CROP:-$DEFAULT_DETECT_CROP}"
 DETECT_PULLDOWN="${DETECT_PULLDOWN:-$DEFAULT_DETECT_PULLDOWN}"
+# Set by the analysis when detect_telecine reports film-interlaced: suppresses
+# field-rate (bob) output for sources whose fields pair up into film frames.
+FILM_RATE_LOCK="false"
 IVTC_MODE="${IVTC_MODE:-$DEFAULT_IVTC_MODE}"
 FIELDMATCH_MODE="${FIELDMATCH_MODE:-$DEFAULT_FIELDMATCH_MODE}"
 SPLIT_CHAPTERS="${SPLIT_CHAPTERS:-$DEFAULT_SPLIT_CHAPTERS}"
@@ -398,16 +406,30 @@ ${BOLDBLUE}VIDEO PROCESSING${RESET}
 			 ${CYAN}bwdif${RESET}  Bob weaver — best quality for most content
 			 ${CYAN}nnedi${RESET}  Neural network — best for noisy or difficult sources
 			 ${CYAN}yadif${RESET}  Yet another deinterlacer — fast and widely compatible
+			 ${CYAN}auto${RESET}   Profile the source and pick (default). nnedi for clean
+				  high-motion material where the temporal path is unusable
+				  and spatial reconstruction is all that is left; bwdif
+				  otherwise. Falls back automatically if nnedi is missing.
   ${GREEN}--deinterlace-rate${RESET} ${YELLOW}RATE${RESET}  Output rate when deinterlacing true interlaced video
 			 ${CYAN}auto${RESET}   Field-rate for NTSC video (60i→60p), frame-rate for PAL/unknown
 			 ${CYAN}field${RESET}  Always double-rate (one frame per field — smoothest motion)
 			 ${CYAN}frame${RESET}  Always single-rate (one frame per frame — preserves source fps)
 			 Telecined film is inverse-telecined regardless of this setting.
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
-  ${GREEN}--force-ivtc${RESET}           Run the telecine scan even when the frame-rate prior
+  ${GREEN}--force-ivtc${RESET}           Inverse telecine unconditionally, skipping detection.
+			 For film masters whose cadence was shredded by video
+			 editing (re-cut anime OVAs) — the source looks combed
+			 on nearly every frame and no statistic separates it
+			 from true interlaced video, but it is still 24fps film.
+  ${GREEN}--scan-ivtc${RESET}            Run the telecine scan even when the frame-rate prior
 			 would skip it (e.g. a PAL or oddly-flagged film master).
 			 The cadence test still gates: a genuinely progressive
 			 source is left alone. Auto already scans at any resolution.
+  ${GREEN}--pulldown${RESET} ${YELLOW}MODE${RESET}        Explicit form of the above
+			 ${CYAN}auto${RESET}   detect and decide (default)
+			 ${CYAN}scan${RESET}   detect even on non-NTSC rates
+			 ${CYAN}always${RESET} skip detection, always inverse telecine
+			 ${CYAN}never${RESET}  skip detection, never inverse telecine
   ${GREEN}--ivtc-mode${RESET} ${YELLOW}MODE${RESET}       How to drop pulldown duplicates after inverse telecine
 			 ${CYAN}adaptive${RESET} mpdecimate + VFR — keeps unique frames in mixed
 				  film/video sources (anime OVAs); no judder (default)
@@ -825,6 +847,100 @@ get_field_order() {
 	esac
 }
 
+# Residual combing left after a frame-rate deinterlace at a given parity.
+# Deinterlacing at the correct parity removes nearly all of it; the wrong
+# parity leaves the comb pattern largely intact. Echoes a percentage, or ""
+# when the sample yields nothing usable.
+measure_residual_comb() {
+	local input="$1" seek="$2" parity="$3"
+	local out t b pr tot
+	out=$(ffmpeg -nostdin -ss "$seek" -i "$input" \
+		-vf "bwdif=mode=0:parity=${parity},idet" \
+		-frames:v 200 -an -sn -f null - 2>&1 |
+		grep "Multi frame detection:" | tail -1)
+			t=$(grep -oP 'TFF:\s*\K[0-9]+' <<<"$out" || echo ""); b=$(grep -oP 'BFF:\s*\K[0-9]+' <<<"$out" || echo "")
+			pr=$(grep -oP 'Progressive:\s*\K[0-9]+' <<<"$out" || echo "")
+			[[ "$t" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$pr" =~ ^[0-9]+$ ]] || { echo ""; return; }
+			tot=$((t + b + pr))
+			[[ $tot -eq 0 ]] && { echo ""; return; }
+			echo $(( (t + b) * 100 / tot ))
+		}
+
+# Resolve field parity by measurement instead of by metadata or idet's vote.
+# Both lie: the container tag is a single value that cannot describe a source
+# assembled from mixed-parity masters, and idet's TFF/BFF vote has been
+# observed calling a segment 360-to-0 in the direction that measurably loses.
+# Trying both parities and keeping the one that leaves less combing is
+# decisive rather than advisory.
+#
+# Echoes "ORDER CONFIDENCE" — e.g. "tff high", "bff low". Low confidence means
+# the winner changed between sample points, i.e. the file has no single field
+# order, and the caller must not bob it.
+probe_field_parity() {
+	local input="$1"
+	local meta_order
+	meta_order=$(get_field_order "$input"); meta_order="${meta_order:-tff}"
+
+	local duration
+	duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null)
+	duration=${duration//,/}
+	if ! [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+		echo "${meta_order} low"
+		return
+	fi
+
+	# Deliberately offset from the 20/40/60/80 grid the other detectors use.
+	# A source whose parity alternates in blocks can alias against a regular
+	# grid and read as perfectly consistent.
+	local points=("0.15" "0.35" "0.50" "0.65" "0.85")
+	local tff_wins=0 bff_wins=0 decisive=0
+
+	for pct in "${points[@]}"; do
+		local seek
+		seek=$(echo "scale=2; $duration * $pct" | bc 2>/dev/null || echo "0")
+		[[ "$seek" =~ ^[0-9]+\.?[0-9]*$ ]] || continue
+
+		local r_tff r_bff
+		r_tff=$(measure_residual_comb "$input" "$seek" 0)
+		r_bff=$(measure_residual_comb "$input" "$seek" 1)
+		[[ "$r_tff" =~ ^[0-9]+$ && "$r_bff" =~ ^[0-9]+$ ]] || continue
+
+		# Require real separation before calling a winner. Within the margin the
+		# two reconstructions are equivalent and the sample is uninformative —
+		# counting it would manufacture confidence out of noise.
+		if [[ $((r_tff + 5)) -lt $r_bff ]]; then
+			tff_wins=$((tff_wins + 1)); decisive=$((decisive + 1))
+		elif [[ $((r_bff + 5)) -lt $r_tff ]]; then
+			bff_wins=$((bff_wins + 1)); decisive=$((decisive + 1))
+		fi
+	done
+
+	if [[ $decisive -lt 3 ]]; then
+		echo -e "    ${BOLD}Field order:${RESET} ${meta_order} (from container — too few decisive samples to verify)" >&2
+		echo "        Field order unverified — using ${meta_order} and forcing frame-rate output" >&2
+		echo "${meta_order} low"
+		return
+	fi
+
+	local winner share
+	if [[ $tff_wins -gt $bff_wins ]]; then
+		winner="tff"; share=$((tff_wins * 100 / decisive))
+	else
+		winner="bff"; share=$((bff_wins * 100 / decisive))
+	fi
+
+	if [[ $share -ge 75 ]]; then
+		local note=""
+		[[ "$winner" != "$meta_order" ]] && note=" — overrides container tag '${meta_order}'"
+		echo -e "    ${BOLD}Field order:${RESET} ${winner} (measured, ${tff_wins} tff / ${bff_wins} bff)${note}" >&2
+		echo "${winner} high"
+	else
+		echo -e "    ${BOLD}Field order:${RESET} INCONSISTENT (${tff_wins} tff / ${bff_wins} bff across ${decisive} samples)" >&2
+		echo "        Source mixes field orders — using ${winner} and forcing frame-rate output" >&2
+		echo "${winner} low"
+	fi
+}
+
 # Resolve the output rate for the deinterlace path: "field" (double-rate,
 # motion-preserving) or "frame" (single-rate). Honors an explicit
 # DEINTERLACE_RATE; in "auto" it uses the rate family — true NTSC interlaced
@@ -837,7 +953,20 @@ resolve_deint_rate() {
 		field|double) echo "field"; return ;;
 		frame|single) echo "frame"; return ;;
 	esac
-	# auto
+	# auto. Two independent reasons to refuse field rate, both set by the
+	# caller via FILM_RATE_LOCK. A film-origin source whose fields pair up must
+	# never be bobbed:
+	# double-rate would reconstruct each drawing twice from alternating single
+	# fields, which reads as vertical shimmer laid over the pulldown's own 2:3
+	# repeat rhythm. And a source with no consistent field order must not be
+	# bobbed either: at frame rate a parity error costs only spatial softness,
+	# while at field rate it emits each frame's fields in reversed temporal
+	# order, which reads as violent back-and-forth judder.
+	# Only true video-origin 60i with verified parity gains anything here.
+	if [[ "$FILM_RATE_LOCK" == "true" ]]; then
+		echo "frame"
+		return
+	fi
 	local family
 	family=$(classify_frame_rate "$(get_frame_rate "$input")")
 	if [[ "$family" == "ntsc" ]]; then
@@ -859,6 +988,18 @@ detect_telecine() {
 	# case we still run the scan to catch sources whose rate tag lies. The
 	# repeated-field cadence test below remains the real gate either way, so a
 	# genuinely progressive forced source still returns "none".
+	# Unconditional override. Some masters defeat every statistical test we
+	# have: anime telecined and then re-edited on video has its 3:2 cadence
+	# shredded at each cut, which starves the repeat counter and leaves enough
+	# orphan fields behind that the trial fieldmatch never fully collapses.
+	# When the user has eyeballed the source and knows it is film, take their
+	# word for it and skip the eight-pass scan entirely.
+	if [[ "$DETECT_PULLDOWN" == "always" ]]; then
+		echo -e "    ${BOLD}Telecine:${RESET}    forced by user (detection skipped)" >&2
+		echo "telecine"
+		return
+	fi
+
 	local family
 	family=$(classify_frame_rate "$(get_frame_rate "$input")")
 	if [[ "$DETECT_PULLDOWN" != "true" && "$family" != "ntsc" ]]; then
@@ -982,10 +1123,48 @@ detect_telecine() {
 			# absolute residual AND a large relative collapse. True interlaced
 			# video can't satisfy both — its fields have no progressive frame to
 			# match back to, so combing barely moves.
-			local drop_floor=$(( combed_pct * 40 / 100 ))  # require ≥60% collapse
-			if [[ $residual_pct -le 8 && $residual_pct -le $drop_floor ]]; then
-				echo "        Residual combing ${residual_pct}% (was ${combed_pct}%) — collapsed, telecine confirmed" >&2
+			# Two accept paths, because a flat absolute floor can't tell
+			# "telecine with cadence breaks" from "true interlaced video":
+			#
+			#   clean  — residual ≤8% with a ≥60% collapse. Uniformly telecined
+			#            film; the matcher reconstructed essentially everything.
+			#
+			#   ragged — residual ≤25% with a ≥75% collapse. The signature of
+			#            film that was telecined and then cut on video: the bulk
+			#            of the frames match back perfectly, but every edit point
+			#            orphans a field or two that fieldmatch can never pair.
+			#            Gunsmith Cats Bulletproof measures 98% → 11% here.
+			#            A true 60i source cannot reach this: each of its fields
+			#            is a distinct instant, so no pairing fieldmatch tries is
+			#            clean and the residual barely moves off the original.
+			#            The IVTC chain's yadif=deint=1 stage exists precisely to
+			#            mop up this residue, so admitting it is safe.
+			# Two outcomes, because "the fields pair up" and "there is a
+			# cadence safe to decimate" are different claims:
+			#
+			#   telecine       — residual ≤8% with a ≥60% collapse. The matcher
+			#                    reconstructed essentially everything, so a
+			#                    1-in-5 drop lands on real duplicates.
+			#
+			#   film-interlaced — residual ≤25% with a ≥75% collapse. The fields
+			#                    pair up (so this is film, not video) but the
+			#                    5-frame cadence is too broken to decimate: the
+			#                    repeat counter is starved and the file mixes
+			#                    film blocks, video blocks and soft-telecine
+			#                    pockets. Both target rates are wrong here —
+			#                    23.976 judders the video, 59.94 shimmers the
+			#                    film — so we keep the source rate and only
+			#                    remove combing. Gunsmith Cats Bulletproof
+			#                    measures 98% → 11% and lands here.
+			local collapse_pct=$(( (combed_pct - residual_pct) * 100 / combed_pct ))
+			if [[ $residual_pct -le 8 && $collapse_pct -ge 60 ]]; then
+				echo "        Residual combing ${residual_pct}% (was ${combed_pct}%, ${collapse_pct}% collapse) — telecine confirmed" >&2
 				echo "telecine"
+				return
+			fi
+			if [[ $residual_pct -le 25 && $collapse_pct -ge 75 ]]; then
+				echo "        Residual combing ${residual_pct}% (was ${combed_pct}%, ${collapse_pct}% collapse) — film origin, cadence too broken to decimate" >&2
+				echo "film-interlaced"
 				return
 			fi
 			echo "        Residual combing ${residual_pct}% (was ${combed_pct}%) — persists, true interlaced video" >&2
@@ -1086,6 +1265,92 @@ done
     echo "$result"
 }
 
+# Fraction of frames showing combing, as a motion proxy. Localized combing means
+# objects moving against a static background; near-total combing means the whole
+# frame is in motion (pans, scrolls, camera moves). That distinction is what
+# decides the deinterlacer, because a motion-adaptive filter weighs a temporal
+# estimate against a spatial one per pixel, and global motion makes co-located
+# pixels differ everywhere — so the motion test fires on everything, the temporal
+# path is rejected, and the filter degrades into a plain spatial interpolator.
+# Spatial reconstruction is the one job nnedi does markedly better.
+#
+# An earlier version paired this with a bitrate-based "cleanliness" measure meant
+# to keep nnedi away from grainy sources it would sharpen into artifacts. That
+# was unsound: the sample was encoded while still interlaced, and combing is the
+# most expensive thing in such a frame, so the bitrate mostly measured combing —
+# the very quantity below. The two tests moved together and the pair could only
+# ever veto itself. Measuring motion alone is honest about what is being tested.
+#
+# Echoes a percentage, or "" if the sample fails.
+measure_motion_pct() {
+	local input="$1"
+	local duration rc=0
+	duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null) || true
+	duration=${duration//,/}
+	if ! [[ "$duration" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+		echo "        profile: no usable duration" >&2; echo ""; return
+	fi
+
+	local seek
+	seek=$(echo "scale=2; $duration * 0.45" | bc 2>/dev/null) || true
+	[[ "$seek" =~ ^[0-9]+\.?[0-9]*$ ]] || seek="0"
+
+	local out
+	out=$(ffmpeg -nostdin -ss "$seek" -i "$input" -vf idet -frames:v 250 \
+		-an -sn -f null - 2>&1) || rc=$?
+			if [[ $rc -ne 0 ]]; then
+				echo "        profile: idet sample failed (rc=${rc})" >&2; echo ""; return
+			fi
+
+			local matches idet_line
+			matches=$(grep "Multi frame detection:" <<<"$out" || true)
+			idet_line="${matches##*$'\n'}"
+			[[ -n "$idet_line" ]] || { echo "        profile: idet produced no summary" >&2; echo ""; return; }
+
+			local t b pr
+			t=$(grep -oP 'TFF:\s*\K[0-9]+' <<<"$idet_line" || echo "")
+			b=$(grep -oP 'BFF:\s*\K[0-9]+' <<<"$idet_line" || echo "")
+			pr=$(grep -oP 'Progressive:\s*\K[0-9]+' <<<"$idet_line" || echo "")
+			if ! [[ "$t" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$pr" =~ ^[0-9]+$ ]]; then
+				echo "        profile: could not parse idet summary" >&2; echo ""; return
+			fi
+
+			local frames=$((t + b + pr))
+			[[ $frames -eq 0 ]] && { echo "        profile: empty sample" >&2; echo ""; return; }
+
+			echo "$(( (t + b) * 100 / frames ))"
+		}
+
+# Choose a deinterlacer for this source. An explicit --deinterlacer always wins;
+# "auto" profiles the content. nnedi is selected only when the source is BOTH
+# motion-dominated (temporal path unavailable, so spatial quality is all that is
+# left) AND clean (nothing for it to amplify). Everything else gets bwdif, whose
+# worst case — soft and a little blocky — is milder than nnedi's worst case of
+# rendering compression artifacts as confident detail.
+select_deinterlacer() {
+	local input="$1"
+	if [[ "$DEINTERLACER" != "auto" ]]; then
+		echo "$DEINTERLACER"
+		return
+	fi
+
+	local combed
+	combed=$(measure_motion_pct "$input")
+	if ! [[ "$combed" =~ ^[0-9]+$ ]]; then
+		echo -e "    ${BOLD}Filter:${RESET}      bwdif (motion profile unavailable — using safe default)" >&2
+		echo "bwdif"
+		return
+	fi
+
+	if [[ $combed -ge $AUTO_DEINT_MOTION_PCT ]]; then
+		echo -e "    ${BOLD}Filter:${RESET}      nnedi (motion ${combed}% — using spatial reconstruction)" >&2
+		echo "nnedi"
+	else
+		echo -e "    ${BOLD}Filter:${RESET}      bwdif (motion ${combed}% — using motion-adaptive reconstruction)" >&2
+		echo "bwdif"
+	fi
+}
+
 # Apply deinterlacer based on DEINTERLACER setting, field order, and rate
 # Returns the filter string to add to vf chain
 #   $1 field_order : "tff", "bff", or "auto"
@@ -1117,35 +1382,41 @@ apply_deinterlacer() {
 		mode="0"
 	fi
 
-	case "$DEINTERLACER" in
+	# Degrade rather than abort. A missing filter or a failed weights download
+	# should cost quality on one file, not kill a library run partway through.
+	local choice="${3:-$DEINTERLACER}"
+	[[ "$choice" == "auto" ]] && choice="bwdif"
+
+	if [[ "$choice" == "nnedi" ]]; then
+		if ! check_nnedi_available; then
+			echo "        nnedi unavailable in this ffmpeg build — falling back to bwdif" >&2
+			choice="bwdif"
+		elif ! ensure_nnedi_weights; then
+			echo "        nnedi weights unavailable (download failed) — falling back to bwdif" >&2
+			echo "        Fetch manually to $NNEDI_WEIGHTS_FILE to enable it:" >&2
+			echo "        https://github.com/dubhater/vapoursynth-nnedi3/raw/master/src/nnedi3_weights.bin" >&2
+			choice="bwdif"
+		fi
+	fi
+	if [[ "$choice" == "bwdif" ]] && ! check_filter_available bwdif; then
+		echo "        bwdif unavailable in this ffmpeg build — falling back to yadif" >&2
+		choice="yadif"
+	fi
+
+	case "$choice" in
 		nnedi)
-			# Use nnedi only (error if unavailable)
-			if ! check_nnedi_available; then
-				echo "    ERROR: nnedi filter not available in your ffmpeg build" >&2
-				echo "    Install ffmpeg with nnedi support or use --deinterlacer bwdif" >&2
-				return 1
-			fi
-			# Download weights file if needed
-			if ! ensure_nnedi_weights; then
-				echo "    ERROR: Failed to download nnedi3_weights.bin" >&2
-				echo "    Download manually from: https://github.com/dubhater/vapoursynth-nnedi3/raw/master/src/nnedi3_weights.bin" >&2
-				echo "    Place in: $NNEDI_WEIGHTS_FILE" >&2
-				return 1
-			fi
-			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}"
+			# qual=2 averages two predictions, which measurably reduces the
+			# overshoot nnedi produces at high-contrast edges. Cheap at SD.
+			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}:qual=2"
 			echo "        Using nnedi deinterlacer (high quality, neural network, ${rate}-rate)" >&2
-			;;
-		bwdif)
-			filter="bwdif=mode=${mode}:parity=$parity"
-			echo "        Using bwdif deinterlacer (bob weaver, ${rate}-rate)" >&2
 			;;
 		yadif)
 			filter="yadif=mode=${mode}:parity=$parity"
 			echo "        Using yadif deinterlacer (${rate}-rate)" >&2
 			;;
-		auto|*)
+		bwdif|*)
 			filter="bwdif=mode=${mode}:parity=$parity"
-			echo "        Using bwdif deinterlacer (default, ${rate}-rate)" >&2
+			echo "        Using bwdif deinterlacer (bob weaver, ${rate}-rate)" >&2
 			;;
 	esac
 
@@ -1301,16 +1572,32 @@ ensure_nnedi_weights() {
     return 1
 }
 
+# Check whether a named filter exists in this ffmpeg build.
+# Capture first, then grep. Piping ffmpeg straight into `grep -q` looks correct
+# but inverts under `set -o pipefail`: grep exits the moment it matches, ffmpeg
+# takes SIGPIPE and returns 141, and the pipeline reports failure precisely
+# because the filter WAS found.
+check_filter_available() {
+	local ffmpeg_output re
+	ffmpeg_output=$(ffmpeg -hide_banner -filters 2>&1) || return 1
+	# Matched in-shell rather than through a pipe. Capturing first is not enough
+	# on its own: `echo "$big" | grep -q` re-creates the same SIGPIPE race once
+	# the text outgrows the 64K pipe buffer.
+	re="[[:space:]]${1}[[:space:]]"
+	[[ "$ffmpeg_output" =~ $re ]]
+}
+
 # Check if nnedi deinterlacer is available
 check_nnedi_available() {
 	# Only check if nnedi filter exists in ffmpeg
 	# Don't check weights file here - we'll download it when needed
 	# Capture output first to avoid pipeline issues with set -euo pipefail
-	local ffmpeg_output=$(ffmpeg -hide_banner -filters 2>&1)
-	if echo "$ffmpeg_output" | grep -q "nnedi"; then
-		return 0  # Filter found
-	fi
-	return 1  # Filter not found
+	local ffmpeg_output
+	ffmpeg_output=$(ffmpeg -hide_banner -filters 2>&1) || return 1
+	# In-shell match: piping into `grep -q` can trip SIGPIPE under pipefail once
+	# the filter list outgrows the pipe buffer, inverting the result.
+	[[ "$ffmpeg_output" == *nnedi* ]] && return 0
+	return 1
 }
 
 # Build video filter chain - works for both VAAPI and software encoding
@@ -1390,9 +1677,7 @@ build_vf() {
 	# reliable at HD as at SD. detect_telecine's own rate prior keeps it from
 	# firing on PAL or already-progressive film.
 	local should_check_telecine=false
-	if [[ "$DETECT_PULLDOWN" == "true" ]]; then
-		should_check_telecine=true
-	elif [[ "$DETECT_PULLDOWN" == "auto" ]]; then
+	if [[ "$DETECT_PULLDOWN" == "true" || "$DETECT_PULLDOWN" == "auto" || "$DETECT_PULLDOWN" == "always" ]]; then
 		should_check_telecine=true
 	fi
 
@@ -1415,6 +1700,12 @@ build_vf() {
 			vf_cpu="${vf_cpu}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,yadif=mode=0:parity=-1:deint=1,${ivtc_decimator}"
 			echo "        Inverse telecine via fieldmatch+yadif+${ivtc_decimator} (CPU, will be slower)" >&2
 			skip_interlace=true
+		elif [[ "$telecine" == "film-interlaced" ]]; then
+			# Film origin without a decimatable cadence. Resampling to any
+			# fixed rate judders some part of the file, so keep the source rate
+			# and let the ordinary deinterlace path strip the combing.
+			FILM_RATE_LOCK="true"
+			echo "        Keeping source rate — deinterlace only, no decimation" >&2
 		fi
 	fi
 
@@ -1428,16 +1719,27 @@ build_vf() {
 	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
 		local deint_rate=$(resolve_deint_rate "$input")
-		local deint_filter=$(apply_deinterlacer "$fm_order" "$deint_rate")
+		local deint_choice=$(select_deinterlacer "$input")
+		local deint_filter=$(apply_deinterlacer "$fm_order" "$deint_rate" "$deint_choice")
 		if [[ -n "$deint_filter" ]]; then
 			vf_cpu="${vf_cpu}${deint_filter}"
 		fi
 	elif [[ "$DETECT_INTERLACING" == "true" && "$skip_interlace" == "false" ]]; then
 		local interlacing=$(detect_interlacing "$input")
 		if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
+			# idet's TFF/BFF vote picked the parity here historically, but it
+			# has been observed voting unanimously for the order that
+			# measurably loses. Settle it by measurement instead, and treat an
+			# unresolvable parity as a hard bar on field rate.
+			local parity_order parity_conf
+			read -r parity_order parity_conf <<< "$(probe_field_parity "$input")"
+			[[ "$parity_order" == "tff" || "$parity_order" == "bff" ]] && interlacing="$parity_order"
+			[[ "$parity_conf" == "low" ]] && FILM_RATE_LOCK="true"
+
 			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
 			local deint_rate=$(resolve_deint_rate "$input")
-			local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate")
+			local deint_choice=$(select_deinterlacer "$input")
+			local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice")
 			if [[ -n "$deint_filter" ]]; then
 				vf_cpu="${vf_cpu}${deint_filter}"
 			fi
@@ -1499,9 +1801,7 @@ else
 	# Determine if we should check for telecine (auto = any resolution; see
 	# the VAAPI branch for the rationale)
 	local should_check_telecine=false
-	if [[ "$DETECT_PULLDOWN" == "true" ]]; then
-		should_check_telecine=true
-	elif [[ "$DETECT_PULLDOWN" == "auto" ]]; then
+	if [[ "$DETECT_PULLDOWN" == "true" || "$DETECT_PULLDOWN" == "auto" || "$DETECT_PULLDOWN" == "always" ]]; then
 		should_check_telecine=true
 	fi
 
@@ -1518,6 +1818,9 @@ else
 			vf="${vf}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,yadif=mode=0:parity=-1:deint=1,${ivtc_decimator}"
 			echo "        Inverse telecine via fieldmatch+yadif+${ivtc_decimator}" >&2
 			skip_interlace=true
+		elif [[ "$telecine" == "film-interlaced" ]]; then
+			FILM_RATE_LOCK="true"
+			echo "        Keeping source rate — deinterlace only, no decimation" >&2
 		fi
 	fi
 
@@ -1531,7 +1834,8 @@ else
 		# Force deinterlacing without detection
 		[[ -n "$vf" ]] && vf="$vf,"
 		local deint_rate=$(resolve_deint_rate "$input")
-		local deint_filter=$(apply_deinterlacer "$fm_order" "$deint_rate")
+		local deint_choice=$(select_deinterlacer "$input")
+		local deint_filter=$(apply_deinterlacer "$fm_order" "$deint_rate" "$deint_choice")
 		if [[ -n "$deint_filter" ]]; then
 			vf="${vf}${deint_filter}"
 		fi
@@ -1540,9 +1844,18 @@ else
 
 	    # Add deinterlacer if interlacing detected
 	    if [[ "$interlacing" == "tff" || "$interlacing" == "bff" ]]; then
+		    # Parity by measurement, not by idet's vote or the container tag.
+		    # Low confidence means the source has no single field order, which
+		    # bars field rate outright.
+		    local parity_order parity_conf
+		    read -r parity_order parity_conf <<< "$(probe_field_parity "$input")"
+		    [[ "$parity_order" == "tff" || "$parity_order" == "bff" ]] && interlacing="$parity_order"
+		    [[ "$parity_conf" == "low" ]] && FILM_RATE_LOCK="true"
+
 		    [[ -n "$vf" ]] && vf="$vf,"
 		    local deint_rate=$(resolve_deint_rate "$input")
-		    local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate")
+		    local deint_choice=$(select_deinterlacer "$input")
+		    local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice")
 		    if [[ -n "$deint_filter" ]]; then
 			    vf="${vf}${deint_filter}"
 		    fi
@@ -3153,8 +3466,24 @@ while [[ $# -gt 0 ]]; do
 			shift
 			;;
 		--force-ivtc)
+			DETECT_PULLDOWN="always"
+			shift
+			;;
+		--scan-ivtc)
 			DETECT_PULLDOWN="true"
 			shift
+			;;
+		--pulldown)
+			case "$2" in
+				auto|always|never|scan) : ;;
+				*) echo "ERROR: --pulldown must be auto, scan, always, or never" >&2; exit 1 ;;
+			esac
+			case "$2" in
+				never) DETECT_PULLDOWN="false" ;;
+				scan)  DETECT_PULLDOWN="true" ;;
+				*)     DETECT_PULLDOWN="$2" ;;
+			esac
+			shift 2
 			;;
 		--ivtc-mode)
 			IVTC_MODE="$2"

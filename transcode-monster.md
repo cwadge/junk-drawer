@@ -218,7 +218,32 @@ and decides in tiers:
 - **NTSC rate prior**: detection favors the 29.97/23.976 rate family that 3:2
   pulldown actually comes from, so PAL and native-progressive film aren't
   dragged through an inverse-telecine they don't need (override with
-  `--force-ivtc`).
+  `--scan-ivtc`).
+- **Automatic deinterlacer selection** (`--deinterlacer auto`, default): one
+  `idet` pass yields the fraction of frames showing combing, used as a motion
+  proxy. Near-total combing means the whole frame is moving, which makes a
+  motion-adaptive filter reject its temporal estimate everywhere and fall back
+  to plain spatial interpolation — the one job nnedi does markedly better. Above
+  `AUTO_DEINT_MOTION_PCT` (85 by default) nnedi is selected; below it bwdif
+  keeps its temporal path and wins. Selection degrades gracefully
+  (nnedi -> bwdif -> yadif) if a filter or the nnedi weights are unavailable.
+  Unlike the parity and rate thresholds this is a preference rather than a
+  correctness gate — the runner-up costs quality, not a broken encode.
+- **Measured field parity**: field order is resolved by deinterlacing sample
+  points both ways and keeping whichever leaves less residual combing, rather
+  than trusting the container tag or idet's TFF/BFF vote — both have been
+  observed asserting the order that measurably loses. When the winner changes
+  between sample points the source has no single field order, and field-rate
+  output is barred: at frame rate a parity error costs only spatial softness,
+  but at field rate it emits each frame's fields in reversed temporal order and
+  produces severe back-and-forth judder.
+- **Film-interlaced detection**: a large relative collapse (>=75%) with a
+  modest residual (<=25%) means the fields pair up into film frames, but the
+  5-frame cadence is too broken to decimate safely — typical of anime OVA
+  reissues that mix film blocks, video blocks and soft-telecine pockets in one
+  master. These are transcoded at the source rate with deinterlacing only: no
+  inverse telecine, and never at field rate, since bobbing film reconstructs
+  each drawing twice from alternating single fields and shimmers.
 
 When telecine is confirmed, the script inverse-telecines on the CPU
 (`fieldmatch` → `yadif` cleanup of the frames fieldmatch can't match → frame
@@ -246,7 +271,10 @@ fights it.
 
 Override if needed:
 ```bash
-# Force inverse telecine (any resolution), e.g. when the rate prior skips it
+# Scan for telecine even when the rate prior would skip it
+transcode-monster.sh --scan-ivtc "/path/to/source/"
+
+# Inverse telecine unconditionally, skipping detection entirely
 transcode-monster.sh --force-ivtc "/path/to/source/"
 
 # Disable telecine detection entirely (treat as plain interlaced/progressive)
@@ -711,10 +739,20 @@ Disable telecine detection for purely interlaced content:
 transcode-monster.sh --no-pulldown "/path/to/source/"
 ```
 
-Force inverse telecine when the rate prior skips a source you know is telecined
+Scan for telecine when the rate prior skips a source you know is telecined
 (e.g. a PAL or oddly-flagged film master):
 ```bash
+transcode-monster.sh --scan-ivtc "/path/to/source/"
+```
+
+Force inverse telecine unconditionally when detection reports "true interlaced
+video" on a source you know is film. The giveaway is a source that is combed on
+nearly every frame yet plays smoothly, and a trial fieldmatch line showing a big
+drop in residual combing that still doesn't reach zero:
+```bash
 transcode-monster.sh --force-ivtc "/path/to/source/"
+# equivalently
+transcode-monster.sh --pulldown always "/path/to/source/"
 ```
 
 Stray combing on a mixed film/video disc (anime OVAs especially): the inverse
