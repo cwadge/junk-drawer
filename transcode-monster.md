@@ -16,8 +16,10 @@ A universal video transcoding script with intelligent automatic detection for se
 - **HDR support**: Detects and preserves HDR10, HLG, and BT.2020 content automatically
 - **Bulk movie processing**: Process multiple movies in one directory without manual intervention
 - **Hybrid encoding**: Stays on hardware (VAAPI) for speed and only falls back to software (x265) when the hardware genuinely can't handle the source
-- **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, with multiple filter options and adaptive handling for mixed film/video sources
-- **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence rather than guessing from combing alone
+- **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, with adaptive handling for mixed film/video sources
+- **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence rather than guessing from combing alone, and recognizes film whose cadence is too broken to decimate so it keeps its native rate instead of being resampled into judder
+- **Measured field order**: Resolves top/bottom field order by testing both and keeping whichever leaves less combing, rather than trusting container tags that are frequently wrong; sources with no consistent field order are detected and handled conservatively
+- **Automatic filter selection**: Profiles each source and picks the deinterlacer that suits it, falling back gracefully when a filter or its weights are unavailable
 - **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD), and tags untagged sources with the correct standard so players don't guess
 - **Multi-episode files**: Automatically splits by chapters for disc rips with multiple episodes
 - **Audio/subtitle management**: Language filtering, format conversion, disposition handling
@@ -103,7 +105,14 @@ Dolby Vision **cannot be preserved** during transcoding. When re-encoding DV con
 - Only the HDR10 base layer is preserved
 - Colors may appear washed out compared to the original
 
-If you have Dolby Vision-capable playback (Apple TV 4K, LG OLED, etc.), consider keeping the original file rather than transcoding.
+If you have Dolby Vision-capable playback (Apple TV 4K, LG OLED, etc.), keep the
+original video stream. [`--copy-only`](#copy-only-remux-mode) restructures the
+container — track selection, language filtering, subtitle dispositions, chapters
+and naming — without re-encoding, so the Dolby Vision layer survives intact:
+
+```bash
+transcode-monster.sh -t movie -n "Blade Runner 2049" --copy-only "/rips/br2049.mkv" "/output/"
+```
 
 ### Bulk Movie Processing
 
@@ -131,9 +140,20 @@ video/effects) is inverse-telecined automatically; the default `adaptive`
 `--ivtc-mode` keeps those video sections smooth. If a disc shows stray combing or
 fights detection, see [Telecine Detection Issues](#telecine-detection-issues).
 
-### Noisy Broadcast Sources
+### Difficult Interlaced Sources
 
-Use nnedi deinterlacer for heavily compressed or noisy sources:
+Filter selection is automatic, but two cases are worth overriding by hand.
+
+Grainy, heavily compressed or artifact-ridden sources do better on bwdif, which
+softens noise rather than sharpening it into detail:
+
+```bash
+transcode-monster.sh --deinterlacer bwdif "/path/to/broadcast-tape/" "/output/"
+```
+
+Clean animation with frequent pans or vertical scrolls does better on nnedi,
+which reconstructs near-horizontal edges without the stair-stepping that reads as
+crawl during a scroll:
 
 ```bash
 transcode-monster.sh --deinterlacer nnedi "/path/to/The Maxx/" "/output/"
@@ -196,54 +216,61 @@ frame, since the video isn't being re-encoded.
 
 ### Interlacing Detection
 
-The script samples frames at multiple points to detect interlacing:
+The script samples frames at multiple points and applies a deinterlacer when more
+than 5% of sampled frames show interlacing. The threshold is deliberately low so
+that partially interlaced content is still handled.
 
-- **Progressive**: 0-5% interlaced → No deinterlacing
-- **Interlaced**: >5% interlaced → Applies deinterlacer
-- **Threshold**: 5% ensures even partially interlaced content is handled
+**Field order** is resolved by measurement rather than by metadata. Sample points
+are deinterlaced at both field orders and scored on how much combing each leaves;
+the order leaving less is the correct one. Container tags and `idet`'s TFF/BFF
+vote are both unreliable here — a mislabelled tag is common on DVD, and some
+masters carry a single tag while their actual field order varies by segment.
+
+Three outcomes:
+
+- **Consistent** — one order wins across sample points. It is used for both
+  deinterlacing and field matching, overriding the container tag if they differ.
+- **Inconsistent** — the winner changes between sample points, so the source has
+  no single field order. The majority order is used and output is forced to
+  frame rate.
+- **Unverifiable** — too few sample points separate the two orders meaningfully.
+  The container tag is used and output is forced to frame rate.
+
+Frame rate is forced in the latter two cases because the cost of a field-order
+error depends on the output rate. At frame rate a wrong order costs some vertical
+softness. At field rate it emits each frame's two fields in reversed temporal
+order, so motion repeatedly advances and snaps back.
 
 ### Telecine Detection (3:2 Pulldown)
 
 Telecine is checked at **any resolution** (not just SD), since HD broadcast and
 disc masters can be telecined too. Detection samples the cadence at four points
 (20%, 40%, 60%, 80% through the file) rather than trusting the opening frames,
-and decides in tiers:
+and favors the 29.97/23.976 rate family that 3:2 pulldown comes from, so PAL and
+native-progressive film aren't dragged through an inverse telecine they don't
+need (`--scan-ivtc` overrides the rate prior).
 
-- **Strong repeated-field cadence** → accepted as telecine directly. A regular
-  pattern of repeated fields is the actual signature of 3:2 pulldown.
-- **Ambiguous** (heavy combing but a weak repeat signal) → the script runs a
-  *trial fieldmatch* and only confirms telecine if the residual combing
-  collapses. Real telecine inverts cleanly; genuinely interlaced video does not.
-  This is what stops noisy interlaced sources from being misread as film.
-- **NTSC rate prior**: detection favors the 29.97/23.976 rate family that 3:2
-  pulldown actually comes from, so PAL and native-progressive film aren't
-  dragged through an inverse-telecine they don't need (override with
-  `--scan-ivtc`).
-- **Automatic deinterlacer selection** (`--deinterlacer auto`, default): one
-  `idet` pass yields the fraction of frames showing combing, used as a motion
-  proxy. Near-total combing means the whole frame is moving, which makes a
-  motion-adaptive filter reject its temporal estimate everywhere and fall back
-  to plain spatial interpolation — the one job nnedi does markedly better. Above
-  `AUTO_DEINT_MOTION_PCT` (85 by default) nnedi is selected; below it bwdif
-  keeps its temporal path and wins. Selection degrades gracefully
-  (nnedi -> bwdif -> yadif) if a filter or the nnedi weights are unavailable.
-  Unlike the parity and rate thresholds this is a preference rather than a
-  correctness gate — the runner-up costs quality, not a broken encode.
-- **Measured field parity**: field order is resolved by deinterlacing sample
-  points both ways and keeping whichever leaves less residual combing, rather
-  than trusting the container tag or idet's TFF/BFF vote — both have been
-  observed asserting the order that measurably loses. When the winner changes
-  between sample points the source has no single field order, and field-rate
-  output is barred: at frame rate a parity error costs only spatial softness,
-  but at field rate it emits each frame's fields in reversed temporal order and
-  produces severe back-and-forth judder.
-- **Film-interlaced detection**: a large relative collapse (>=75%) with a
-  modest residual (<=25%) means the fields pair up into film frames, but the
-  5-frame cadence is too broken to decimate safely — typical of anime OVA
-  reissues that mix film blocks, video blocks and soft-telecine pockets in one
-  master. These are transcoded at the source rate with deinterlacing only: no
-  inverse telecine, and never at field rate, since bobbing film reconstructs
-  each drawing twice from alternating single fields and shimmers.
+Sources are sorted into three classes:
+
+- **Telecine** — either a strong repeated-field cadence, which is the direct
+  signature of 3:2 pulldown, or a trial fieldmatch that collapses the combing
+  almost entirely. These are inverse-telecined: the original progressive frames
+  are reconstructed and the pulldown duplicates dropped.
+- **Film-interlaced** — a trial fieldmatch collapses most of the combing but
+  leaves a modest residual. The fields still pair up into whole frames, so the
+  source is film, but its 3:2 cadence is too broken to decimate safely. This is
+  typical of anime OVA reissues that mix film blocks, true video blocks and
+  soft-telecine pockets in a single master. These keep their original frame rate
+  and are only deinterlaced, since resampling them to any one rate judders
+  whichever part of the file doesn't match it.
+- **Not telecine** — the combing survives the trial fieldmatch, meaning the two
+  fields of a frame are genuinely different instants. Handled as true interlaced
+  video.
+
+The trial fieldmatch is what separates telecined film from interlaced video.
+Film inverts cleanly because its fields were split from whole frames and can be
+paired back up; interlaced video has no clean pairing to recover, so its combing
+survives the attempt.
 
 When telecine is confirmed, the script inverse-telecines on the CPU
 (`fieldmatch` → `yadif` cleanup of the frames fieldmatch can't match → frame
@@ -256,18 +283,18 @@ duplicate frames have to go. Two strategies:
   duplicates, so cleanly-telecined film lands at 23.976 while interlaced
   video/effects stretches (common in anime OVAs) keep their unique frames at
   ~29.97 — no judder on mixed-cadence sources.
-- `fixed`: classic `decimate` + 23.976 CFR. Exact 1-in-5 drop, best for
-  uniformly-telecined film and players that need a constant frame rate, but it
-  judders on mixed-cadence material. It can also make residual combing in the
-  video sections *less* visible (every frame shows for the same duration instead
-  of lingering under VFR), so it's worth a try if a mixed disc shows stray combing.
+- `fixed`: classic `decimate` + 23.976 CFR. An exact 1-in-5 drop, best for
+  uniformly-telecined film and for players that require a constant frame rate,
+  but it judders on mixed-cadence material. It also makes residual combing in the
+  video sections less visible, since every frame is shown for the same duration
+  instead of lingering under VFR — useful on a mixed disc that shows stray
+  combing.
 
 **Match thoroughness — `--fieldmatch-mode`:** `pc_n` (default) is the standard
 matcher. `pcn_ub` additionally tries the previous-field combinations — the most
 exhaustive search, which can reconstruct more frames across cadence breaks on
-difficult anime, at a slightly higher risk of a bad match. It's a per-disc
-experiment, not a clear upgrade; leave it on `pc_n` unless a specific source
-fights it.
+difficult anime, at a slightly higher risk of a bad match. Leave it on `pc_n`
+unless a specific source fights the default.
 
 Override if needed:
 ```bash
@@ -286,6 +313,12 @@ transcode-monster.sh --ivtc-mode fixed "/path/to/source/"
 # Exhaustive matching for stubborn mixed-cadence anime
 transcode-monster.sh --fieldmatch-mode pcn_ub "/path/to/source/"
 ```
+
+`--pulldown MODE` is the explicit form of the first three: `auto` detects and
+decides (default), `scan` detects even on non-NTSC rates, `always` skips
+detection and always inverse-telecines, `never` skips detection and never does.
+`--scan-ivtc`, `--force-ivtc` and `--no-pulldown` are shorthand for `scan`,
+`always` and `never` respectively.
 
 ### Crop Detection
 
@@ -316,33 +349,58 @@ Two different problems get two different treatments, chosen automatically:
 The filter choice (`--deinterlacer`) and output rate (`--deinterlace-rate`) below
 govern the **deinterlace** path; telecined film is handled by `--ivtc-mode`.
 
-### When to Use Each Filter
+### Filter Selection (`--deinterlacer`)
 
-**bwdif (default)**:
-- Best for most content
-- Fast, sharp results
-- Good balance of quality and speed
-- Preserves fine details well
+`auto` (default) profiles the source with a single `idet` pass and chooses from
+the fraction of frames showing combing, which serves as a motion proxy:
 
-**nnedi (neural network)**:
-- Best for noisy broadcast sources
-- Heavily compressed video with artifacts
-- Sources where bwdif leaves residual combing
-- Slower, but handles difficult content better
+- **At or above `AUTO_DEINT_MOTION_PCT` (85%)** — nnedi. Near-total combing means
+  the whole frame is in motion: a pan, a scroll, or a camera move. A
+  motion-adaptive filter decides between a temporal and a spatial estimate by
+  comparing co-located pixels across fields, and under global motion those pixels
+  always differ, so the temporal estimate is rejected on every pixel and the
+  filter degrades into a plain spatial interpolator. nnedi is a considerably
+  better spatial interpolator, so it wins outright in this regime.
+- **Below the threshold** — bwdif. Where the image is static or slow-moving, the
+  opposite field holds the true missing scanlines, and bwdif's temporal path
+  reconstructs them exactly rather than guessing. nnedi never uses temporal data,
+  so it can only approximate what bwdif recovers verbatim.
 
-**yadif**:
-- Fast, widely compatible
-- Good for quick previews
-- Slightly less quality than bwdif
+This is a quality preference, not a correctness decision: either filter produces
+a valid result, and the threshold can be tuned to taste. If nnedi is unavailable
+or its weights can't be fetched, selection falls back to bwdif and then yadif —
+a missing filter never aborts a run.
+
+### Choosing a Filter Manually
+
+**bwdif** — motion-adaptive, blending a temporal and a spatial estimate per
+pixel. The right choice for grainy, noisy or heavily compressed sources, and for
+material with long static or slow-moving takes. Its failure mode is softness.
+
+**nnedi** — a neural-network spatial interpolator that never consults
+neighbouring fields. Best on clean, motion-dominated material such as animation
+with pans and vertical scrolls, where no usable temporal reference exists anyway.
+It reconstructs near-horizontal edges far better than a short-kernel filter,
+which is what removes the stair-stepping that crawls frame to frame during a
+scroll. Being a learned edge predictor, it will also extend compression blocking
+and grain as though they were real detail, making it a poor fit for dirty
+sources. Slower than bwdif, though at SD resolution rarely the bottleneck.
+
+**yadif** — older and faster, slightly softer than bwdif. Useful for quick
+previews and as a fallback where bwdif is unavailable.
 
 ### Output Rate (`--deinterlace-rate`)
 
 Interlaced video carries two distinct fields per frame, so it can be
 deinterlaced to either single or double frame rate:
 
-- `auto` (default): field-rate for NTSC-family video (60i → 60p, preserving the
-  motion in true interlaced video) and frame-rate for PAL/unknown sources (to
-  avoid double-bobbing 25PsF film that was flagged interlaced).
+- `auto` (default): field rate for NTSC-family video (60i → 60p, preserving the
+  motion in true interlaced video) and frame rate for PAL/unknown sources (to
+  avoid double-bobbing 25PsF film that was flagged interlaced). Field rate is
+  withheld regardless of source rate when the field order could not be verified
+  as consistent, or when the source was classified film-interlaced — bobbing film
+  reconstructs each drawing twice from alternating single fields, which shimmers,
+  and bobbing at an uncertain field order judders.
 - `field`: always double-rate (e.g. 60p) — smoothest motion for real video.
 - `frame`: always single-rate (e.g. 30p) — half the frames, for compatibility or
   size.
@@ -353,11 +411,14 @@ This only affects the deinterlace path; telecined film is set to its film rate b
 ### Examples
 
 ```bash
-# Use default (bwdif)
+# Automatic filter selection (default)
 transcode-monster.sh "/path/to/source/"
 
-# Use nnedi for noisy source
+# Force nnedi (clean, motion-heavy source such as animation with scrolls)
 transcode-monster.sh --deinterlacer nnedi "/path/to/source/"
+
+# Force bwdif (grainy, noisy or heavily compressed source)
+transcode-monster.sh --deinterlacer bwdif "/path/to/source/"
 
 # Force deinterlacing on misdetected progressive content
 transcode-monster.sh --force-deinterlace "/path/to/source/"
@@ -721,9 +782,18 @@ transcode-monster.sh --force-deinterlace "/path/to/source/"
 
 ### Deinterlacer Leaves Artifacts
 
-Try nnedi for difficult sources:
+Which filter to reach for depends on the artifact. Stair-stepping or a crawling
+pattern along near-horizontal edges, most visible during pans and vertical
+scrolls, is spatial interpolation failing — use nnedi:
 ```bash
 transcode-monster.sh --deinterlacer nnedi "/path/to/source/"
+```
+
+Ringing or halos around high-contrast edges, or noise and compression blocking
+being sharpened into detail, is nnedi over-predicting on a dirty source — use
+bwdif:
+```bash
+transcode-monster.sh --deinterlacer bwdif "/path/to/source/"
 ```
 
 For sources that are mostly progressive with occasional interlaced frames, limit
@@ -827,7 +897,8 @@ QUALITY="20.6"                  # CRF/CQP value
 PRESET="medium"                 # x265 preset
 X265_TUNE=""                    # fastdecode, grain, animation, etc.
 BFRAMES="4"                     # Number of B-frames
-DEINTERLACER="bwdif"           # bwdif, nnedi, yadif
+DEINTERLACER="auto"            # auto (profile the source and pick), bwdif, nnedi, yadif
+AUTO_DEINT_MOTION_PCT=85       # combed% at or above which auto selects nnedi
 DEINTERLACE_RATE="auto"        # auto, field, frame (deinterlace path only)
 
 # Hardware encoding
@@ -860,7 +931,9 @@ DETECT_INTERLACING="true"
 ADAPTIVE_DEINTERLACE="false"
 FORCE_DEINTERLACE="false"
 DETECT_CROP="true"
-DETECT_PULLDOWN="auto"         # auto (detect at any resolution), true, false
+DETECT_PULLDOWN="auto"         # auto (detect at any resolution), true (scan even
+                               # when the rate prior would skip), always (skip
+                               # detection, always inverse telecine), false
 IVTC_MODE="adaptive"           # adaptive (mpdecimate + VFR), fixed (decimate + 23.976 CFR)
 FIELDMATCH_MODE="pc_n"         # pc_n (standard), pcn_ub (exhaustive match)
 SPLIT_CHAPTERS="auto"          # auto, true, false
