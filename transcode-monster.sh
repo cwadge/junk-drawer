@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.24.1"
+SCRIPT_VERSION="1.26.0"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -104,6 +104,17 @@ DEFAULT_SUBTITLE_FORCED_DEEP_SCAN="false"  # When a long file has no cue-count m
 DEFAULT_COPY_ONLY="false"  # Remux mode: copy the source video and audio streams instead of re-encoding, while still selecting the right tracks, setting dispositions, and naming the output. For sources that are already well-encoded but badly mastered/named.
 DEFAULT_DETECT_INTERLACING="true"
 DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Restrict deinterlacing to frames flagged interlaced
+# idet sensitivity used to re-flag frames for adaptive deinterlacing. Lower
+# catches subtler combing at the cost of processing more frames unnecessarily;
+# 1.04 is ffmpeg's default. Sources whose combing is faint (cheap DVD encodes,
+# upscaled video) may need 1.01-1.02.
+DEFAULT_ADAPTIVE_INTL_THRES="1.04"
+# Sensitivity used only to test whether a source's combing is too faint for the
+# stock detector to see. Not used for filtering.
+FAINT_COMB_PROBE_THRES="1.005"
+# Points of divergence between stock and sensitive detection that mark a source
+# as faintly combed.
+FAINT_COMB_GAP=20
 DEFAULT_FORCE_DEINTERLACE="false"  # Force deinterlacing even on progressive content
 DEFAULT_DEINTERLACER="auto"  # auto = pick per source from a content profile (see select_deinterlacer), bwdif (safe general default), nnedi (best spatial reconstruction, wants a clean high-motion source), yadif
 # Thresholds for automatic deinterlacer selection. Both are preferences rather
@@ -287,6 +298,7 @@ SUBTITLE_FORCED_DEEP_SCAN="${SUBTITLE_FORCED_DEEP_SCAN:-$DEFAULT_SUBTITLE_FORCED
 COPY_ONLY="${COPY_ONLY:-$DEFAULT_COPY_ONLY}"
 DETECT_INTERLACING="${DETECT_INTERLACING:-$DEFAULT_DETECT_INTERLACING}"
 ADAPTIVE_DEINTERLACE="${ADAPTIVE_DEINTERLACE:-$DEFAULT_ADAPTIVE_DEINTERLACE}"
+ADAPTIVE_INTL_THRES="${ADAPTIVE_INTL_THRES:-$DEFAULT_ADAPTIVE_INTL_THRES}"
 FORCE_DEINTERLACE="${FORCE_DEINTERLACE:-$DEFAULT_FORCE_DEINTERLACE}"
 DEINTERLACER="${DEINTERLACER:-$DEFAULT_DEINTERLACER}"
 DEINTERLACE_RATE="${DEINTERLACE_RATE:-$DEFAULT_DEINTERLACE_RATE}"
@@ -421,6 +433,10 @@ ${BOLDBLUE}VIDEO PROCESSING${RESET}
 			 ${CYAN}field${RESET}  Always double-rate (one frame per field — smoothest motion)
 			 ${CYAN}frame${RESET}  Always single-rate (one frame per frame — preserves source fps)
 			 Telecined film is inverse-telecined regardless of this setting.
+  ${GREEN}--adaptive-intl-thres${RESET} ${YELLOW}N${RESET}  Sensitivity of the interlace detection that drives
+			 --adaptive-deinterlace (default 1.04). Lower values catch
+			 fainter combing at the cost of processing more frames.
+			 Cheap DVD transfers often need 1.01 or below.
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
   ${GREEN}--force-ivtc${RESET}           Inverse telecine unconditionally, skipping detection.
 			 For film masters whose cadence was shredded by video
@@ -1299,6 +1315,9 @@ done
 # Echoes a percentage, or "" if the sample fails.
 measure_motion_pct() {
 	local input="$1"
+	local thres="${2:-}"
+	local idet_args="idet"
+	[[ -n "$thres" ]] && idet_args="idet=intl_thres=${thres}"
 	local duration rc=0
 	duration=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null) || true
 	duration=${duration//,/}
@@ -1311,7 +1330,7 @@ measure_motion_pct() {
 	[[ "$seek" =~ ^[0-9]+\.?[0-9]*$ ]] || seek="0"
 
 	local out
-	out=$(ffmpeg -nostdin -ss "$seek" -i "$input" -vf idet -frames:v 250 \
+	out=$(ffmpeg -nostdin -ss "$seek" -i "$input" -vf "$idet_args" -frames:v 250 \
 		-an -sn -f null - 2>&1) || rc=$?
 			if [[ $rc -ne 0 ]]; then
 				echo "        profile: idet sample failed (rc=${rc})" >&2; echo ""; return
@@ -1369,6 +1388,18 @@ select_deinterlacer() {
 		return
 	fi
 
+	# The combing figure doubles as the motion proxy, which only holds while the
+	# combing is strong enough to detect. A transfer whose combing is faint reads
+	# as low motion no matter how much movement it actually contains, and the
+	# selection below is then resting on a number that means nothing. Detect that
+	# case and say so rather than pretending the estimate is sound.
+	local sensitive
+	sensitive=$(measure_motion_pct "$input" "$FAINT_COMB_PROBE_THRES")
+	if [[ "$sensitive" =~ ^[0-9]+$ ]] && [[ $((sensitive - combed)) -ge $FAINT_COMB_GAP ]]; then
+		echo -e "        ${YELLOW}Faint combing (${combed}% at standard detection, ${sensitive}% at high sensitivity)${RESET}" >&2
+		echo -e "        ${YELLOW}Motion estimate unreliable — if edges look blocky, try --deinterlacer nnedi${RESET}" >&2
+	fi
+
 	if [[ $combed -ge $AUTO_DEINT_MOTION_PCT ]]; then
 		echo -e "    ${BOLD}Filter:${RESET}      nnedi (motion ${combed}% — using spatial reconstruction)" >&2
 		echo "nnedi"
@@ -1413,7 +1444,20 @@ apply_deinterlacer() {
 	# should cost quality on one file, not kill a library run partway through.
 	local choice="${3:-$DEINTERLACER}"
 	local deint="${4:-all}"
+	local reflag="${5:-false}"
 	[[ "$choice" == "auto" ]] && choice="bwdif"
+
+	# Restricting to flagged frames is only as good as the flags. The decoder's
+	# interlaced_frame comes straight from the bitstream, and encoders routinely
+	# mark field-interleaved pictures progressive — on such a source the filter
+	# is handed nothing to do and the combing survives untouched. Prepending idet
+	# re-derives the flag from the pixels instead, so the decision rests on the
+	# image rather than on the encoder's bookkeeping. Not used downstream of
+	# fieldmatch, which already flags from its own comb analysis.
+	local reflag_prefix=""
+	if [[ "$deint" == "interlaced" && "$reflag" == "true" ]]; then
+		reflag_prefix="idet=intl_thres=${ADAPTIVE_INTL_THRES},"
+	fi
 
 	# Scope is reported alongside the filter because the two are independent
 	# decisions; without it a restricted run is indistinguishable from a full one.
@@ -1440,15 +1484,15 @@ apply_deinterlacer() {
 		nnedi)
 			# qual=2 averages two predictions, which measurably reduces the
 			# overshoot nnedi produces at high-contrast edges. Cheap at SD.
-			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}:qual=2:deint=${deint}"
+			filter="${reflag_prefix}nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}:qual=2:deint=${deint}"
 			echo "        Using nnedi deinterlacer (high quality, neural network, ${rate}-rate${scope_note})" >&2
 			;;
 		yadif)
-			filter="yadif=mode=${mode}:parity=${parity}:deint=${deint}"
+			filter="${reflag_prefix}yadif=mode=${mode}:parity=${parity}:deint=${deint}"
 			echo "        Using yadif deinterlacer (${rate}-rate${scope_note})" >&2
 			;;
 		bwdif|*)
-			filter="bwdif=mode=${mode}:parity=${parity}:deint=${deint}"
+			filter="${reflag_prefix}bwdif=mode=${mode}:parity=${parity}:deint=${deint}"
 			echo "        Using bwdif deinterlacer (bob weaver, ${rate}-rate${scope_note})" >&2
 			;;
 	esac
@@ -1761,7 +1805,7 @@ build_vf() {
 		read -r a_order a_conf <<< "$(probe_field_parity "$input")"
 		[[ "$a_conf" == "low" ]] && FILM_RATE_LOCK="true"
 		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-		local a_filter=$(apply_deinterlacer "$a_order" "$(resolve_deint_rate "$input")" "$(select_deinterlacer "$input")" "interlaced")
+		local a_filter=$(apply_deinterlacer "$a_order" "$(resolve_deint_rate "$input")" "$(select_deinterlacer "$input")" "interlaced" "true")
 		[[ -n "$a_filter" ]] && vf_cpu="${vf_cpu}${a_filter}"
 	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
@@ -1788,7 +1832,7 @@ build_vf() {
 			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
 			local deint_rate=$(resolve_deint_rate "$input")
 			local deint_choice=$(select_deinterlacer "$input")
-			local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice" "$deint_scope")
+			local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice" "$deint_scope" "true")
 			if [[ -n "$deint_filter" ]]; then
 				vf_cpu="${vf_cpu}${deint_filter}"
 			fi
@@ -1885,7 +1929,7 @@ else
 		read -r a_order a_conf <<< "$(probe_field_parity "$input")"
 		[[ "$a_conf" == "low" ]] && FILM_RATE_LOCK="true"
 		[[ -n "$vf" ]] && vf="$vf,"
-		local a_filter=$(apply_deinterlacer "$a_order" "$(resolve_deint_rate "$input")" "$(select_deinterlacer "$input")" "interlaced")
+		local a_filter=$(apply_deinterlacer "$a_order" "$(resolve_deint_rate "$input")" "$(select_deinterlacer "$input")" "interlaced" "true")
 		[[ -n "$a_filter" ]] && vf="${vf}${a_filter}"
 	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		# Force deinterlacing without detection
@@ -1914,7 +1958,7 @@ else
 		    [[ -n "$vf" ]] && vf="$vf,"
 		    local deint_rate=$(resolve_deint_rate "$input")
 		    local deint_choice=$(select_deinterlacer "$input")
-		    local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice" "$deint_scope")
+		    local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice" "$deint_scope" "true")
 		    if [[ -n "$deint_filter" ]]; then
 			    vf="${vf}${deint_filter}"
 		    fi
@@ -3552,6 +3596,14 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--ivtc-mode)
 			IVTC_MODE="$2"
+			shift 2
+			;;
+		--adaptive-intl-thres)
+			if ! [[ "$2" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+				echo "ERROR: --adaptive-intl-thres must be a number (e.g. 1.005)" >&2
+				exit 1
+			fi
+			ADAPTIVE_INTL_THRES="$2"
 			shift 2
 			;;
 		--fieldmatch-mode)

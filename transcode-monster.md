@@ -381,6 +381,22 @@ a valid result, and the threshold can be tuned to taste. If nnedi is unavailable
 or its weights can't be fetched, selection falls back to bwdif and then yadif —
 a missing filter never aborts a run.
 
+The combing percentage doubles as the motion proxy, which only works while the
+combing is strong enough to detect. A transfer with faint combing reads as low
+motion however much movement it actually contains, and the choice above then
+rests on a meaningless number. The script measures at both standard and high
+sensitivity, and says so when they diverge:
+
+```
+Faint combing (3% at standard detection, 51% at high sensitivity)
+Motion estimate unreliable — if edges look blocky, try --deinterlacer nnedi
+```
+
+It still picks bwdif, since that is the safer filter for an unknown source, but
+the automatic choice has no real basis on such material — pick the filter by eye
+instead. Blockiness or stair-stepping along near-horizontal edges is the signature
+that bwdif is the wrong fit.
+
 ### Choosing a Filter Manually
 
 **bwdif** — motion-adaptive, blending a temporal and a spatial estimate per
@@ -407,11 +423,27 @@ that is only occasionally interlaced, the progressive majority is softened for n
 benefit. `--adaptive-deinterlace` restricts the filter to frames whose encoder
 flagged them interlaced, leaving the rest untouched.
 
-The catch is that those flags are frequently wrong. MPEG-2 encoders in particular
-will mark a picture progressive while its content is two interleaved fields, and
-a deinterlacer told to skip flagged-progressive frames passes that combing
-straight into the output. Whether a given disc's flags are honest varies by
-authoring house and sometimes within a single title.
+The flags a decoder reads out of the bitstream are frequently wrong. MPEG-2
+encoders in particular will mark a picture progressive while its content is two
+interleaved fields, and on a cheap transfer every picture may be marked
+progressive regardless — which would leave a scope-restricted filter with nothing
+to act on and pass all the combing through. To avoid depending on that, the
+adaptive chain re-derives the flag from the image with `idet` before filtering,
+so the decision rests on the pixels rather than on the encoder's bookkeeping.
+
+How faint a combing pattern `idet` will notice is set by
+`--adaptive-intl-thres` (default 1.04, ffmpeg's own). Lower values catch subtler
+combing at the cost of processing more frames. Transfers whose combing is weak —
+common on budget DVD releases and on video that has been through a resize — can
+need 1.01 or below before detection registers anything at all. When a source
+looks combed in motion but the script reports a low interlaced percentage, that
+gap is the reason, and it is worth sweeping the value:
+
+```bash
+ADAPTIVE_INTL_THRES=1.005 transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
+# or
+transcode-monster.sh --adaptive-deinterlace --adaptive-intl-thres 1.005 "/path/to/source/"
+```
 
 This is left as a manual choice rather than detected automatically. Flag accuracy
 can only be checked by sampling, and low-ratio interlacing tends to be clustered
@@ -431,7 +463,8 @@ Interlacing: tff (7% interlaced, 91% progressive, 0% undetermined)
 ```
 
 Encode one episode, look at it, and decide. Soft throughout means add the option;
-combing after adding it means the flags are unreliable and the default is right.
+combing after adding it means detection is missing frames, so lower
+`--adaptive-intl-thres` before giving up on it.
 
 ### Output Rate (`--deinterlace-rate`)
 
@@ -976,6 +1009,7 @@ SUBTITLE_FORCED_DEEP_SCAN="false"       # Demux long files lacking cue-count met
 # Processing
 DETECT_INTERLACING="true"
 ADAPTIVE_DEINTERLACE="false"
+ADAPTIVE_INTL_THRES="1.04"     # idet sensitivity for --adaptive-deinterlace; lower catches fainter combing
 FORCE_DEINTERLACE="false"
 DETECT_CROP="true"
 DETECT_PULLDOWN="auto"         # auto (detect at any resolution), true (scan even
