@@ -56,19 +56,19 @@ EXCLUDES=()
 # Only colorize when writing to a terminal and not suppressed. NO_COLOR is an
 # informal cross-tool convention (https://no-color.org/) worth respecting.
 setup_colors() {
-	if ! $USE_COLOR || [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
-		C_RESET= C_DIM= C_BOLD= C_RED= C_GREEN= C_YELLOW= C_BLUE= C_CYAN=
-		return
-	fi
-	C_RESET=$'\e[0m'   C_DIM=$'\e[2m'      C_BOLD=$'\e[1m'
-	C_RED=$'\e[31m'    C_GREEN=$'\e[32m'   C_YELLOW=$'\e[33m'
-	C_BLUE=$'\e[34m'   C_CYAN=$'\e[36m'
+    if ! $USE_COLOR || [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
+        C_RESET= C_DIM= C_BOLD= C_RED= C_GREEN= C_YELLOW= C_BLUE= C_CYAN=
+        return
+    fi
+    C_RESET=$'\e[0m'   C_DIM=$'\e[2m'      C_BOLD=$'\e[1m'
+    C_RED=$'\e[31m'    C_GREEN=$'\e[32m'   C_YELLOW=$'\e[33m'
+    C_BLUE=$'\e[34m'   C_CYAN=$'\e[36m'
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 usage() {
-	sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/d; s/^# \{0,3\}//; p }' "$0"
-	exit "${1:-0}"
+    sed -n '/^# Usage:/,/^[^#]/{ /^[^#]/d; s/^# \{0,3\}//; p }' "$0"
+    exit "${1:-0}"
 }
 
 die()  { printf '%serror:%s %s\n' "${C_RED:-}${C_BOLD:-}" "${C_RESET:-}" "$*" >&2; exit 1; }
@@ -79,24 +79,36 @@ warn() { printf '%swarn:%s %s\n'   "${C_YELLOW:-}" "${C_RESET:-}" "$*" >&2; }
 # printf '%b' turns \xNN escapes into bytes; we convert each %NN to \xNN first
 # and leave literal '+' alone (it only means space in query strings, not paths).
 urldecode() {
-	local s="${1//+/+}"   # no-op; documents that we intentionally don't touch '+'
-	printf '%b' "${s//%/\\x}"
+    local s="${1//+/+}"   # no-op; documents that we intentionally don't touch '+'
+    printf '%b' "${s//%/\\x}"
 }
 
 # ── Argument parsing ───────────────────────────────────────────────────────────
-while getopts ":o:x:w:nCh" opt; do
-	case $opt in
-		o) OUTPUT_DIR="$OPTARG" ;;
-		x) EXCLUDES+=("$OPTARG") ;;
-		w) WAIT_SECS="$OPTARG"  ;;
-		n) DRY_RUN=true          ;;
-		C) USE_COLOR=false       ;;
-		h) setup_colors; usage 0 ;;
-		:) setup_colors; die "Option -$OPTARG requires an argument." ;;
-		?) setup_colors; die "Unknown option: -$OPTARG" ;;
-	esac
+# Hand-rolled rather than getopts so options and positionals can appear in any
+# order. getopts stops at the first non-option argument, which meant a trailing
+# flag — most naturally `-x` tacked on after the URL/pattern to add an exclusion —
+# was silently ignored. Here we collect positionals as we go and keep scanning.
+# Both split (`-x GLOB`) and joined (`-xGLOB`) forms are accepted; `--` ends
+# option parsing for URLs that might start with a dash.
+opt_arg_err() { setup_colors; die "Option '$1' requires an argument."; }
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--output)   [[ -n "${2+set}" ]] || opt_arg_err "$1"; OUTPUT_DIR="$2"; shift 2 ;;
+        -o*)           OUTPUT_DIR="${1#-o}"; shift ;;
+        -x|--exclude)  [[ -n "${2+set}" ]] || opt_arg_err "$1"; EXCLUDES+=("$2"); shift 2 ;;
+        -x*)           EXCLUDES+=("${1#-x}"); shift ;;
+        -w|--wait)     [[ -n "${2+set}" ]] || opt_arg_err "$1"; WAIT_SECS="$2"; shift 2 ;;
+        -w*)           WAIT_SECS="${1#-w}"; shift ;;
+        -n|--dry-run)  DRY_RUN=true; shift ;;
+        -C|--no-color) USE_COLOR=false; shift ;;
+        -h|--help)     setup_colors; usage 0 ;;
+        --)            shift; POSITIONAL+=("$@"); break ;;
+        -?*)           setup_colors; die "Unknown option: $1" ;;
+        *)             POSITIONAL+=("$1"); shift ;;
+    esac
 done
-shift $((OPTIND - 1))
+set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 
 setup_colors
 
@@ -107,7 +119,7 @@ PATTERN="${2:-*}"
 
 # ── Dependency check ───────────────────────────────────────────────────────────
 for cmd in wget grep sed awk; do
-	command -v "$cmd" &>/dev/null || die "'$cmd' is required but not found."
+    command -v "$cmd" &>/dev/null || die "'$cmd' is required but not found."
 done
 
 # ── Fetch and parse the index ──────────────────────────────────────────────────
@@ -119,12 +131,12 @@ INDEX_HTML=$(wget -q -O - "$BASE_URL") || die "Failed to fetch index page."
 # directory links and empties. We keep the encoded form because that is what must
 # go back to the server in the download URL.
 mapfile -t ENCODED_FILES < <(
-printf '%s' "$INDEX_HTML" \
-	| grep -oiE 'href="[^"]*"' \
-	| sed 's/href="//I; s/"$//' \
-	| awk -F'/' '{ print $NF }' \
-	| grep -vE '^$|/$|[?#]' \
-	| sort -u
+    printf '%s' "$INDEX_HTML" \
+    | grep -oiE 'href="[^"]*"' \
+    | sed 's/href="//I; s/"$//' \
+    | awk -F'/' '{ print $NF }' \
+    | grep -vE '^$|/$|[?#]' \
+    | sort -u
 )
 
 [[ ${#ENCODED_FILES[@]} -eq 0 ]] && die "No file links found in index page."
@@ -134,7 +146,7 @@ printf '%s' "$INDEX_HTML" \
 # Include test first, then subtract anything matching an -x exclude glob.
 ENC=() DEC=()
 for enc in "${ENCODED_FILES[@]}"; do
-	dec=$(urldecode "$enc")
+    dec=$(urldecode "$enc")
 
     # Must match the include pattern.
     [[ "$dec" == $PATTERN ]] || continue
@@ -142,9 +154,9 @@ for enc in "${ENCODED_FILES[@]}"; do
     # Must not match any exclude pattern.
     excluded=false
     if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
-	    for ex in "${EXCLUDES[@]}"; do
-		    if [[ "$dec" == $ex ]]; then excluded=true; break; fi
-	    done
+        for ex in "${EXCLUDES[@]}"; do
+            if [[ "$dec" == $ex ]]; then excluded=true; break; fi
+        done
     fi
     $excluded && continue
 
@@ -152,20 +164,20 @@ for enc in "${ENCODED_FILES[@]}"; do
 done
 
 if [[ ${#DEC[@]} -eq 0 ]]; then
-	warn "No files matched pattern '${C_BOLD}${PATTERN}${C_RESET}' (${#ENCODED_FILES[@]} link(s) found)."
-	exit 0
+    warn "No files matched pattern '${C_BOLD}${PATTERN}${C_RESET}' (${#ENCODED_FILES[@]} link(s) found)."
+    exit 0
 fi
 
 if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
-	info "Matched ${C_GREEN}${C_BOLD}${#DEC[@]}${C_RESET} file(s): include '${C_BOLD}${PATTERN}${C_RESET}', excluding ${#EXCLUDES[@]} pattern(s)."
+    info "Matched ${C_GREEN}${C_BOLD}${#DEC[@]}${C_RESET} file(s): include '${C_BOLD}${PATTERN}${C_RESET}', excluding ${#EXCLUDES[@]} pattern(s)."
 else
-	info "Matched ${C_GREEN}${C_BOLD}${#DEC[@]}${C_RESET} file(s) with pattern '${C_BOLD}${PATTERN}${C_RESET}'."
+    info "Matched ${C_GREEN}${C_BOLD}${#DEC[@]}${C_RESET} file(s) with pattern '${C_BOLD}${PATTERN}${C_RESET}'."
 fi
 
 # ── Dry run ────────────────────────────────────────────────────────────────────
 if $DRY_RUN; then
-	for d in "${DEC[@]}"; do printf '  %s%s%s\n' "$C_CYAN" "$d" "$C_RESET"; done
-	exit 0
+    for d in "${DEC[@]}"; do printf '  %s%s%s\n' "$C_CYAN" "$d" "$C_RESET"; done
+    exit 0
 fi
 
 # ── Output directory ───────────────────────────────────────────────────────────
@@ -178,7 +190,7 @@ URL_LIST=$(mktemp) || die "Cannot create temporary file."
 trap 'rm -f "$URL_LIST"' EXIT
 
 for enc in "${ENC[@]}"; do
-	printf '%s/%s\n' "$BASE_URL" "$enc"
+    printf '%s/%s\n' "$BASE_URL" "$enc"
 done > "$URL_LIST"
 
 info "Downloading to ${C_CYAN}${OUTPUT_DIR}${C_RESET} (resume-aware; complete files are skipped)."
@@ -200,28 +212,28 @@ echo
 # each target's on-disk size before and after the run and compare. wget decodes
 # percent-escapes when choosing the local filename, so DEC[] holds the real names.
 WGET_OPTS=(
-	--continue
-	--no-verbose
-	--show-progress
-	--tries=5
-	--timeout=30
-	--retry-connrefused
-	--directory-prefix="$OUTPUT_DIR"
-	--input-file="$URL_LIST"
+    --continue
+    --no-verbose
+    --show-progress
+    --tries=5
+    --timeout=30
+    --retry-connrefused
+    --directory-prefix="$OUTPUT_DIR"
+    --input-file="$URL_LIST"
 )
 if [[ "$WAIT_SECS" != 0 ]]; then
-	WGET_OPTS+=( --wait="$WAIT_SECS" --random-wait )
+    WGET_OPTS+=( --wait="$WAIT_SECS" --random-wait )
 fi
 
 # Snapshot sizes before the run (0 == not present yet).
 declare -a PRE_SIZE
 for i in "${!DEC[@]}"; do
-	p="$OUTPUT_DIR/${DEC[i]}"
-	if [[ -f "$p" ]]; then
-		PRE_SIZE[i]=$(stat -c '%s' "$p" 2>/dev/null || echo 0)
-	else
-		PRE_SIZE[i]=0
-	fi
+    p="$OUTPUT_DIR/${DEC[i]}"
+    if [[ -f "$p" ]]; then
+        PRE_SIZE[i]=$(stat -c '%s' "$p" 2>/dev/null || echo 0)
+    else
+        PRE_SIZE[i]=0
+    fi
 done
 
 # Run it. We deliberately ignore wget's exit status: with --continue, every file
@@ -237,20 +249,20 @@ wget "${WGET_OPTS[@]}" || true
 # Classify each target by how its size changed.
 transferred=0 complete=0 incomplete=0
 for i in "${!DEC[@]}"; do
-	p="$OUTPUT_DIR/${DEC[i]}"
-	post=0
-	[[ -f "$p" ]] && post=$(stat -c '%s' "$p" 2>/dev/null || echo 0)
+    p="$OUTPUT_DIR/${DEC[i]}"
+    post=0
+    [[ -f "$p" ]] && post=$(stat -c '%s' "$p" 2>/dev/null || echo 0)
 
-	if   (( post > PRE_SIZE[i] ));            then transferred=$((transferred + 1))
-	elif (( post > 0 && post == PRE_SIZE[i] )); then complete=$((complete + 1))
-	else                                           incomplete=$((incomplete + 1))
-	fi
+    if   (( post > PRE_SIZE[i] ));            then transferred=$((transferred + 1))
+    elif (( post > 0 && post == PRE_SIZE[i] )); then complete=$((complete + 1))
+    else                                           incomplete=$((incomplete + 1))
+    fi
 done
 
 echo
 summary="${C_GREEN}${transferred}${C_RESET} transferred, ${complete} already complete"
 if (( incomplete > 0 )); then
-	warn "${summary}, ${C_RED}${incomplete} incomplete${C_RESET} — re-run to resume."
+    warn "${summary}, ${C_RED}${incomplete} incomplete${C_RESET} — re-run to resume."
 else
-	info "${C_GREEN}${C_BOLD}Done.${C_RESET} ${summary}."
+    info "${C_GREEN}${C_BOLD}Done.${C_RESET} ${summary}."
 fi
