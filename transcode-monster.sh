@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.26.1"
+SCRIPT_VERSION="1.27.0"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -436,8 +436,9 @@ ${BOLDBLUE}VIDEO PROCESSING${RESET}
 			 Telecined film is inverse-telecined regardless of this setting.
   ${GREEN}--adaptive-intl-thres${RESET} ${YELLOW}N${RESET}  Ratio threshold for the interlace detection that drives
 			 --adaptive-deinterlace (default 1.04). Lower values mark
-			 more frames interlaced. Below 1.0 every frame is marked,
-			 which is the same as omitting --adaptive-deinterlace.
+			 more frames interlaced; the useful range is roughly 1.01
+			 to 1.04. A value below 1.0 marks every frame, and is
+			 treated as plain deinterlacing.
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
   ${GREEN}--force-ivtc${RESET}           Inverse telecine unconditionally, skipping detection.
 			 For film masters whose cadence was shredded by video
@@ -1458,14 +1459,6 @@ apply_deinterlacer() {
 	local reflag_prefix=""
 	if [[ "$deint" == "interlaced" && "$reflag" == "true" ]]; then
 		reflag_prefix="idet=intl_thres=${ADAPTIVE_INTL_THRES},"
-		# intl_thres is a ratio test of top-field against bottom-field scoring,
-		# checked before the progressive test. Below 1.0 the first branch always
-		# wins, every frame is answered interlaced, and restricting scope stops
-		# meaning anything.
-		if awk "BEGIN{exit !(${ADAPTIVE_INTL_THRES} < 1.0)}" 2>/dev/null; then
-			echo -e "        ${YELLOW}intl_thres ${ADAPTIVE_INTL_THRES} is below 1.0 — every frame will be treated as interlaced${RESET}" >&2
-			echo -e "        ${YELLOW}Equivalent to dropping --adaptive-deinterlace; the filter choice is what matters here${RESET}" >&2
-		fi
 	fi
 
 	# Scope is reported alongside the filter because the two are independent
@@ -3715,6 +3708,25 @@ if [[ -n "$EPISODE_NUM" ]]; then
 		echo -e "${RED}Error: --episode must be a number (got '$EPISODE_NUM')${RESET}"
 		exit 1
 	fi
+fi
+
+# Normalize a degenerate --adaptive-intl-thres. idet scores each frame for top-
+# and bottom-field interlacing and compares the two before testing for
+# progressive; for any pair of positive scores at least one ratio is >= 1, so a
+# threshold below 1.0 makes the progressive branch unreachable and every frame is
+# marked interlaced. Restricting scope to "interlaced frames" then selects all of
+# them, and the idet pass is pure overhead in front of a filter that processes
+# everything anyway. The request is coherent — it means "deinterlace everything" —
+# so honour it by the direct route instead of erroring out mid-batch.
+if awk "BEGIN{exit !($ADAPTIVE_INTL_THRES < 1.0)}" 2>/dev/null; then
+	if [[ "$ADAPTIVE_DEINTERLACE" == "true" ]]; then
+		echo -e "${YELLOW}Note: --adaptive-intl-thres $ADAPTIVE_INTL_THRES is below 1.0, where every frame is marked${RESET}"
+		echo -e "${YELLOW}      interlaced. Deinterlacing every frame directly instead — same result, and it${RESET}"
+		echo -e "${YELLOW}      skips a detection pass. Drop --adaptive-deinterlace to make this explicit.${RESET}"
+		echo ""
+		ADAPTIVE_DEINTERLACE="false"
+	fi
+	ADAPTIVE_INTL_THRES="$DEFAULT_ADAPTIVE_INTL_THRES"
 fi
 
 # Validate --chapters-per-episode. Anything other than "auto" must be a positive
