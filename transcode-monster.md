@@ -426,13 +426,15 @@ flags an encoder writes into the bitstream are unreliable: MPEG-2 encoders
 routinely mark a picture progressive while its content is two interleaved fields,
 and budget transfers sometimes mark every picture progressive.
 
-How faint a combing pattern `idet` will notice is set by
-`--adaptive-intl-thres` (default 1.04, ffmpeg's own). Lower values catch subtler
-combing at the cost of processing more frames. Transfers whose combing is weak —
-common on budget DVD releases and on video that has been through a resize — can
-need 1.01 or below before detection registers anything at all. If a source looks
-combed in motion but the script reports a low interlaced percentage, sweep the
-value downward:
+`--adaptive-intl-thres` (default 1.04, ffmpeg's own) sets the ratio `idet` uses
+to decide. It scores each frame for top-field and bottom-field interlacing and
+compares the two before testing for progressive, so lowering the value marks more
+frames interlaced. Below 1.0 the comparison always succeeds and every frame is
+marked, which makes scope restriction equivalent to plain deinterlacing — the
+script says so when the value is set that low.
+
+If a source looks combed in motion but the script reports a low interlaced
+percentage, sweep the value downward:
 
 ```bash
 ADAPTIVE_INTL_THRES=1.005 transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
@@ -451,9 +453,11 @@ Interlacing: tff (7% interlaced, 91% progressive, 0% undetermined)
     Note: mostly progressive — if output looks soft, retry with --adaptive-deinterlace
 ```
 
-Encode one episode, look at it, and decide. Soft throughout means add the option;
-combing after adding it means detection is missing frames, so lower
-`--adaptive-intl-thres` before giving up on it.
+Encode one episode, look at it, and decide. Soft throughout means add the option.
+Combing after adding it means detection is missing frames, so lower
+`--adaptive-intl-thres`. If nothing short of a value below 1.0 clears the combing,
+the source is interlaced throughout: drop the option and choose the filter
+instead, since that is what governs quality once every frame is being processed.
 
 ### Output Rate (`--deinterlace-rate`)
 

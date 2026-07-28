@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.26.0"
+SCRIPT_VERSION="1.26.1"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -104,10 +104,11 @@ DEFAULT_SUBTITLE_FORCED_DEEP_SCAN="false"  # When a long file has no cue-count m
 DEFAULT_COPY_ONLY="false"  # Remux mode: copy the source video and audio streams instead of re-encoding, while still selecting the right tracks, setting dispositions, and naming the output. For sources that are already well-encoded but badly mastered/named.
 DEFAULT_DETECT_INTERLACING="true"
 DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Restrict deinterlacing to frames flagged interlaced
-# idet sensitivity used to re-flag frames for adaptive deinterlacing. Lower
-# catches subtler combing at the cost of processing more frames unnecessarily;
-# 1.04 is ffmpeg's default. Sources whose combing is faint (cheap DVD encodes,
-# upscaled video) may need 1.01-1.02.
+# Ratio threshold for the idet pass that re-flags frames for adaptive
+# deinterlacing; 1.04 is ffmpeg's default. idet compares top-field against
+# bottom-field scoring before testing for progressive, so lowering this marks
+# more frames interlaced — and below 1.0 it marks all of them, at which point
+# scope restriction is doing nothing.
 DEFAULT_ADAPTIVE_INTL_THRES="1.04"
 # Sensitivity used only to test whether a source's combing is too faint for the
 # stock detector to see. Not used for filtering.
@@ -433,10 +434,10 @@ ${BOLDBLUE}VIDEO PROCESSING${RESET}
 			 ${CYAN}field${RESET}  Always double-rate (one frame per field — smoothest motion)
 			 ${CYAN}frame${RESET}  Always single-rate (one frame per frame — preserves source fps)
 			 Telecined film is inverse-telecined regardless of this setting.
-  ${GREEN}--adaptive-intl-thres${RESET} ${YELLOW}N${RESET}  Sensitivity of the interlace detection that drives
-			 --adaptive-deinterlace (default 1.04). Lower values catch
-			 fainter combing at the cost of processing more frames.
-			 Cheap DVD transfers often need 1.01 or below.
+  ${GREEN}--adaptive-intl-thres${RESET} ${YELLOW}N${RESET}  Ratio threshold for the interlace detection that drives
+			 --adaptive-deinterlace (default 1.04). Lower values mark
+			 more frames interlaced. Below 1.0 every frame is marked,
+			 which is the same as omitting --adaptive-deinterlace.
   ${GREEN}--no-pulldown${RESET}          Disable 3:2 pulldown / inverse telecine detection
   ${GREEN}--force-ivtc${RESET}           Inverse telecine unconditionally, skipping detection.
 			 For film masters whose cadence was shredded by video
@@ -1457,6 +1458,14 @@ apply_deinterlacer() {
 	local reflag_prefix=""
 	if [[ "$deint" == "interlaced" && "$reflag" == "true" ]]; then
 		reflag_prefix="idet=intl_thres=${ADAPTIVE_INTL_THRES},"
+		# intl_thres is a ratio test of top-field against bottom-field scoring,
+		# checked before the progressive test. Below 1.0 the first branch always
+		# wins, every frame is answered interlaced, and restricting scope stops
+		# meaning anything.
+		if awk "BEGIN{exit !(${ADAPTIVE_INTL_THRES} < 1.0)}" 2>/dev/null; then
+			echo -e "        ${YELLOW}intl_thres ${ADAPTIVE_INTL_THRES} is below 1.0 — every frame will be treated as interlaced${RESET}" >&2
+			echo -e "        ${YELLOW}Equivalent to dropping --adaptive-deinterlace; the filter choice is what matters here${RESET}" >&2
+		fi
 	fi
 
 	# Scope is reported alongside the filter because the two are independent
