@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.23.1"
+SCRIPT_VERSION="1.24.1"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -1415,6 +1415,11 @@ apply_deinterlacer() {
 	local deint="${4:-all}"
 	[[ "$choice" == "auto" ]] && choice="bwdif"
 
+	# Scope is reported alongside the filter because the two are independent
+	# decisions; without it a restricted run is indistinguishable from a full one.
+	local scope_note=""
+	[[ "$deint" == "interlaced" ]] && scope_note=", interlaced frames only"
+
 	if [[ "$choice" == "nnedi" ]]; then
 		if ! check_nnedi_available; then
 			echo "        nnedi unavailable in this ffmpeg build — falling back to bwdif" >&2
@@ -1436,15 +1441,15 @@ apply_deinterlacer() {
 			# qual=2 averages two predictions, which measurably reduces the
 			# overshoot nnedi produces at high-contrast edges. Cheap at SD.
 			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}:qual=2:deint=${deint}"
-			echo "        Using nnedi deinterlacer (high quality, neural network, ${rate}-rate)" >&2
+			echo "        Using nnedi deinterlacer (high quality, neural network, ${rate}-rate${scope_note})" >&2
 			;;
 		yadif)
 			filter="yadif=mode=${mode}:parity=${parity}:deint=${deint}"
-			echo "        Using yadif deinterlacer (${rate}-rate)" >&2
+			echo "        Using yadif deinterlacer (${rate}-rate${scope_note})" >&2
 			;;
 		bwdif|*)
 			filter="bwdif=mode=${mode}:parity=${parity}:deint=${deint}"
-			echo "        Using bwdif deinterlacer (bob weaver, ${rate}-rate)" >&2
+			echo "        Using bwdif deinterlacer (bob weaver, ${rate}-rate${scope_note})" >&2
 			;;
 	esac
 
@@ -1721,12 +1726,22 @@ build_vf() {
 		telecine=$(detect_telecine "$input")
 		if [[ "$telecine" == "telecine" ]]; then
 			# Telecine MUST be done on CPU (no GPU equivalent). IVTC:
-			# fieldmatch reconstructs progressive frames, yadif with
-			# deint=interlaced cleans the orphans it can't match, the decimator
-			# drops the pulldown duplicates.
+			# fieldmatch reconstructs progressive frames, the deinterlacer
+			# cleans the orphans it couldn't match, the decimator drops the
+			# pulldown duplicates.
+			#
+			# The cleanup runs at fieldmatch's own field order, not at the
+			# per-frame flags: an orphan is by definition a frame fieldmatch
+			# could not pair, and deinterlacing it at the opposite parity leaves
+			# the combing in place rather than removing it. Frame rate is fixed
+			# here because the decimator downstream expects one frame in per
+			# frame out.
+			local ivtc_cleanup
+			ivtc_cleanup=$(apply_deinterlacer "$fm_order" "frame" "$(select_deinterlacer "$input")" "interlaced")
+			[[ -z "$ivtc_cleanup" ]] && ivtc_cleanup="yadif=mode=0:parity=0:deint=interlaced"
 			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-			vf_cpu="${vf_cpu}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,yadif=mode=0:parity=-1:deint=1,${ivtc_decimator}"
-			echo "        Inverse telecine via fieldmatch+yadif+${ivtc_decimator} (CPU, will be slower)" >&2
+			vf_cpu="${vf_cpu}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,${ivtc_cleanup},${ivtc_decimator}"
+			echo "        Inverse telecine via fieldmatch + cleanup + ${ivtc_decimator} (CPU, will be slower)" >&2
 			skip_interlace=true
 		elif [[ "$telecine" == "film-interlaced" ]]; then
 			# Film origin without a decimatable cadence. Resampling to any
@@ -1849,8 +1864,11 @@ else
 		telecine=$(detect_telecine "$input")
 		if [[ "$telecine" == "telecine" ]]; then
 			[[ -n "$vf" ]] && vf="$vf,"
-			vf="${vf}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,yadif=mode=0:parity=-1:deint=1,${ivtc_decimator}"
-			echo "        Inverse telecine via fieldmatch+yadif+${ivtc_decimator}" >&2
+			local ivtc_cleanup
+			ivtc_cleanup=$(apply_deinterlacer "$fm_order" "frame" "$(select_deinterlacer "$input")" "interlaced")
+			[[ -z "$ivtc_cleanup" ]] && ivtc_cleanup="yadif=mode=0:parity=0:deint=interlaced"
+			vf="${vf}fieldmatch=order=${fm_order}:mode=${FIELDMATCH_MODE}:combmatch=full,${ivtc_cleanup},${ivtc_decimator}"
+			echo "        Inverse telecine via fieldmatch + cleanup + ${ivtc_decimator}" >&2
 			skip_interlace=true
 		elif [[ "$telecine" == "film-interlaced" ]]; then
 			FILM_RATE_LOCK="true"
@@ -1860,10 +1878,15 @@ else
 
 	# Check if adaptive deinterlacing is requested
 	if [[ "$ADAPTIVE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
-		# Force adaptive deinterlacing regardless of detection
+		# Force interlaced-only filtering regardless of detection, but still
+		# resolve parity, filter and rate the normal way.
+		echo -e "    ${BOLD}Interlacing:${RESET} forced adaptive (interlaced frames only)" >&2
+		local a_order a_conf
+		read -r a_order a_conf <<< "$(probe_field_parity "$input")"
+		[[ "$a_conf" == "low" ]] && FILM_RATE_LOCK="true"
 		[[ -n "$vf" ]] && vf="$vf,"
-		vf="${vf}yadif=mode=0:parity=-1:deint=1"
-		echo -e "    ${BOLD}Interlacing:${RESET} forced adaptive — yadif (deint=interlaced only)" >&2
+		local a_filter=$(apply_deinterlacer "$a_order" "$(resolve_deint_rate "$input")" "$(select_deinterlacer "$input")" "interlaced")
+		[[ -n "$a_filter" ]] && vf="${vf}${a_filter}"
 	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		# Force deinterlacing without detection
 		[[ -n "$vf" ]] && vf="$vf,"
