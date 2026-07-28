@@ -18,7 +18,7 @@ A universal video transcoding script with intelligent automatic detection for se
 - **Hybrid encoding**: Stays on hardware (VAAPI) for speed and only falls back to software (x265) when the hardware genuinely can't handle the source
 - **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, handling discs that mix the two in a single title
 - **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence, and recognizes film whose cadence is too broken to decimate so it keeps its native rate instead of being resampled into judder
-- **Measured field order**: Resolves top/bottom field order by testing both and keeping whichever leaves less combing, rather than trusting container tags that are frequently wrong; sources with no consistent field order are detected and handled conservatively
+- **Measured field order**: Resolves top/bottom field order by deinterlacing both ways and keeping whichever leaves less combing, overriding container tags where they disagree; sources with no consistent field order are detected and held to frame-rate output
 - **Automatic filter selection**: Profiles each source and picks the deinterlacer that suits it, falling back gracefully when a filter or its weights are unavailable
 - **Color space handling**: Preserves HDR, converts legacy formats (BT.601 for SD, BT.709 for HD), and tags untagged sources with the correct standard so players don't guess
 - **Multi-episode files**: Automatically splits by chapters for disc rips with multiple episodes
@@ -224,10 +224,9 @@ frame, since the video isn't being re-encoded.
 ### Interlacing Detection
 
 The script samples frames at multiple points and applies a deinterlacer when more
-than 5% of sampled frames show interlacing. The threshold is low because many
-sources are only partly interlaced — progressive film with interlaced titles or
-optical effects, for instance — and those frames need the same treatment as a
-fully interlaced source.
+than 5% of sampled frames show interlacing. The threshold is low so that partly
+interlaced sources — progressive film with interlaced titles or optical effects,
+for instance — are still handled.
 
 **Field order** is resolved by measurement rather than by metadata. Sample points
 are deinterlaced at both field orders and scored on how much combing each leaves;
@@ -245,10 +244,10 @@ Three outcomes:
 - **Unverifiable** — too few sample points separate the two orders meaningfully.
   The container tag is used and output is forced to frame rate.
 
-Frame rate is forced in the latter two cases because the cost of a field-order
-error depends on the output rate. At frame rate a wrong order costs some vertical
-softness. At field rate it emits each frame's two fields in reversed temporal
-order, so motion repeatedly advances and snaps back.
+Frame rate is forced in the latter two cases. An unverified field order costs
+only some vertical softness at frame rate, but at field rate it emits each frame's
+two fields in reversed temporal order, and motion repeatedly advances and snaps
+back.
 
 ### Telecine Detection (3:2 Pulldown)
 
@@ -376,26 +375,24 @@ the fraction of frames showing combing, which serves as a motion proxy:
   reconstructs them exactly rather than guessing. nnedi never uses temporal data,
   so it can only approximate what bwdif recovers verbatim.
 
-This is a quality preference, not a correctness decision: either filter produces
-a valid result, and the threshold can be tuned to taste. If nnedi is unavailable
-or its weights can't be fetched, selection falls back to bwdif and then yadif —
-a missing filter never aborts a run.
+Both filters produce a valid result, so override the choice with `--deinterlacer`
+whenever you disagree with it. If nnedi is unavailable or its weights can't be
+fetched, selection falls back to bwdif and then yadif; a missing filter never
+aborts a run.
 
-The combing percentage doubles as the motion proxy, which only works while the
+The combing percentage serves as the motion proxy, which holds only while the
 combing is strong enough to detect. A transfer with faint combing reads as low
-motion however much movement it actually contains, and the choice above then
-rests on a meaningless number. The script measures at both standard and high
-sensitivity, and says so when they diverge:
+motion however much movement it contains. The script measures at both standard
+and high sensitivity and reports the gap when the two diverge:
 
 ```
 Faint combing (3% at standard detection, 51% at high sensitivity)
 Motion estimate unreliable — if edges look blocky, try --deinterlacer nnedi
 ```
 
-It still picks bwdif, since that is the safer filter for an unknown source, but
-the automatic choice has no real basis on such material — pick the filter by eye
-instead. Blockiness or stair-stepping along near-horizontal edges is the signature
-that bwdif is the wrong fit.
+bwdif is selected in that case. Check the result: blockiness or stair-stepping
+along near-horizontal edges means bwdif is the wrong fit for the source, and nnedi
+renders those edges cleanly.
 
 ### Choosing a Filter Manually
 
@@ -420,24 +417,22 @@ previews and as a fallback where bwdif is unavailable.
 By default every frame of an interlaced source is deinterlaced. Deinterlacing is
 lossy by nature — it keeps one field and reconstructs the other — so on a source
 that is only occasionally interlaced, the progressive majority is softened for no
-benefit. `--adaptive-deinterlace` restricts the filter to frames whose encoder
-flagged them interlaced, leaving the rest untouched.
+benefit. `--adaptive-deinterlace` restricts the filter to the frames that are
+actually interlaced, leaving the rest untouched.
 
-The flags a decoder reads out of the bitstream are frequently wrong. MPEG-2
-encoders in particular will mark a picture progressive while its content is two
-interleaved fields, and on a cheap transfer every picture may be marked
-progressive regardless — which would leave a scope-restricted filter with nothing
-to act on and pass all the combing through. To avoid depending on that, the
-adaptive chain re-derives the flag from the image with `idet` before filtering,
-so the decision rests on the pixels rather than on the encoder's bookkeeping.
+Which frames count as interlaced is decided from the picture. The adaptive chain
+runs `idet` ahead of the deinterlacer to detect combing directly, because the
+flags an encoder writes into the bitstream are unreliable: MPEG-2 encoders
+routinely mark a picture progressive while its content is two interleaved fields,
+and budget transfers sometimes mark every picture progressive.
 
 How faint a combing pattern `idet` will notice is set by
 `--adaptive-intl-thres` (default 1.04, ffmpeg's own). Lower values catch subtler
 combing at the cost of processing more frames. Transfers whose combing is weak —
 common on budget DVD releases and on video that has been through a resize — can
-need 1.01 or below before detection registers anything at all. When a source
-looks combed in motion but the script reports a low interlaced percentage, that
-gap is the reason, and it is worth sweeping the value:
+need 1.01 or below before detection registers anything at all. If a source looks
+combed in motion but the script reports a low interlaced percentage, sweep the
+value downward:
 
 ```bash
 ADAPTIVE_INTL_THRES=1.005 transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
@@ -445,17 +440,11 @@ ADAPTIVE_INTL_THRES=1.005 transcode-monster.sh --adaptive-deinterlace "/path/to/
 transcode-monster.sh --adaptive-deinterlace --adaptive-intl-thres 1.005 "/path/to/source/"
 ```
 
-This is left as a manual choice rather than detected automatically. Flag accuracy
-can only be checked by sampling, and low-ratio interlacing tends to be clustered
-rather than spread evenly — a title sequence, an effects shot, a stock insert. A
-sample that misses the cluster finds nothing wrong and reports honest flags with
-no evidence behind the verdict, and that error is the expensive one: it bakes
-visible combing into an archived encode, while the opposite error costs only
-softness. Combing is also among the most recognizable artifacts in video, so the
-judgement is quicker and more reliable made from the output than from a probe.
+How much a source gains from this varies within a title as well as between discs,
+so decide it per disc from a test encode.
 
-When a source clears the interlacing threshold but is still mostly progressive,
-the script says so:
+When a source clears the interlacing threshold but is mostly progressive, the
+script points it out:
 
 ```
 Interlacing: tff (7% interlaced, 91% progressive, 0% undetermined)
