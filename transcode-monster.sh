@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.21.1"
+SCRIPT_VERSION="1.23.1"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -103,7 +103,7 @@ DEFAULT_SUBTITLE_FORCED_DEEP_SCAN="false"  # When a long file has no cue-count m
 # Processing options
 DEFAULT_COPY_ONLY="false"  # Remux mode: copy the source video and audio streams instead of re-encoding, while still selecting the right tracks, setting dispositions, and naming the output. For sources that are already well-encoded but badly mastered/named.
 DEFAULT_DETECT_INTERLACING="true"
-DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Force adaptive deinterlacing for mixed content
+DEFAULT_ADAPTIVE_DEINTERLACE="false"  # Restrict deinterlacing to frames flagged interlaced
 DEFAULT_FORCE_DEINTERLACE="false"  # Force deinterlacing even on progressive content
 DEFAULT_DEINTERLACER="auto"  # auto = pick per source from a content profile (see select_deinterlacer), bwdif (safe general default), nnedi (best spatial reconstruction, wants a clean high-motion source), yadif
 # Thresholds for automatic deinterlacer selection. Both are preferences rather
@@ -295,6 +295,12 @@ DETECT_PULLDOWN="${DETECT_PULLDOWN:-$DEFAULT_DETECT_PULLDOWN}"
 # Set by the analysis when detect_telecine reports film-interlaced: suppresses
 # field-rate (bob) output for sources whose fields pair up into film frames.
 FILM_RATE_LOCK="false"
+# Set only while retrying an episode after the hardware path failed; forces
+# encoder selection to software for that one attempt.
+SOFTWARE_RETRY="false"
+# Count of episodes that fell back to software, reported in the run summary so a
+# systematically broken hardware path is visible rather than buried in scrollback.
+SOFTWARE_RETRY_COUNT=0
 IVTC_MODE="${IVTC_MODE:-$DEFAULT_IVTC_MODE}"
 FIELDMATCH_MODE="${FIELDMATCH_MODE:-$DEFAULT_FIELDMATCH_MODE}"
 SPLIT_CHAPTERS="${SPLIT_CHAPTERS:-$DEFAULT_SPLIT_CHAPTERS}"
@@ -852,10 +858,10 @@ get_field_order() {
 # parity leaves the comb pattern largely intact. Echoes a percentage, or ""
 # when the sample yields nothing usable.
 measure_residual_comb() {
-	local input="$1" seek="$2" parity="$3"
+	local input="$1" seek="$2" parity="$3" deint="${4:-all}"
 	local out t b pr tot
 	out=$(ffmpeg -nostdin -ss "$seek" -i "$input" \
-		-vf "bwdif=mode=0:parity=${parity},idet" \
+		-vf "bwdif=mode=0:parity=${parity}:deint=${deint},idet" \
 		-frames:v 200 -an -sn -f null - 2>&1 |
 		grep "Multi frame detection:" | tail -1)
 			t=$(grep -oP 'TFF:\s*\K[0-9]+' <<<"$out" || echo ""); b=$(grep -oP 'BFF:\s*\K[0-9]+' <<<"$out" || echo "")
@@ -915,7 +921,10 @@ probe_field_parity() {
 		fi
 	done
 
-	if [[ $decisive -lt 3 ]]; then
+	# Fewer than four decisive samples is not enough to distinguish a genuinely
+	# mixed-parity source from a mostly-progressive one where neither order
+	# leaves much combing to compare.
+	if [[ $decisive -lt 4 ]]; then
 		echo -e "    ${BOLD}Field order:${RESET} ${meta_order} (from container — too few decisive samples to verify)" >&2
 		echo "        Field order unverified — using ${meta_order} and forcing frame-rate output" >&2
 		echo "${meta_order} low"
@@ -1260,6 +1269,12 @@ done
 	fi
 
 	echo -e "    ${BOLD}Interlacing:${RESET} ${result} (${interlaced_pct}% interlaced, ${progressive_pct}% progressive, ${undetermined_pct}% undetermined)" >&2
+	# Past the detection threshold but mostly progressive: every frame gets
+	# deinterlaced, softening the majority that never needed it. Flagged rather
+	# than decided — see resolve_deint_scope for why this isn't automated.
+	if [[ "$result" != "progressive" && "$interlaced_pct" -lt 25 && "$ADAPTIVE_DEINTERLACE" != "true" ]]; then
+		echo -e "        ${YELLOW}Note: mostly progressive — if output looks soft, retry with --adaptive-deinterlace${RESET}" >&2
+	fi
     fi
 
     echo "$result"
@@ -1320,6 +1335,18 @@ measure_motion_pct() {
 
 			echo "$(( (t + b) * 100 / frames ))"
 		}
+
+# Resolve how much of the stream the deinterlacer touches: every frame, or only
+# those flagged interlaced. Left to the user, because the per-frame flags are
+# frequently wrong and whether they can be trusted on a given source is not
+# reliably measurable from a sample — low-ratio interlacing tends to cluster in
+# title sequences and inserts, so a probe that misses the cluster reports clean
+# flags with nothing behind the verdict. Combing is trivially visible in the
+# output, so this is a judgement the viewer makes better than the tool.
+resolve_deint_scope() {
+	[[ "$ADAPTIVE_DEINTERLACE" == "true" ]] && echo "interlaced" || echo "all"
+}
+
 
 # Choose a deinterlacer for this source. An explicit --deinterlacer always wins;
 # "auto" profiles the content. nnedi is selected only when the source is BOTH
@@ -1385,6 +1412,7 @@ apply_deinterlacer() {
 	# Degrade rather than abort. A missing filter or a failed weights download
 	# should cost quality on one file, not kill a library run partway through.
 	local choice="${3:-$DEINTERLACER}"
+	local deint="${4:-all}"
 	[[ "$choice" == "auto" ]] && choice="bwdif"
 
 	if [[ "$choice" == "nnedi" ]]; then
@@ -1407,15 +1435,15 @@ apply_deinterlacer() {
 		nnedi)
 			# qual=2 averages two predictions, which measurably reduces the
 			# overshoot nnedi produces at high-contrast edges. Cheap at SD.
-			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}:qual=2"
+			filter="nnedi=weights='${NNEDI_WEIGHTS_FILE}':field=${nnedi_field}:qual=2:deint=${deint}"
 			echo "        Using nnedi deinterlacer (high quality, neural network, ${rate}-rate)" >&2
 			;;
 		yadif)
-			filter="yadif=mode=${mode}:parity=$parity"
+			filter="yadif=mode=${mode}:parity=${parity}:deint=${deint}"
 			echo "        Using yadif deinterlacer (${rate}-rate)" >&2
 			;;
 		bwdif|*)
-			filter="bwdif=mode=${mode}:parity=$parity"
+			filter="bwdif=mode=${mode}:parity=${parity}:deint=${deint}"
 			echo "        Using bwdif deinterlacer (bob weaver, ${rate}-rate)" >&2
 			;;
 	esac
@@ -1713,9 +1741,13 @@ build_vf() {
 	# cadenced film has already been routed to IVTC above, so whatever remains
 	# flagged interlaced is treated as true video and gets the resolved rate.
 	if [[ "$ADAPTIVE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
+		echo -e "    ${BOLD}Interlacing:${RESET} forced adaptive (interlaced frames only)" >&2
+		local a_order a_conf
+		read -r a_order a_conf <<< "$(probe_field_parity "$input")"
+		[[ "$a_conf" == "low" ]] && FILM_RATE_LOCK="true"
 		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
-		vf_cpu="${vf_cpu}yadif=mode=0:parity=-1:deint=1"
-		echo -e "    ${BOLD}Interlacing:${RESET} forced adaptive — yadif (interlaced frames only)" >&2
+		local a_filter=$(apply_deinterlacer "$a_order" "$(resolve_deint_rate "$input")" "$(select_deinterlacer "$input")" "interlaced")
+		[[ -n "$a_filter" ]] && vf_cpu="${vf_cpu}${a_filter}"
 	elif [[ "$FORCE_DEINTERLACE" == "true" && "$skip_interlace" == "false" ]]; then
 		[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
 		local deint_rate=$(resolve_deint_rate "$input")
@@ -1736,10 +1768,12 @@ build_vf() {
 			[[ "$parity_order" == "tff" || "$parity_order" == "bff" ]] && interlacing="$parity_order"
 			[[ "$parity_conf" == "low" ]] && FILM_RATE_LOCK="true"
 
+			local deint_scope=$(resolve_deint_scope)
+
 			[[ -n "$vf_cpu" ]] && vf_cpu="$vf_cpu,"
 			local deint_rate=$(resolve_deint_rate "$input")
 			local deint_choice=$(select_deinterlacer "$input")
-			local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice")
+			local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice" "$deint_scope")
 			if [[ -n "$deint_filter" ]]; then
 				vf_cpu="${vf_cpu}${deint_filter}"
 			fi
@@ -1852,10 +1886,12 @@ else
 		    [[ "$parity_order" == "tff" || "$parity_order" == "bff" ]] && interlacing="$parity_order"
 		    [[ "$parity_conf" == "low" ]] && FILM_RATE_LOCK="true"
 
+		    local deint_scope=$(resolve_deint_scope)
+
 		    [[ -n "$vf" ]] && vf="$vf,"
 		    local deint_rate=$(resolve_deint_rate "$input")
 		    local deint_choice=$(select_deinterlacer "$input")
-		    local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice")
+		    local deint_filter=$(apply_deinterlacer "$interlacing" "$deint_rate" "$deint_choice" "$deint_scope")
 		    if [[ -n "$deint_filter" ]]; then
 			    vf="${vf}${deint_filter}"
 		    fi
@@ -2240,6 +2276,12 @@ get_colorspace_conversion() {
 # Returns "libx265" for software or "hevc_vaapi" for hardware encoding
 should_use_software_encoder() {
 	local source_file="$1"
+
+	# A retry after the hardware path failed goes to software unconditionally.
+	if [[ "$SOFTWARE_RETRY" == "true" ]]; then
+		echo "libx265"
+		return
+	fi
 
 	# Get video properties
 	local bit_depth=$(detect_bit_depth "$source_file")
@@ -4515,7 +4557,32 @@ else
 	    # Build and execute the ffmpeg command (array form, no eval). Pass the
 	    # subtitle decision we already resolved so build doesn't redo it.
 	    build_ffmpeg_command "$source_file" "$tmp_output" "$input_opts" "$sub_default_spec"
-	    "${FFMPEG_CMD[@]}"
+	    ffmpeg_rc=0
+	    "${FFMPEG_CMD[@]}" || ffmpeg_rc=$?
+
+	    if [[ $ffmpeg_rc -ne 0 ]]; then
+		    # A filtergraph ending in hwupload cannot be rebuilt mid-stream. When
+		    # a source changes parameters partway through a file, ffmpeg
+		    # re-negotiates formats and has no way to bridge VAAPI surfaces back
+		    # to a software scaler, so the graph dies with "Error reinitializing
+		    # filters". Software encoding has no hardware boundary in the graph
+		    # and reinitializes cleanly, so retry there once rather than losing
+		    # the episode and aborting a multi-disc run.
+		    ffmpeg_cmd_str=" ${FFMPEG_CMD[*]} "
+		    if [[ "$COPY_ONLY" != "true" && "$SOFTWARE_RETRY" != "true" \
+			    && "$ffmpeg_cmd_str" == *" hevc_vaapi "* ]]; then
+						echo -e "${YELLOW}    Hardware encode failed (exit ${ffmpeg_rc}) — retrying with software encoder${RESET}"
+						rm -f "$tmp_output" 2>/dev/null || true
+						SOFTWARE_RETRY="true"
+						build_ffmpeg_command "$source_file" "$tmp_output" "$input_opts" "$sub_default_spec"
+						"${FFMPEG_CMD[@]}"
+						SOFTWARE_RETRY="false"
+						SOFTWARE_RETRY_COUNT=$((SOFTWARE_RETRY_COUNT + 1))
+					else
+						SOFTWARE_RETRY="false"
+						error_handler ${LINENO} "\"\${FFMPEG_CMD[@]}\""
+		    fi
+	    fi
 
 	    # Success — promote the scratch file to the final name atomically
 	    mv -f "$tmp_output" "$output_file"
@@ -4530,6 +4597,12 @@ else
     echo ""
 done
 
+if [[ $SOFTWARE_RETRY_COUNT -gt 0 ]]; then
+	echo -e "${YELLOW}Note: ${SOFTWARE_RETRY_COUNT} episode(s) fell back to software encoding after the hardware path failed.${RESET}"
+	echo -e "${YELLOW}      Isolated cases usually mean a source changes parameters mid-file. If this is${RESET}"
+	echo -e "${YELLOW}      happening on every file, check the hardware path with 'vainfo'.${RESET}"
+	echo ""
+fi
 echo -e "${GREEN}All seasons complete!${RESET}"
 fi
 

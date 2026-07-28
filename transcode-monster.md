@@ -16,7 +16,7 @@ A universal video transcoding script with intelligent automatic detection for se
 - **HDR support**: Detects and preserves HDR10, HLG, and BT.2020 content automatically
 - **Bulk movie processing**: Process multiple movies in one directory without manual intervention
 - **Hybrid encoding**: Stays on hardware (VAAPI) for speed and only falls back to software (x265) when the hardware genuinely can't handle the source
-- **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, with adaptive handling for mixed film/video sources
+- **Smart deinterlacing**: Detects interlacing and telecine, then inverse-telecines film and deinterlaces true video, handling discs that mix the two in a single title
 - **Verified telecine detection**: Confirms 3:2 pulldown at any resolution by trial-matching the cadence, and recognizes film whose cadence is too broken to decimate so it keeps its native rate instead of being resampled into judder
 - **Measured field order**: Resolves top/bottom field order by testing both and keeping whichever leaves less combing, rather than trusting container tags that are frequently wrong; sources with no consistent field order are detected and handled conservatively
 - **Automatic filter selection**: Profiles each source and picks the deinterlacer that suits it, falling back gracefully when a filter or its weights are unavailable
@@ -159,13 +159,20 @@ crawl during a scroll:
 transcode-monster.sh --deinterlacer nnedi "/path/to/The Maxx/" "/output/"
 ```
 
-### Film with Interlaced Elements
+### Mostly Progressive Sources
 
-Use adaptive deinterlacing for mixed progressive/interlaced content:
+Some transfers are progressive apart from a title sequence, an optical effect or
+a video-sourced insert — the script reports a low interlaced percentage and warns
+that the source is mostly progressive. Deinterlacing every frame of such a file
+softens the majority that never needed it, so restrict the filter to the frames
+that do:
 
 ```bash
 transcode-monster.sh --adaptive-deinterlace "/path/to/movie.mkv" "/output/"
 ```
+
+Check the result before committing a batch — see
+[Deinterlacing Scope](#deinterlacing-scope---adaptive-deinterlace).
 
 ### Custom Quality
 
@@ -392,6 +399,40 @@ sources. Slower than bwdif, though at SD resolution rarely the bottleneck.
 **yadif** — older and faster, slightly softer than bwdif. Useful for quick
 previews and as a fallback where bwdif is unavailable.
 
+### Deinterlacing Scope (`--adaptive-deinterlace`)
+
+By default every frame of an interlaced source is deinterlaced. Deinterlacing is
+lossy by nature — it keeps one field and reconstructs the other — so on a source
+that is only occasionally interlaced, the progressive majority is softened for no
+benefit. `--adaptive-deinterlace` restricts the filter to frames whose encoder
+flagged them interlaced, leaving the rest untouched.
+
+The catch is that those flags are frequently wrong. MPEG-2 encoders in particular
+will mark a picture progressive while its content is two interleaved fields, and
+a deinterlacer told to skip flagged-progressive frames passes that combing
+straight into the output. Whether a given disc's flags are honest varies by
+authoring house and sometimes within a single title.
+
+This is left as a manual choice rather than detected automatically. Flag accuracy
+can only be checked by sampling, and low-ratio interlacing tends to be clustered
+rather than spread evenly — a title sequence, an effects shot, a stock insert. A
+sample that misses the cluster finds nothing wrong and reports honest flags with
+no evidence behind the verdict, and that error is the expensive one: it bakes
+visible combing into an archived encode, while the opposite error costs only
+softness. Combing is also among the most recognizable artifacts in video, so the
+judgement is quicker and more reliable made from the output than from a probe.
+
+When a source clears the interlacing threshold but is still mostly progressive,
+the script says so:
+
+```
+Interlacing: tff (7% interlaced, 91% progressive, 0% undetermined)
+    Note: mostly progressive — if output looks soft, retry with --adaptive-deinterlace
+```
+
+Encode one episode, look at it, and decide. Soft throughout means add the option;
+combing after adding it means the flags are unreliable and the default is right.
+
 ### Output Rate (`--deinterlace-rate`)
 
 Interlaced video carries two distinct fields per frame, so it can be
@@ -426,7 +467,7 @@ transcode-monster.sh --deinterlacer bwdif "/path/to/source/"
 # Force deinterlacing on misdetected progressive content
 transcode-monster.sh --force-deinterlace "/path/to/source/"
 
-# Adaptive mode (only deinterlace frames flagged as interlaced)
+# Deinterlace only frames flagged interlaced (for mostly-progressive sources)
 transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
 
 # Force single-rate output when deinterlacing true video
@@ -799,11 +840,14 @@ bwdif:
 transcode-monster.sh --deinterlacer bwdif "/path/to/source/"
 ```
 
-For sources that are mostly progressive with occasional interlaced frames, limit
-deinterlacing to the frames that actually need it:
+Uniform softness on a source that is mostly progressive means the deinterlacer is
+processing frames that didn't need it. Limit it to the frames that do:
 ```bash
 transcode-monster.sh --adaptive-deinterlace "/path/to/source/"
 ```
+
+If that leaves combing behind instead, the source's per-frame flags are wrong and
+every frame has to be processed — drop the option again.
 
 ### Telecine Detection Issues
 
