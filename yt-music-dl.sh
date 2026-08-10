@@ -19,6 +19,8 @@ DRY_RUN=false
 VERBOSE=false
 NO_CROP=false
 NO_ALBUM_DIR=false
+ALBUM_DIR_YEAR=true    # suffix album directories with "(YYYY)" when a release year is known
+MINIMAL_TAGS=false     # write only title/artist/album/date/track/genre + cover art
 
 # YouTube Music internal API — update these if artist resolution starts failing
 YTM_API_KEY="AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"   # baked into YTM web app JS
@@ -57,7 +59,8 @@ ${BLD}OPTIONS${RST}
                           Any yt-dlp-supported browser: firefox, chrome,
                           chromium, opera, edge, safari, vivaldi, whale
   -o, --output <dir>      Root output directory (default: ~/Music/YouTube)
-                          Tracks land at <dir>/<Artist>/<Album>/<N> - <Title>.<ext>
+                          Tracks land at
+                          <dir>/<Artist>/<Album> (<Year>)/<N> - <Title>.<ext>
   -c, --codec <fmt>       Output audio codec/container (default: m4a)
                             m4a   — remux to M4A/AAC; re-encode only if source
                                     isn't AAC (purchased tracks never re-encode)
@@ -73,6 +76,13 @@ ${BLD}OPTIONS${RST}
       --no-album-dir      Don't probe the release for a fixed output directory;
                           build the path from each track's own artist/album
                           fields instead (may scatter one album across dirs)
+      --no-album-year     Don't append "(YYYY)" to album directory names.
+                          Same-titled releases by one artist (self-titled
+                          debuts, reissues) will then share a directory
+      --minimal-tags      Write only Title, Artist, Album Artist, Album, Date,
+                          Track and Genre, plus the cover image. Drops the
+                          YouTube description, comment, purl, composer, disc
+                          and episode/series fields
   -n, --dry-run           Print what would be downloaded; nothing is fetched
   -v, --verbose           Pass --verbose to yt-dlp (very noisy)
   -h, --help              Show this help and exit
@@ -88,6 +98,8 @@ ${BLD}CONFIG FILE${RST}
     NO_CROP=true
     YTM_API_KEY=AIza...    # if the bundled key goes stale
     NO_ALBUM_DIR=true      # revert to per-track artist/album paths
+    ALBUM_DIR_YEAR=false   # revert to bare album names, no "(YYYY)" suffix
+    MINIMAL_TAGS=true      # strip everything but the core music tags
 
 ${BLD}EXAMPLES${RST}
   # Artist page (all albums — resolved automatically via YouTube Music API)
@@ -133,6 +145,30 @@ ${BLD}NOTES${RST}
     that pair is used verbatim for the whole release, so featured artists or
     per-track album variants ("Deluxe", "B-Sides") can't split it up. Use
     --no-album-dir to go back to per-track path fields.
+  • Album directories carry a "(YYYY)" suffix so that same-titled releases by
+    one artist stay apart — a self-titled debut and its self-titled successor
+    a decade later would otherwise collapse into one directory, and any track
+    whose filename collided would be silently skipped by --no-overwrites. Only
+    a real release_year is used; when YouTube Music doesn't supply one the
+    suffix is omitted rather than filled in from the upload date, which would
+    bake a wrong year into the path. --no-album-year turns this off (note that
+    switching conventions on an existing library makes every album re-download
+    into a parallel directory, since the old paths no longer match).
+  • --minimal-tags drops the fields FFmpegMetadataPP writes that aren't music
+    metadata — most usefully the YouTube description and the webpage URL that
+    lands in 'comment'. It works by setting each unwanted meta_* field empty,
+    which makes the postprocessor skip it; no extra ffmpeg pass is involved.
+    'album_artist' is deliberately kept: without it, compilations and
+    guest-heavy albums split by track artist in players that key on it.
+    ffmpeg still stamps its own 'encoder' tag; add
+    --ppa "Metadata:-fflags +bitexact" if you want that gone as well.
+  • There is no original-release-date here to use. yt-dlp exposes only
+    release_year/release_date, and YouTube Music has no notion of a release
+    group, so a 2005 reissue of a 1980 record reports 2005. Only MusicBrainz
+    knows the difference; set 'original_date: yes' in beets, or put
+    \$original_year in its path format, and let the import be the authority.
+    The year here is for keeping releases in separate directories, a job the
+    original date can't do — two editions of one album share it.
   • Track numbers: upstream metadata wins when it's present and non-zero. In
     practice YouTube Music almost never provides it, so the number is derived
     — from a leading number in the title ("03 - Foo", "3. Foo"), else from the
@@ -163,6 +199,8 @@ while [[ $# -gt 0 ]]; do
         -c|--codec)    CODEC="${2:?'--codec requires a value'}";     shift 2 ;;
         --no-crop)     NO_CROP=true;  shift ;;
         --no-album-dir) NO_ALBUM_DIR=true; shift ;;
+        --no-album-year) ALBUM_DIR_YEAR=false; shift ;;
+        --minimal-tags) MINIMAL_TAGS=true; shift ;;
         -n|--dry-run)  DRY_RUN=true;  shift ;;
         -v|--verbose)  VERBOSE=true;  shift ;;
         -h|--help)     usage; exit 0 ;;
@@ -246,6 +284,25 @@ YTDLP_ARGS=(
     # Treat artist pages and playlists as full collections
     --yes-playlist
 )
+
+# ── Minimal tag set ───────────────────────────────────────────────────────────
+#
+# FFmpegMetadataPP writes more than music metadata: the full YouTube
+# description (as both description and synopsis), the watch URL (as both purl
+# and comment), plus series/episode fields that mean nothing for an album.
+# Setting a meta_* field to the empty string makes the postprocessor skip it,
+# so the unwanted tags are never written in the first place — no second pass,
+# no re-embedding of cover art.
+#
+# Fields the PP derives in pairs are listed by both names, since which one it
+# checks for an override depends on how the pair is declared internally.
+if $MINIMAL_TAGS; then
+    for _field in description synopsis comment purl composer \
+                  disc show season_number episode_id episode_sort language; do
+        YTDLP_ARGS+=(--parse-metadata ":(?P<meta_${_field}>)")
+    done
+    unset _field
+fi
 
 # ── Codec / format selection ───────────────────────────────────────────────────
 #
@@ -415,12 +472,14 @@ _sanitize() {
     printf '%s' "$s"
 }
 
-# Print "<album artist>\t<album title>" for a playlist/album URL, or fail.
+# Print "<album artist>\t<album title>\t<release year>" for a playlist/album
+# URL, or fail. The year field may be empty; upload_date is deliberately not a
+# fallback for it, since a wrong year in a directory name outlives a wrong tag.
 album_dir() {
     local url="$1" line
     line=$(yt-dlp --cookies-from-browser "$BROWSER" \
                   --playlist-items 1 --skip-download --no-warnings \
-                  --print "%(album_artist,artist,playlist_uploader,uploader|)s"$'\t'"%(album,playlist_title,playlist|)s" \
+                  --print "%(album_artist,artist,playlist_uploader,uploader|)s"$'\t'"%(album,playlist_title,playlist|)s"$'\t'"%(release_year|)s" \
                   "$url" 2>/dev/null | head -n1) || return 1
     [[ -n "$line" ]] || return 1
     printf '%s' "$line"
@@ -432,6 +491,7 @@ info "Browser    : ${BROWSER}"
 info "Codec      : ${CODEC}"
 info "URLs       : ${#URLS[@]}"
 $NO_CROP  && warn "Thumbnail crop disabled — art will be 16:9 padded"
+$MINIMAL_TAGS && info "Tags       : minimal (title/artist/albumartist/album/date/track/genre + cover)"
 $DRY_RUN  && warn "DRY RUN — nothing will be downloaded"
 echo
 
@@ -460,9 +520,15 @@ for url in "${URLS[@]}"; do
         tmpl="$LOOSE_TMPL"
         if ! $NO_ALBUM_DIR; then
             if probe=$(album_dir "$target"); then
-                dir_artist=$(_sanitize "${probe%%$'\t'*}")
-                dir_album=$(_sanitize "${probe#*$'\t'}")
+                IFS=$'\t' read -r p_artist p_album p_year <<< "$probe"
+                dir_artist=$(_sanitize "$p_artist")
+                dir_album=$(_sanitize "$p_album")
                 if [[ -n "$dir_artist" && -n "$dir_album" ]]; then
+                    # Suffix after sanitizing, so trailing-dot trimming can't
+                    # eat the parens; a non-four-digit year counts as absent.
+                    if $ALBUM_DIR_YEAR && [[ "$p_year" =~ ^[0-9]{4}$ ]]; then
+                        dir_album="${dir_album} (${p_year})"
+                    fi
                     tmpl="${OUTDIR}/${dir_artist}/${dir_album}/${TRACK_TMPL}"
                     info "Release    : ${dir_artist} / ${dir_album}"
                 else
