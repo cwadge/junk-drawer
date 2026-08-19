@@ -9,7 +9,13 @@
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-BROWSER="brave"
+# An empty BROWSER sends no cookies. That's the default because authenticating
+# against a music.youtube.com URL costs you the audio: yt-dlp adds the web_music
+# client for authenticated music requests, and that client's HTTPS and DASH
+# formats sit behind a GVS PO token. Without one, every audio-only stream is
+# dropped and only muxed HLS is left, which no audio-only selector matches.
+# Public releases need no account, so set BROWSER only for content that does.
+BROWSER=""
 OUTDIR="$HOME/Music/YouTube"
 SLEEP_MIN=1
 SLEEP_MAX=5
@@ -20,7 +26,11 @@ VERBOSE=false
 NO_CROP=false
 NO_ALBUM_DIR=false
 ALBUM_DIR_YEAR=true    # suffix album directories with "(YYYY)" when a release year is known
-MINIMAL_TAGS=false     # write only title/artist/album/date/track/genre + cover art
+MINIMAL_TAGS=false     # write only title/artist/album/date/track/genre + cover
+
+# Extra arguments appended verbatim to every yt-dlp invocation, set from the
+# config file. Declared here so it always exists as an array. See CONFIG FILE.
+declare -a YTDLP_EXTRA=()
 
 # YouTube Music internal API — update these if artist resolution starts failing
 YTM_API_KEY="AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"   # baked into YTM web app JS
@@ -55,9 +65,15 @@ ${BLD}USAGE${RST}
   $(basename "$0") [options] <url> [url...]
 
 ${BLD}OPTIONS${RST}
-  -b, --browser <name>    Browser to pull cookies from (default: brave)
+  -b, --browser <name>    Browser to pull cookies from (default: none)
                           Any yt-dlp-supported browser: firefox, chrome,
-                          chromium, opera, edge, safari, vivaldi, whale
+                          chromium, opera, edge, safari, vivaldi, whale, brave
+                          Only needed for content behind your account. Public
+                          releases fetch fine without it, and cookies actively
+                          break audio format selection on music.youtube.com
+                          URLs unless a PO token is available (see NOTES)
+      --no-cookies        Force cookies off, overriding a BROWSER set in the
+                          config file
   -o, --output <dir>      Root output directory (default: ~/Music/YouTube)
                           Tracks land at
                           <dir>/<Artist>/<Album> (<Year>)/<N> - <Title>.<ext>
@@ -92,7 +108,7 @@ ${BLD}CONFIG FILE${RST}
   before argument parsing. CLI flags always take precedence. Format: plain
   shell variable assignments, one per line. Any default can be overridden:
 
-    BROWSER=firefox
+    BROWSER=firefox        # empty (the default) means send no cookies at all
     OUTDIR=/mnt/nas/Music/YouTube
     CODEC=copy             # revert to raw stream if you only use Linux hosts
     NO_CROP=true
@@ -100,6 +116,19 @@ ${BLD}CONFIG FILE${RST}
     NO_ALBUM_DIR=true      # revert to per-track artist/album paths
     ALBUM_DIR_YEAR=false   # revert to bare album names, no "(YYYY)" suffix
     MINIMAL_TAGS=true      # strip everything but the core music tags
+
+  YTDLP_EXTRA is a bash array appended verbatim to every yt-dlp call, after
+  everything this script builds, so it can also override earlier arguments.
+  Use it to reach yt-dlp options this script doesn't expose:
+
+    # force the PO-token-gated formats to be offered anyway (may 403)
+    YTDLP_EXTRA=(--extractor-args "youtube:formats=missing_pot")
+
+    # hand yt-dlp a token from a POT provider running elsewhere
+    YTDLP_EXTRA=(--extractor-args "youtube:po_token=web_music.gvs+XXXX")
+
+    # throttle harder, or pin a client set
+    YTDLP_EXTRA=(--limit-rate 500K --extractor-args "youtube:player_client=default,tv")
 
 ${BLD}EXAMPLES${RST}
   # Artist page (all albums — resolved automatically via YouTube Music API)
@@ -123,6 +152,20 @@ ${BLD}EXAMPLES${RST}
   $(basename "$0") --dry-run 'https://music.youtube.com/browse/MPADxxx'
 
 ${BLD}NOTES${RST}
+  • Cookies are off by default, and turning them on has a cost. When yt-dlp is
+    authenticated and the URL is a music.youtube.com one, it appends the
+    web_music client unconditionally — the exclusion syntax can't remove it,
+    because the append happens after exclusions are processed. That client's
+    HTTPS and DASH formats require a GVS PO token, so without one every
+    audio-only itag (139/140/249/251) is dropped and only muxed HLS is left.
+    An audio-only selector then matches nothing: "Requested format is not
+    available". Unauthenticated, yt-dlp uses clients that need no token and
+    the full set of audio streams is available. For public releases, cookies
+    aren't merely unnecessary — they're what breaks the download.
+    For content that does need an account, either run a PO token provider
+    plugin (bgutil-ytdlp-pot-provider) and pass the token via YTDLP_EXTRA, or
+    use a Premium subscription, which waives the token requirement. Failing
+    both, the muxed fallback described under --codec keeps the run alive.
   • Artist pages (MPAD* URLs) are not handled by yt-dlp directly. This script
     detects them and resolves each album/single/EP to an OLAK playlist URL by
     calling the YouTube Music internal browse API (curl + jq), then feeds those
@@ -195,6 +238,7 @@ URLS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -b|--browser)  BROWSER="${2:?'--browser requires a value'}"; shift 2 ;;
+        --no-cookies)  BROWSER=""; shift ;;
         -o|--output)   OUTDIR="${2:?'--output requires a value'}";   shift 2 ;;
         -c|--codec)    CODEC="${2:?'--codec requires a value'}";     shift 2 ;;
         --no-crop)     NO_CROP=true;  shift ;;
@@ -233,9 +277,14 @@ TRACK_TMPL="%(track_number,playlist_index|00)02d - %(title)s.%(ext)s"
 #   album  → playlist   (playlist title as album name)
 LOOSE_TMPL="${OUTDIR}/%(artist,uploader)s/%(album,playlist)s/${TRACK_TMPL}"
 
+# Auth. An empty BROWSER sends no cookies; see the note on authentication and
+# audio formats in the defaults block. The album probe reuses this array so both
+# halves of a run present the same identity to YouTube.
+COOKIE_ARGS=()
+[[ -n "$BROWSER" ]] && COOKIE_ARGS=(--cookies-from-browser "$BROWSER")
+
 YTDLP_ARGS=(
-    # Auth
-    --cookies-from-browser "$BROWSER"
+    ${COOKIE_ARGS[@]+"${COOKIE_ARGS[@]}"}
 
     # Resilience — don't abort the whole artist on one bad track
     --ignore-errors
@@ -314,26 +363,37 @@ fi
 #         stream (avoiding unnecessary transcode), then --extract-audio with
 #         --audio-format to remux/re-encode into the target container.
 #
+#
+# Selectors that end in --extract-audio close with a muxed fallback,
+# 'best*[acodec!=none]'. It sits last, so it's reached only when no audio-only
+# stream matched — which happens when the audio-only formats are PO-token gated
+# and only muxed HLS is on offer. Pulling ~128k AAC out of a 360p container and
+# throwing away the video beats failing the whole release. It's a floor, not a
+# preference. --codec copy has no fallback: a muxed stream written verbatim is
+# a video file, not a track.
+#
+MUXED_FALLBACK="best*[acodec!=none]"
+
 case "$CODEC" in
     m4a)
         # Prefer a native AAC/M4A source; re-encode only if unavoidable.
         # Purchased tracks are always AAC — this remuxes without touching audio.
         YTDLP_ARGS+=(
-            -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio"
+            -f "bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/${MUXED_FALLBACK}"
             --extract-audio --audio-format m4a --audio-quality 0
         )
         ;;
     mp3)
         # Always re-encodes — lossy → lossy. Use only for device compatibility.
         YTDLP_ARGS+=(
-            -f bestaudio
+            -f "bestaudio/${MUXED_FALLBACK}"
             --extract-audio --audio-format mp3 --audio-quality 0
         )
         ;;
     opus)
         # Prefer a native Opus/WebM source; re-encode only if unavoidable.
         YTDLP_ARGS+=(
-            -f "bestaudio[ext=webm]/bestaudio[acodec=opus]/bestaudio"
+            -f "bestaudio[ext=webm]/bestaudio[acodec=opus]/bestaudio/${MUXED_FALLBACK}"
             --extract-audio --audio-format opus --audio-quality 0
         )
         ;;
@@ -341,7 +401,7 @@ case "$CODEC" in
         # Always re-encodes — lossless container around a lossy source.
         # Larger files with no quality gain; useful for pipeline compatibility.
         YTDLP_ARGS+=(
-            -f bestaudio
+            -f "bestaudio/${MUXED_FALLBACK}"
             --extract-audio --audio-format flac
         )
         ;;
@@ -374,6 +434,9 @@ $VERBOSE  && YTDLP_ARGS+=(--verbose)
 if $DRY_RUN; then
     YTDLP_ARGS+=(--simulate --print filename)
 fi
+
+# Config-supplied arguments go last so they override anything built above.
+YTDLP_ARGS+=(${YTDLP_EXTRA[@]+"${YTDLP_EXTRA[@]}"})
 
 # ── Artist URL resolver ───────────────────────────────────────────────────────
 #
@@ -475,9 +538,15 @@ _sanitize() {
 # Print "<album artist>\t<album title>\t<release year>" for a playlist/album
 # URL, or fail. The year field may be empty; upload_date is deliberately not a
 # fallback for it, since a wrong year in a directory name outlives a wrong tag.
+# --ignore-no-formats-error keeps the probe honest about its own job: only the
+# metadata matters here, so a release with no selectable format still yields a
+# directory name. Without it the probe applies yt-dlp's default selector and
+# succeeds on formats the download would reject, reporting a release that then
+# fails on every track.
 album_dir() {
     local url="$1" line
-    line=$(yt-dlp --cookies-from-browser "$BROWSER" \
+    line=$(yt-dlp ${COOKIE_ARGS[@]+"${COOKIE_ARGS[@]}"} \
+                  --ignore-no-formats-error \
                   --playlist-items 1 --skip-download --no-warnings \
                   --print "%(album_artist,artist,playlist_uploader,uploader|)s"$'\t'"%(album,playlist_title,playlist|)s"$'\t'"%(release_year|)s" \
                   "$url" 2>/dev/null | head -n1) || return 1
@@ -487,12 +556,23 @@ album_dir() {
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 info "Output dir : ${OUTDIR}"
-info "Browser    : ${BROWSER}"
+info "Cookies    : ${BROWSER:-none}"
 info "Codec      : ${CODEC}"
 info "URLs       : ${#URLS[@]}"
+[[ ${#YTDLP_EXTRA[@]} -gt 0 ]] && info "Extra args : ${YTDLP_EXTRA[*]}"
 $NO_CROP  && warn "Thumbnail crop disabled — art will be 16:9 padded"
 $MINIMAL_TAGS && info "Tags       : minimal (title/artist/albumartist/album/date/track/genre + cover)"
 $DRY_RUN  && warn "DRY RUN — nothing will be downloaded"
+
+# Cookies plus a music.youtube.com URL is the combination that loses the
+# audio-only formats, so flag it before the first track rather than after the
+# last failure. A token or an explicit opt-in to the gated formats in
+# YTDLP_EXTRA means the caller has already handled it; stay quiet then.
+if [[ -n "$BROWSER" && "${URLS[*]}" == *music.youtube.com* \
+      && "${YTDLP_EXTRA[*]-}" != *po_token* && "${YTDLP_EXTRA[*]-}" != *missing_pot* ]]; then
+    warn "Cookies + music.youtube.com — web_music formats are PO-token gated"
+    warn "If tracks fail with 'Requested format is not available', retry with --no-cookies"
+fi
 echo
 
 ERRORS=0
