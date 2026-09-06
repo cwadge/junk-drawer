@@ -199,8 +199,9 @@ transcode-monster.sh -d "/path/to/source/" "/output/"
 When the source is already encoded the way you want it but is badly mastered or
 named, `--copy-only` (also available as `--remux`) keeps the video and audio
 streams byte-for-byte and only restructures the container: it selects the right
-audio and subtitle tracks, filters by language, sets the default/forced subtitle
-dispositions, maps chapters, and names the output exactly as a normal run would.
+audio and subtitle tracks, filters by language, sets the default video, audio,
+and subtitle track flags, maps chapters, and names the output exactly as a
+normal run would.
 
 ```bash
 # Remux a badly-named series into clean Show - S01E01.mkv files, no re-encode
@@ -770,6 +771,25 @@ detected.
 MPEG-PS/TS, and AVI rips) report an empty language rather than `und`. Both the
 audio and subtitle language filters treat an empty tag as `und` and keep the
 track, so untagged secondary audio and subtitle streams aren't silently dropped.
+
+### Default Track Flags
+
+Every output gets exactly one enabled track per type, which is what MKV expects
+and what players rely on:
+
+- **Video**: the single mapped video stream is flagged default. Sources that
+  never carried the flag (DVD/VOB and MPEG-TS rips especially) otherwise come
+  out with no enabled video track, since ffmpeg passes the source disposition
+  through untouched.
+- **Audio**: the preferred track is flagged default and the flag is stripped from
+  every other output audio track, so a source shipping two "default" tracks (an
+  English dub flagged alongside the Japanese original, say) doesn't leave the
+  container ambiguous.
+- **Subtitles**: at most one track is enabled, per the rules above; forced tracks
+  get `default+forced`.
+
+Flags are set relative (`+default`), so other dispositions on a stream —
+commentary, original, hearing-impaired — survive.
 
 ## Advanced Options
 

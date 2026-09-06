@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.27.0"
+SCRIPT_VERSION="1.27.1"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -3411,6 +3411,16 @@ build_ffmpeg_command() {
     FFMPEG_CMD=("${prefix_arr[@]}" ffmpeg -hide_banner -loglevel "$encode_loglevel" -stats)
     FFMPEG_CMD+=(-analyzeduration "$FFMPEG_ANALYZEDURATION" -probesize "$FFMPEG_PROBESIZE")
     FFMPEG_CMD+=("${input_arr[@]}" -i "$source_file" -map 0:v:0)
+    # The video track needs the default flag for the same reason audio does:
+    # ffmpeg carries the source disposition through verbatim, and the matroska
+    # muxer then writes FlagDefault=0 for a stream that never had it (common on
+    # DVD/VOB and MPEG-TS rips, and on anything remuxed from a container with no
+    # equivalent flag). That leaves a compliant MKV with no enabled video track,
+    # which players resolve by guessing — usually harmless, but it trips up
+    # stricter players and anything doing automated track selection. Only one
+    # video stream is ever mapped, so it's unambiguously the one to flag.
+    # Relative +default so other flags on the stream survive.
+    FFMPEG_CMD+=(-disposition:v:0 +default)
     FFMPEG_CMD+=("${audio_arr[@]}" "${subs_arr[@]}")
 
     if [[ "$COPY_ONLY" == "true" ]]; then
