@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.27.1"
+SCRIPT_VERSION="1.28.1"
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT SETTINGS (Priority 1: Built-ins)
@@ -139,8 +139,10 @@ DEFAULT_OUTPUT_DIR="${HOME}/Videos"
 DEFAULT_CONTAINER="matroska"  # mkv
 DEFAULT_INPUT_VIDEO_EXTENSIONS="mkv mp4 m4v avi mpg mpeg ts m2ts mov webm flv wmv asf vob ogv"  # Supported input formats
 DEFAULT_FFMPEG_LOGLEVEL="warning"  # FFmpeg verbosity: quiet, panic, fatal, error, warning, info, verbose, debug
-DEFAULT_FFMPEG_ANALYZEDURATION="120000000"  # Microseconds (2 minutes) - analyze input to determine codec params
-DEFAULT_FFMPEG_PROBESIZE="128000000"  # Bytes (128MB) - amount of data to probe for stream info
+DEFAULT_FFMPEG_ANALYZEDURATION="120000000"  # Microseconds (2 minutes) - deep probe, scanning containers only (MPEG-PS/TS)
+DEFAULT_FFMPEG_PROBESIZE="128000000"  # Bytes (128MB) - deep probe, scanning containers only (MPEG-PS/TS)
+DEFAULT_FFMPEG_ANALYZEDURATION_HEADER="10000000"  # Microseconds (10s) - header containers (mkv, mp4, avi) declare tracks up front
+DEFAULT_FFMPEG_PROBESIZE_HEADER="8000000"  # Bytes (8MB) - modest margin over ffmpeg's 5MB stock default
 
 # ════════════════════════════════════════════════════════════════════════════
 # ERROR HANDLING
@@ -333,6 +335,8 @@ INPUT_VIDEO_EXTENSIONS="${INPUT_VIDEO_EXTENSIONS:-$DEFAULT_INPUT_VIDEO_EXTENSION
 FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-$DEFAULT_FFMPEG_LOGLEVEL}"
 FFMPEG_ANALYZEDURATION="${FFMPEG_ANALYZEDURATION:-$DEFAULT_FFMPEG_ANALYZEDURATION}"
 FFMPEG_PROBESIZE="${FFMPEG_PROBESIZE:-$DEFAULT_FFMPEG_PROBESIZE}"
+FFMPEG_ANALYZEDURATION_HEADER="${FFMPEG_ANALYZEDURATION_HEADER:-$DEFAULT_FFMPEG_ANALYZEDURATION_HEADER}"
+FFMPEG_PROBESIZE_HEADER="${FFMPEG_PROBESIZE_HEADER:-$DEFAULT_FFMPEG_PROBESIZE_HEADER}"
 
 # ════════════════════════════════════════════════════════════════════════════
 # FUNCTIONS
@@ -603,11 +607,28 @@ ${BOLDBLUE}CONFIG FILE${RESET}
 			      quiet  panic  fatal  error  warning  info  verbose  debug
 			      The progress indicator (-stats) is always enabled.
     FFMPEG_ANALYZEDURATION    Microseconds to analyze input (default: 120000000 = 2 min)
-			      Increase if you see "Could not find codec parameters" on
-			      subtitle streams. Large Blu-ray rips may need 200000000+.
     FFMPEG_PROBESIZE          Bytes to probe for stream info (default: 128000000 = 128 MB)
-			      Raise alongside ANALYZEDURATION for persistent warnings.
-			      Higher values add 3-8 sec to startup but eliminate them.
+			      Applied to scanning containers only (mpg, mpeg, ts,
+			      m2ts, vob), which have no global header and can
+			      introduce a stream minutes in. Probesize is the
+			      binding limit on high-bitrate sources: 128 MB is
+			      ~170s of DVD but only ~26s of 40 Mbps Blu-ray, so
+			      raise both together or neither.
+    FFMPEG_ANALYZEDURATION_HEADER   Microseconds for header containers (default: 10000000 = 10s)
+    FFMPEG_PROBESIZE_HEADER   Bytes for header containers (default: 8000000 = 8 MB)
+			      Applied to mkv, mp4, avi and friends, which declare
+			      every track up front. Codec, language, disposition
+			      and video geometry resolve from the header at any
+			      budget, so a deep probe here only costs startup I/O.
+
+			      "Could not find codec parameters ... unspecified
+			      size" on a PGS track is expected on Blu-ray rips and
+			      is not worth chasing: the subtitle canvas size lives
+			      in the cue packets, and a sparse forced track may not
+			      fire a cue for forty minutes. Nothing here uses that
+			      geometry — PGS is stream-copied and players read it
+			      at render time. Ignore ffmpeg's "Consider increasing"
+			      advice for this case.
 
 ${BOLDBLUE}EXAMPLES${RESET}
   ${CYAN}# Auto-detect everything from a disc directory${RESET}
@@ -2152,33 +2173,94 @@ audio_track_is_passthrough() {
 # Returns "copy" for MKV-compatible codecs, a transcode target (e.g. "srt") for
 # formats that need conversion, or "drop" for codecs that cannot be meaningfully
 # converted (embedded closed captions, binary data streams, etc.).
-get_subtitle_output_codec() {
+# Count the streams of a given type in an input.
+#
+# ffprobe reports a stream twice on MPEG-TS: once nested under the program that
+# carries it, and once in the top-level stream list. Counting raw output lines
+# therefore doubles the track count on ts/m2ts/vob sources, and the extra count
+# turns into map entries for streams that don't exist ("Stream map '0:a:1'
+# matches no streams"). Matroska has no program section, so MakeMKV output never
+# exposed this.
+#
+# -show_entries can't avoid it: it selects sections by name, and the nested
+# per-program section is also called "stream", so it always matches both. Nor is
+# the compact writer's parent prefix usable — it only emits the section chain
+# when it changes, so nested rows past the first are indistinguishable from
+# top-level ones. -show_streams enables the top-level section only, which makes
+# the [STREAM] markers an exact count.
+count_streams() {
 	local input="$1"
-	local track_index="$2"
-	local codec
-	codec=$(ffprobe -v quiet -select_streams "s:${track_index}" \
-		-show_entries stream=codec_name \
-		-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]')
-			case "$codec" in
-				# MP4/ISOBMFF text subtitles — MKV does not support these; convert to SRT
-				mov_text|ttml)
-				echo "srt" ;;
-				# WebVTT — convert to SRT for broad player compatibility
-				webvtt)
-				echo "srt" ;;
-				# CEA-608/708 closed captions are embedded in the video stream and cannot
-				# be independently muxed as a subtitle stream — drop them
-				eia_608|eia_708|cea_608|cea_708)
-				echo "drop" ;;
-				# Binary data or unrecognized codec — not a real subtitle stream
-				bin_data|"")
-				echo "drop" ;;
-				# All other codecs (ass, srt, hdmv_pgs_subtitle, dvd_subtitle,
-				# dvb_subtitle, etc.) are MKV-compatible
-				*)
-				echo "copy" ;;
+	local stream_type="$2"
+
+	ffprobe -v quiet -select_streams "$stream_type" -show_streams \
+		"$input" 2>/dev/null | grep -c "^\[STREAM\]" || true
+	}
+
+# Select probe depth based on the input container.
+#
+# Probe depth is a property of the container, not the disc. MPEG-PS/TS carry no
+# global header: streams are found by scanning, and a track can first appear
+# minutes into the file, so a deep probe genuinely buys stream discovery there.
+# Matroska/MP4/AVI declare every track in the header, and codec, language,
+# disposition and video geometry all resolve instantly regardless of budget.
+#
+# The one thing a deep probe adds on a header container is the pixel geometry of
+# bitmap subtitle tracks — PGS carries no CodecPrivate in Matroska, so its canvas
+# size lives inside the cue packets. That is unreachable in practice: a sparse
+# forced/signs track may not fire its first cue for forty minutes, so no bounded
+# probesize finds it, and nothing here needs it anyway (PGS is stream-copied, and
+# players read the geometry out of the composition segments at render time).
+#
+# So on a BD rip ffmpeg read the full 128 MB before every encode, chasing a
+# number it could not reach and would not have used. Hence the split.
+#
+# Note this does not silence "Could not find codec parameters ... unspecified
+# size" — that fires whenever a stream is still unresolved at the end of the
+# budget, so it appears at any setting, just sooner and cheaper now. ffmpeg's
+# own "Consider increasing" advice is a dead end for sparse PGS; the warning is
+# expected on BD rips and safe to ignore.
+get_probe_args() {
+	local source_file="$1"
+	local -n out_arr="$2"
+	local ext="${source_file##*.}"
+
+	case "${ext,,}" in
+		# MPEG-PS/TS family — no global header, streams appear by scanning
+		mpg|mpeg|ts|m2ts|mts|m2t|tp|trp|vob|ps)
+		out_arr=(-analyzeduration "$FFMPEG_ANALYZEDURATION" -probesize "$FFMPEG_PROBESIZE") ;;
+			# Header containers — everything the pipeline reads is declared up front
+			*)
+			out_arr=(-analyzeduration "$FFMPEG_ANALYZEDURATION_HEADER" -probesize "$FFMPEG_PROBESIZE_HEADER") ;;
 		esac
 	}
+
+	get_subtitle_output_codec() {
+		local input="$1"
+		local track_index="$2"
+		local codec
+		codec=$(ffprobe -v quiet -select_streams "s:${track_index}" \
+			-show_entries stream=codec_name \
+			-of default=noprint_wrappers=1:nokey=1 "$input" 2>/dev/null | head -1 | tr -d '[:space:]')
+					case "$codec" in
+						# MP4/ISOBMFF text subtitles — MKV does not support these; convert to SRT
+						mov_text|ttml)
+						echo "srt" ;;
+						# WebVTT — convert to SRT for broad player compatibility
+						webvtt)
+						echo "srt" ;;
+						# CEA-608/708 closed captions are embedded in the video stream and cannot
+						# be independently muxed as a subtitle stream — drop them
+						eia_608|eia_708|cea_608|cea_708)
+						echo "drop" ;;
+						# Binary data or unrecognized codec — not a real subtitle stream
+						bin_data|"")
+						echo "drop" ;;
+						# All other codecs (ass, srt, hdmv_pgs_subtitle, dvd_subtitle,
+						# dvb_subtitle, etc.) are MKV-compatible
+						*)
+						echo "copy" ;;
+				esac
+			}
 
 # Get duration of a video file in seconds
 get_video_duration() {
@@ -3226,7 +3308,7 @@ build_ffmpeg_command() {
     fi
 
     # Count audio tracks
-    local num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
+    local num_audio=$(count_streams "$source_file" a)
 
     # Determine preferred audio track
     local preferred_audio_lang=""
@@ -3313,7 +3395,7 @@ build_ffmpeg_command() {
     fi
 
     # Smart subtitle handling with language filtering
-    local num_subs=$(ffprobe -v quiet -select_streams s -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l)
+    local num_subs=$(count_streams "$source_file" s)
 
     # Build subtitle mapping - only include subtitles in our language(s)
     local sub_opts=""
@@ -3409,7 +3491,9 @@ build_ffmpeg_command() {
     fi
 
     FFMPEG_CMD=("${prefix_arr[@]}" ffmpeg -hide_banner -loglevel "$encode_loglevel" -stats)
-    FFMPEG_CMD+=(-analyzeduration "$FFMPEG_ANALYZEDURATION" -probesize "$FFMPEG_PROBESIZE")
+    local probe_args=()
+    get_probe_args "$source_file" probe_args
+    FFMPEG_CMD+=("${probe_args[@]}")
     FFMPEG_CMD+=("${input_arr[@]}" -i "$source_file" -map 0:v:0)
     # The video track needs the default flag for the same reason audio does:
     # ffmpeg carries the source disposition through verbatim, and the matroska
@@ -4625,7 +4709,7 @@ else
 	    IFS='|' read -r default_audio_idx default_audio_lang <<< "$(get_audio_track_info "$source_file" "$preferred_audio_lang")"
 
 	    # Check if default audio needs container-specific PCM conversion
-	    disp_num_audio=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$source_file" 2>/dev/null | wc -l || true)
+	    disp_num_audio=$(count_streams "$source_file" a)
 	    if [[ $disp_num_audio -eq 0 ]]; then
 		    echo -e "${YELLOW}    Audio: none${RESET}"
 	    elif needs_audio_remux "$source_file" "$default_audio_idx"; then

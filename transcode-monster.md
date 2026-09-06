@@ -793,6 +793,43 @@ commentary, original, hearing-impaired — survive.
 
 ## Advanced Options
 
+### Input Probing
+
+Before encoding, ffmpeg scans the head of the input to work out what streams it
+contains. How much it needs to read depends entirely on the container, so the
+script sets two different budgets:
+
+| Container | analyzeduration | probesize |
+|---|---|---|
+| `mpg` `mpeg` `ts` `m2ts` `mts` `m2t` `tp` `trp` `vob` `ps` | 120s | 128 MB |
+| everything else (`mkv` `mp4` `avi` ...) | 10s | 8 MB |
+
+MPEG-PS/TS have no global header. Streams are discovered by scanning, and a
+track can first appear minutes into the file, so a deep probe genuinely earns
+its keep on DVD and broadcast material. Note that probesize is the binding limit
+on high-bitrate sources — 128 MB is roughly 170 seconds of 6 Mbps DVD but only
+about 26 seconds of 40 Mbps Blu-ray — so raise the two together or not at all.
+
+Matroska, MP4 and AVI declare every track in the header. Codec, language,
+disposition and video geometry all resolve immediately no matter what the budget
+is, so a deep probe buys nothing and costs a large read before every encode.
+
+**On the PGS warnings.** Blu-ray rips routinely produce:
+
+```
+Could not find codec parameters for stream 7 (Subtitle: hdmv_pgs_subtitle (pgssub)): unspecified size
+Consider increasing the value for the 'analyzeduration' and 'probesize' options
+```
+
+This is expected and not worth chasing. PGS carries no CodecPrivate in Matroska,
+so the subtitle canvas size exists only inside cue packets — and a sparse
+forced/signs track may not fire its first cue for forty minutes, so no bounded
+probesize will find it. Nothing in the pipeline uses that geometry: PGS is
+stream-copied, and players read the dimensions out of the composition segments at
+render time. The warning appears at any setting; raising the budget only makes it
+appear later and more expensively. Ignore ffmpeg's "Consider increasing" advice
+in this specific case.
+
 ### Process Specific Episodes
 
 ```bash
@@ -938,6 +975,19 @@ Disable automatic crop:
 transcode-monster.sh --no-crop "/path/to/source/"
 ```
 
+### "Stream map '0:a:N' matches no streams" on TS/VOB Sources
+
+Fixed in 1.28.1. ffprobe lists a stream twice on MPEG-TS — once nested under its
+program, once in the top-level stream list — so track counts derived from raw
+output lines doubled on `ts`, `m2ts` and `vob` input, and the phantom count
+became map entries for streams that don't exist. Matroska has no program
+section, so MakeMKV rips never triggered it.
+
+If you're extending the script, note that `-show_entries stream=...` cannot avoid
+this: it matches sections by name, and the nested per-program section is also
+named `stream`. Use `-show_streams` and count `[STREAM]` markers, as
+`count_streams()` does.
+
 ### Hardware Encoding Has Artifacts
 
 Force software encoding:
@@ -1044,6 +1094,12 @@ NICE_LEVEL="10"
 USE_IONICE="true"
 IONICE_CLASS="2"
 IONICE_LEVEL="4"
+
+# Input probing (see "Input Probing" below)
+FFMPEG_ANALYZEDURATION="120000000"        # 2 min  - scanning containers (mpg, ts, m2ts, vob)
+FFMPEG_PROBESIZE="128000000"              # 128 MB - scanning containers
+FFMPEG_ANALYZEDURATION_HEADER="10000000"  # 10 sec - header containers (mkv, mp4, avi)
+FFMPEG_PROBESIZE_HEADER="8000000"         # 8 MB   - header containers
 ```
 
 ## Examples
