@@ -660,24 +660,46 @@ kea_sum_columns() {   # $1 = JSON reply → _KS[column] = sum | huge, _KS_ROWS
 	return 0
 }
 
+# The files Kea itself loads for a lease file, in Kea's order.  Lease-file
+# cleanup compacts the state into BASE.1 and restarts BASE as a fresh journal,
+# so BASE alone misses every lease that hasn't renewed since the last cleanup.
+# A finished-but-unrenamed cleanup (.completed) replaces .1 and .2.
+_LEASE_FILES=()
+lease_file_set() {   # $1 = base path → _LEASE_FILES
+	_LEASE_FILES=()
+	if [[ -r "$1.completed" ]]; then _LEASE_FILES+=("$1.completed")
+	else
+		[[ -r "$1.1" ]] && _LEASE_FILES+=("$1.1")
+		[[ -r "$1.2" ]] && _LEASE_FILES+=("$1.2")
+	fi
+	[[ -r "$1" ]] && _LEASE_FILES+=("$1")
+	return 0
+}
+
 # Lease CSV counts, v4 and v6 alike — the fallback when the socket is unusable.
-# Columns are resolved from the header by name.  The file is an append
-# journal: the LAST row for an address is authoritative.
+# Replays the file set as a journal: the LAST row for an address wins, and a
+# zero valid lifetime is Kea's deletion marker.  Columns are resolved from
+# each file's own header by name.
 # Lease states: 0=assigned  1=declined  2=expired-reclaimed  3=released.
-# Prints "total active expired declined", or "-1 0 0 0" if the header is unusable.
-csv_lease_counts() {
+# Prints "total active expired declined", or "-1 0 0 0" if no header is usable.
+csv_lease_counts() {   # FILE...
 	awk -F, -v now="$_NOW" '
-		NR==1 {
+		FNR==1 {
+			split("", col)
 			for (i = 1; i <= NF; i++) col[$i] = i
-			ca = col["address"]; ce = col["expire"]; cs = col["state"]
+			ca = col["address"]; ce = col["expire"]; cs = col["state"]; cv = col["valid_lifetime"]
+			ct = col["lease_type"]
+			if (ca && ce) usable = 1
 			next
 		}
-		ca && ce && cs && NF >= cs {
-			e[$ca] = $ce + 0        # last row for this address wins
-			s[$ca] = $cs + 0
+		ca && ce && $ca != "" {
+			k = ct ? $ca "/" $ct : $ca
+			if (cv && $cv != "" && $cv + 0 == 0) { delete e[k]; delete s[k]; next }
+			e[k] = $ce + 0
+			s[k] = cs ? $cs + 0 : 0
 		}
 		END {
-			if (!ca) { print "-1 0 0 0"; exit }
+			if (!usable) { print "-1 0 0 0"; exit }
 			for (a in e) {
 				t++
 				if      (s[a] == 1)                             d++
@@ -686,7 +708,7 @@ csv_lease_counts() {
 			}
 			printf "%d %d %d %d\n", t+0, act+0, ex+0, d+0
 		}
-	' "$1"
+	' "$@"
 }
 
 # Assigned of total, utilisation and the free remainder.  Kea reports no
@@ -721,12 +743,13 @@ fmt_csv_line() {   # $1..$4 = total active expired declined
 	_LEASE_LINE="Total: ${FG_BWHITE}${tp}${RESET}   Active: ${FG_BGREEN}${ap}${RESET}   Expired: ${FG_YELLOW}${ep}${RESET}   Declined: ${dc}${dp}${RESET}  ${DIM}(≈ csv)${RESET}"
 }
 
-csv_fallback_line() {   # $1 = csv path → _LEASE_LINE
+csv_fallback_line() {   # $1 = csv base path → _LEASE_LINE
 	local t a e d
-	if [[ ! -r "$1" ]]; then
+	lease_file_set "$1"
+	if (( ${#_LEASE_FILES[@]} == 0 )); then
 		_LEASE_LINE="${FG_YELLOW}socket unavailable · lease file not readable${RESET}"; return
 	fi
-	read -r t a e d <<< "$(csv_lease_counts "$1")"
+	read -r t a e d <<< "$(csv_lease_counts "${_LEASE_FILES[@]}")"
 	[[ "$t" =~ ^-?[0-9]+$ ]] || t=-1
 	if (( t < 0 )); then
 		_LEASE_LINE="${FG_YELLOW}socket unavailable · lease CSV header unrecognised${RESET}"
