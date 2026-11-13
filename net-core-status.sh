@@ -423,7 +423,7 @@ fi
 # ── Box-drawing ───────────────────────────────────────────────────────────────
 BOX_TL='╔'; BOX_TR='╗'; BOX_BL='╚'; BOX_BR='╝'
 BOX_H='═';  BOX_V='║';  BOX_ML='╠'; BOX_MR='╣'
-DIV_H='─';  DIV_ML='├'; DIV_MR='┤'; DASH_H='╌'
+DIV_H='─';  DIV_ML='╟'; DIV_MR='╢'; DASH_H='╌'
 
 B="${FG_BLUE}${BOX_V}${RESET}"
 [[ "$_PLAIN" == "true" ]] && B=''
@@ -438,7 +438,9 @@ repeat_char() {   # fill $2 spaces, substitute each with $1, assign to $3
 }
 
 rebuild_fills() {
-	local fill=$(( INNER_WIDTH - 2 ))
+	# Rules run between the junctions that replace the side borders, so
+	# their fill spans the full inner width, like the top and bottom borders.
+	local fill=$INNER_WIDTH
 	repeat_char "$BOX_H"  "$fill"        _FILL_MID
 	repeat_char "$DIV_H"  "$fill"        _FILL_THIN
 	repeat_char "$DASH_H" "$fill"        _FILL_DASH
@@ -479,7 +481,9 @@ _n() { _LINES+=("$*"); }
 
 # ── Drawing primitives ────────────────────────────────────────────────────────
 
-inner_rule() {   # mid(╠═╣)  thin(├─┤)  dash(├╌┤)
+# Rules replace the side borders with junctions (╠═╣, ╟─╢, ╟╌╢), so they
+# meet the ║ border instead of stopping one column short of it.
+inner_rule() {   # mid(╠═╣)  thin(╟─╢)  dash(╟╌╢)
 	if [[ "$_PLAIN" == "true" ]]; then
 		case "${1:-mid}" in
 			mid)  _n "$_FILL_MID"  ;;
@@ -489,9 +493,9 @@ inner_rule() {   # mid(╠═╣)  thin(├─┤)  dash(├╌┤)
 		return
 	fi
 	case "${1:-mid}" in
-		mid)  _n "${B}${FG_BLUE}${BOX_ML}${_FILL_MID}${BOX_MR}${RESET}${B}"  ;;
-		thin) _n "${B}${FG_BLUE}${DIV_ML}${_FILL_THIN}${DIV_MR}${RESET}${B}" ;;
-		dash) _n "${B}${FG_BLUE}${DIV_ML}${_FILL_DASH}${DIV_MR}${RESET}${B}" ;;
+		mid)  _n "${FG_BLUE}${BOX_ML}${_FILL_MID}${BOX_MR}${RESET}"  ;;
+		thin) _n "${FG_BLUE}${DIV_ML}${_FILL_THIN}${DIV_MR}${RESET}" ;;
+		dash) _n "${FG_BLUE}${DIV_ML}${_FILL_DASH}${DIV_MR}${RESET}" ;;
 	esac
 }
 
