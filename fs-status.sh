@@ -388,7 +388,7 @@ fi
 # ── Box-drawing ───────────────────────────────────────────────────────────────
 BOX_TL='╔'; BOX_TR='╗'; BOX_BL='╚'; BOX_BR='╝'
 BOX_H='═';  BOX_V='║';  BOX_ML='╠'; BOX_MR='╣'
-DIV_H='─';  DIV_ML='├'; DIV_MR='┤'; DASH_H='╌'
+DIV_H='─';  DIV_ML='╟'; DIV_MR='╢'; DASH_H='╌'
 
 B="${FG_BLUE}${BOX_V}${RESET}"
 [[ "$_PLAIN" == "true" ]] && B=''
@@ -404,7 +404,9 @@ repeat_char() {
 }
 
 rebuild_fills() {
-	local fill=$(( INNER_WIDTH - 2 ))
+	# Rules run between the junctions that replace the side borders, so
+	# their fill spans the full inner width, like the top and bottom borders.
+	local fill=$INNER_WIDTH
 	repeat_char "$BOX_H"  "$fill"        _FILL_MID
 	repeat_char "$DIV_H"  "$fill"        _FILL_THIN
 	repeat_char "$DASH_H" "$fill"        _FILL_DASH
@@ -443,10 +445,16 @@ sync_dimensions() {
 declare -a _LINES=()
 _FOOT_START=0
 _n() { _LINES+=("$*"); }
+# Line indices of rules and of two-column rows, so join_dividers can give a
+# │ divider a junction (┬ ┴ ┼, or ╤ ╧ ╪ on double rules) where it meets a rule.
+declare -A _RULE_AT=() _DIV_AT=()
+frame_reset() { _LINES=(); _RULE_AT=(); _DIV_AT=(); }
 
 # ── Drawing primitives ────────────────────────────────────────────────────────
 
-inner_rule() {   # mid(╠═╣)  thin(├─┤)  dash(├╌┤)
+# Rules replace the side borders with junctions (╠═╣, ╟─╢, ╟╌╢), so they
+# meet the ║ border instead of stopping one column short of it.
+inner_rule() {   # mid(╠═╣)  thin(╟─╢)  dash(╟╌╢)
 	if [[ "$_PLAIN" == "true" ]]; then
 		case "${1:-mid}" in
 			mid)  _n "$_FILL_MID"  ;;
@@ -455,10 +463,11 @@ inner_rule() {   # mid(╠═╣)  thin(├─┤)  dash(├╌┤)
 		esac
 		return
 	fi
+	_RULE_AT[${#_LINES[@]}]=${1:-mid}
 	case "${1:-mid}" in
-		mid)  _n "${B}${FG_BLUE}${BOX_ML}${_FILL_MID}${BOX_MR}${RESET}${B}"  ;;
-		thin) _n "${B}${FG_BLUE}${DIV_ML}${_FILL_THIN}${DIV_MR}${RESET}${B}" ;;
-		dash) _n "${B}${FG_BLUE}${DIV_ML}${_FILL_DASH}${DIV_MR}${RESET}${B}" ;;
+		mid)  _n "${FG_BLUE}${BOX_ML}${_FILL_MID}${BOX_MR}${RESET}"  ;;
+		thin) _n "${FG_BLUE}${DIV_ML}${_FILL_THIN}${DIV_MR}${RESET}" ;;
+		dash) _n "${FG_BLUE}${DIV_ML}${_FILL_DASH}${DIV_MR}${RESET}" ;;
 	esac
 }
 
@@ -507,6 +516,7 @@ two_col_row() {
 		[[ -n "$right" ]] && _n "$right"
 		return
 	fi
+	_DIV_AT[${#_LINES[@]}]=1
 	_n "${B} ${left}${RESET}"$'\033[K\033'"[${_MID_COL}G${FG_BLUE}│${RESET} ${right}${RESET}"$'\033[K\033'"[${TERM_WIDTH}G${B}"
 }
 
@@ -522,6 +532,32 @@ fits_two_col() {   # $1 = array name
 		(( _VW <= __half )) || return 1
 	done
 	return 0
+}
+
+# Rebuild each rule that sits directly above or below a two-column row with
+# a junction at the divider column.  The fill is rebuilt with repeat_char
+# rather than sliced, so it stays correct whatever the locale's idea of a
+# character is.
+join_dividers() {
+	[[ "$_PLAIN" == "true" ]] && return
+	local i up dn h l r j a b off=$(( _MID_COL - 2 ))
+	(( off > 0 && off < INNER_WIDTH - 1 )) || return
+	for i in "${!_RULE_AT[@]}"; do
+		up=${_DIV_AT[$(( i - 1 ))]-}; dn=${_DIV_AT[$(( i + 1 ))]-}
+		[[ -n "$up$dn" ]] || continue
+		case "${_RULE_AT[$i]}" in
+			mid)  h=$BOX_H;  l=$BOX_ML; r=$BOX_MR
+			      if [[ -n "$up" && -n "$dn" ]]; then j='╪'; elif [[ -n "$up" ]]; then j='╧'; else j='╤'; fi ;;
+			thin|dash)
+			      [[ "${_RULE_AT[$i]}" == thin ]] && h=$DIV_H || h=$DASH_H
+			      l=$DIV_ML; r=$DIV_MR
+			      if [[ -n "$up" && -n "$dn" ]]; then j='┼'; elif [[ -n "$up" ]]; then j='┴'; else j='┬'; fi ;;
+			*) continue ;;
+		esac
+		repeat_char "$h" "$off" a
+		repeat_char "$h" $(( INNER_WIDTH - off - 1 )) b
+		_LINES[i]="${FG_BLUE}${l}${a}${j}${b}${r}${RESET}"
+	done
 }
 
 # Emit a list of pre-built lines as a two-column grid when they fit, else one per row.
@@ -1946,7 +1982,7 @@ render_network() {
 # =============================================================================
 
 render() {
-	_LINES=()
+	frame_reset
 	_SLOW_SECS=$(( REFRESH_INTERVAL * SMART_INTERVAL_MULT ))
 	local ts nd
 	printf -v ts '%(%A %d %B %Y  %H:%M:%S %Z)T' "$_NOW"
@@ -1965,6 +2001,8 @@ render() {
 	if [[ "$_NFS_PRESENT" == "true" ]];   then render_nfs;   inner_rule mid; fi
 	if [[ "$_SAMBA_PRESENT" == "true" ]]; then render_samba; inner_rule mid; fi
 	render_network
+
+	join_dividers
 
 	# ── Pinned footer ─────────────────────────────────────────────────────────
 	_FOOT_START=${#_LINES[@]}
@@ -2057,7 +2095,7 @@ print_oneshot() {
 
 # Minimal placeholder so the alternate screen is never blank during startup.
 draw_loading() {
-	_LINES=()
+	frame_reset
 	box_blank
 	center_line "${BOLD}${FG_BCYAN}⬡  File Server — Status Dashboard${RESET}"
 	box_blank
